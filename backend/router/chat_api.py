@@ -1676,7 +1676,11 @@ def build_chat_router(
                         else:
                             try:
                                 async with httpx.AsyncClient(
-                                    timeout=25.0, headers=cluster.agent_headers()
+                                    timeout=25.0,
+                                    headers={
+                                        **cluster.agent_headers(),
+                                        "X-Splitch-Router-Approved": "1",
+                                    },
                                 ) as http:
                                     r = await http.post(
                                         f"{exec_node.agent_url}/tools/execute",

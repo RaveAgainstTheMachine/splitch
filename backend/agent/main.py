@@ -1318,13 +1318,29 @@ async def browse_workspace_dirs(subpath: str = "") -> WorkspaceDirListing:
     return await asyncio.to_thread(_list_workspace_dirs, subpath)
 
 
+_MUTATING_WORKSPACE_TOOLS = frozenset({"write_file", "edit_file", "run_command"})
+
+
 @app.post("/tools/execute", response_model=ToolExecResponse)
-async def execute_workspace_tool(req: ToolExecRequest) -> ToolExecResponse:
+async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> ToolExecResponse:
     if not ENABLE_TOOLS:
         raise HTTPException(
             status_code=403,
             detail="Workspace tools are disabled on this node (start with --enable-tools or SPLITCH_ENABLE_TOOLS=1)",
         )
+    if req.tool in _MUTATING_WORKSPACE_TOOLS:
+        has_router_approval = request.headers.get("x-splitch-router-approved", "").strip() == "1"
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        has_valid_token = bool(AGENT_TOKEN and token and hmac.compare_digest(token, AGENT_TOKEN))
+        if not (has_router_approval or has_valid_token):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Direct execution of mutating tool '{req.tool}' requires router approval "
+                    "gate (X-Splitch-Router-Approved) or SPLITCH_AGENT_TOKEN authentication."
+                ),
+            )
     if req.tool != "run_command":
         return await asyncio.to_thread(_exec_fs_tool, req)
 

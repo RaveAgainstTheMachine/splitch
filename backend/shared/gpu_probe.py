@@ -16,6 +16,7 @@ for mixed-vendor multi-GPU hosts so llama-server spans all cards).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import platform
@@ -85,6 +86,7 @@ def classify_vendor(raw_vendor: str | None, name: str = "") -> GpuVendor:
 
 
 async def _run_async(args: list[str], timeout: float = 3.0) -> tuple[int, str]:
+    proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -93,7 +95,12 @@ async def _run_async(args: list[str], timeout: float = 3.0) -> tuple[int, str]:
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return proc.returncode or 0, stdout.decode("utf-8", errors="replace").strip()
-    except (FileNotFoundError, TimeoutError, OSError):
+    except TimeoutError:
+        if proc is not None and proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+        return -1, ""
+    except (FileNotFoundError, OSError):
         return -1, ""
 
 

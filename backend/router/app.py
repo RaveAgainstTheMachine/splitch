@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import time
@@ -150,6 +151,25 @@ def _validate_http_url(raw: str, field_name: str, *, allow_empty: bool = False) 
         raise HTTPException(
             status_code=400, detail=f"{field_name} must be a valid http:// or https:// URL"
         )
+    if parsed.username or parsed.password:
+        raise HTTPException(
+            status_code=400, detail=f"{field_name} must not contain embedded credentials"
+        )
+    host = parsed.hostname.lower()
+    if host in ("metadata.google.internal", "instance-data", "169.254.169.254"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} points to a forbidden cloud metadata or link-local address",
+        )
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{field_name} points to a forbidden link-local, multicast, or unspecified IP",
+            )
+    except ValueError:
+        pass
     return cleaned
 
 

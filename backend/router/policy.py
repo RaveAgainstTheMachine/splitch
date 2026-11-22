@@ -2,12 +2,55 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from backend.router.config import GuardConfig
 from backend.shared.models import AliasConfig, ControlState, NodeStatus
+
+_PARAM_BILLIONS_RE = re.compile(r"(?:^|[^a-z0-9])(\d+(?:\.\d+)?)b(?:-a\d+(?:\.\d+)?b)?(?:[^a-z0-9]|$)", re.IGNORECASE)
+_QUANT_BITS_TABLE: tuple[tuple[str, float], ...] = (
+    ("iq1", 1.75),
+    ("iq2", 2.3),
+    ("q2", 2.7),
+    ("iq3", 3.3),
+    ("q3", 3.6),
+    ("iq4", 4.3),
+    ("q4", 4.65),
+    ("q5", 5.65),
+    ("q6", 6.6),
+    ("q8", 8.5),
+    ("bf16", 16.0),
+    ("f16", 16.0),
+    ("fp16", 16.0),
+)
+
+
+def estimate_model_vram_mb(model_id: str) -> float | None:
+    """
+    Estimate minimum VRAM (MB) required to load `model_id` when parameter count (e.g. `32b`, `70b`)
+    is present in the model identifier. Returns None when parameter count cannot be inferred.
+    """
+    m = _PARAM_BILLIONS_RE.search(model_id or "")
+    if not m:
+        return None
+    try:
+        params_b = float(m.group(1))
+    except ValueError:
+        return None
+    if params_b <= 0 or params_b > 2000:
+        return None
+    lower = model_id.lower()
+    bpw = 4.65  # default Q4_K_M assumption when no quant suffix is present
+    for token, bits in _QUANT_BITS_TABLE:
+        if token in lower:
+            bpw = bits
+            break
+    weights_gb = (params_b * bpw) / 8.0
+    # Add ~12% runtime + KV cache minimum overhead
+    return round(weights_gb * 1.12 * 1024.0, 1)
 
 
 @dataclass(frozen=True)
@@ -74,10 +117,14 @@ def check_node_eligibility(
     target_model: str,
     control: ControlState,
     guards: GuardConfig,
+    *,
+    exclude_nodes: set[str] | None = None,
 ) -> str | None:
     """Returns None if eligible, or a concise machine-readable block reason."""
     if node is None:
         return "node_unknown"
+    if exclude_nodes and node.node_id in exclude_nodes:
+        return f"{node.node_id}_upstream_error"
     if not node.online or node.telemetry is None:
         return f"{node.node_id}_offline"
     if not node.telemetry.engine_healthy:
@@ -98,8 +145,11 @@ def check_node_eligibility(
             return f"{node.node_id}_gpu_busy"
         if node.yield_on_gaming and node.yield_until_ts > time.time():
             return f"{node.node_id}_gpu_cooldown"
-        if not model_loaded and vram_total > 0 and vram_free < guards.min_vram_free_mb:
-            return f"{node.node_id}_vram_low"
+        if not model_loaded and vram_total > 0:
+            est_vram_mb = estimate_model_vram_mb(target_model) or 0.0
+            required_free_mb = max(float(guards.min_vram_free_mb), est_vram_mb)
+            if vram_free < required_free_mb:
+                return f"{node.node_id}_vram_low"
 
     if not t.storage_mounted:
         return f"{node.node_id}_storage_unmounted"
@@ -135,6 +185,7 @@ def resolve_route(
     control: ControlState,
     guards: GuardConfig,
     heavy_char_threshold: int = 12000,
+    exclude_nodes: set[str] | None = None,
 ) -> tuple[RouteDecision | None, list[str]]:
     """
     Resolve target (node, model) for an incoming OpenAI/infill request.
@@ -148,7 +199,9 @@ def resolve_route(
         prefix, real_model = req.split("/", 1)
         if prefix in nodes:
             node = nodes[prefix]
-            block = check_node_eligibility(node, real_model, control, guards)
+            block = check_node_eligibility(
+                node, real_model, control, guards, exclude_nodes=exclude_nodes
+            )
             if block is None:
                 return RouteDecision(node=node, target_model=real_model, requested_model=req), reasons
             reasons.append(f"{prefix}:{block}")
@@ -165,7 +218,7 @@ def resolve_route(
     if alias_cfg is not None:
         primary_node = nodes.get(alias_cfg.primary_node)
         primary_block = check_node_eligibility(
-            primary_node, alias_cfg.primary_model, control, guards
+            primary_node, alias_cfg.primary_model, control, guards, exclude_nodes=exclude_nodes
         )
         if primary_block is None and primary_node is not None:
             return (
@@ -180,7 +233,9 @@ def resolve_route(
 
         if alias_cfg.fallback_node and alias_cfg.fallback_model:
             fb_node = nodes.get(alias_cfg.fallback_node)
-            fb_block = check_node_eligibility(fb_node, alias_cfg.fallback_model, control, guards)
+            fb_block = check_node_eligibility(
+                fb_node, alias_cfg.fallback_model, control, guards, exclude_nodes=exclude_nodes
+            )
             if fb_block is None and fb_node is not None:
                 return (
                     RouteDecision(
@@ -197,7 +252,7 @@ def resolve_route(
     # 3. Direct model ID lookup across online nodes (prefer loaded, lowest in_flight)
     direct_candidates: list[tuple[int, int, NodeStatus]] = []
     for node in nodes.values():
-        block = check_node_eligibility(node, req, control, guards)
+        block = check_node_eligibility(node, req, control, guards, exclude_nodes=exclude_nodes)
         if block is not None:
             reasons.append(f"{node.node_id}:{block}")
             continue
@@ -214,7 +269,9 @@ def resolve_route(
 
     # 4. Zero-config / auto fallback when no aliases are configured: pick first loaded model on eligible node
     eligible_any = [
-        n for n in nodes.values() if check_node_eligibility(n, req, control, guards) is None
+        n
+        for n in nodes.values()
+        if check_node_eligibility(n, req, control, guards, exclude_nodes=exclude_nodes) is None
     ]
     if eligible_any:
         eligible_any.sort(key=lambda n: n.in_flight)

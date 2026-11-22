@@ -119,24 +119,67 @@ async def forward_inference(
             },
         )
 
-    outbound_body = dict(body)
-    outbound_body["model"] = decision.target_model
-    target_url = f"{decision.node.engine_url}{endpoint}"
     upstream_headers = _upstream_passthrough_headers(request)
-    extra_headers = _splitch_headers(decision)
     trace_id = uuid.uuid4().hex[:10]
     started = time.perf_counter()
 
+    def _try_fallback_decision(failed_node_id: str) -> RouteDecision | None:
+        fb_dec, _ = resolve_route(
+            endpoint=endpoint,
+            requested_model=requested_model,
+            body=body,
+            nodes=state.nodes,
+            aliases=state.aliases,
+            control=state.control,
+            guards=state.config.guards,
+            heavy_char_threshold=state.config.router.auto_heavy_char_threshold,
+            exclude_nodes={failed_node_id},
+        )
+        return fb_dec
+
     if is_stream:
-        decision.node.in_flight += 1
         client = state.proxy_client
+        decision.node.in_flight += 1
+        outbound_body = {**body, "model": decision.target_model}
+        target_url = f"{decision.node.engine_url}{endpoint}"
         req_obj = client.build_request(
             "POST", target_url, json=outbound_body, headers=upstream_headers or None
         )
+        upstream: httpx.Response | None = None
+        last_exc: httpx.HTTPError | None = None
         try:
             upstream = await client.send(req_obj, stream=True)
+            if upstream.status_code in (502, 503, 504):
+                fb_decision = _try_fallback_decision(decision.node.node_id)
+                if fb_decision is not None:
+                    await upstream.aclose()
+                    decision.node.in_flight = max(0, decision.node.in_flight - 1)
+                    decision = fb_decision
+                    decision.node.in_flight += 1
+                    outbound_body = {**body, "model": decision.target_model}
+                    target_url = f"{decision.node.engine_url}{endpoint}"
+                    req_obj = client.build_request(
+                        "POST", target_url, json=outbound_body, headers=upstream_headers or None
+                    )
+                    upstream = await client.send(req_obj, stream=True)
         except httpx.HTTPError as exc:
+            last_exc = exc
             decision.node.in_flight = max(0, decision.node.in_flight - 1)
+            fb_decision = _try_fallback_decision(decision.node.node_id)
+            if fb_decision is not None:
+                decision = fb_decision
+                decision.node.in_flight += 1
+                outbound_body = {**body, "model": decision.target_model}
+                target_url = f"{decision.node.engine_url}{endpoint}"
+                req_obj = client.build_request(
+                    "POST", target_url, json=outbound_body, headers=upstream_headers or None
+                )
+                try:
+                    upstream = await client.send(req_obj, stream=True)
+                except httpx.HTTPError as fb_exc:
+                    decision.node.in_flight = max(0, decision.node.in_flight - 1)
+                    last_exc = fb_exc
+        if upstream is None:
             elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
             asyncio.create_task(
                 state.record_trace(
@@ -151,11 +194,15 @@ async def forward_inference(
                         status_code=502,
                         stream=True,
                         duration_ms=elapsed_ms,
-                        error=str(exc),
+                        error=str(last_exc),
                     )
                 )
             )
-            raise HTTPException(status_code=502, detail=f"Upstream node error: {exc}") from exc
+            raise HTTPException(
+                status_code=502, detail=f"Upstream node error: {last_exc}"
+            ) from last_exc
+
+        extra_headers = _splitch_headers(decision)
 
         async def _stream_body() -> AsyncGenerator[bytes, None]:
             ttft_ms: float | None = None
@@ -211,12 +258,40 @@ async def forward_inference(
             headers=stream_headers,
         )
 
-    # Non-streaming request
+    # Non-streaming request (with automatic pre-response fallback retry on connection error / 502-504)
     decision.node.in_flight += 1
     try:
-        upstream = await state.proxy_client.post(
-            target_url, json=outbound_body, headers=upstream_headers or None
-        )
+        outbound_body = {**body, "model": decision.target_model}
+        target_url = f"{decision.node.engine_url}{endpoint}"
+        try:
+            upstream = await state.proxy_client.post(
+                target_url, json=outbound_body, headers=upstream_headers or None
+            )
+            if upstream.status_code in (502, 503, 504):
+                fb_decision = _try_fallback_decision(decision.node.node_id)
+                if fb_decision is not None:
+                    decision.node.in_flight = max(0, decision.node.in_flight - 1)
+                    decision = fb_decision
+                    decision.node.in_flight += 1
+                    outbound_body = {**body, "model": decision.target_model}
+                    target_url = f"{decision.node.engine_url}{endpoint}"
+                    upstream = await state.proxy_client.post(
+                        target_url, json=outbound_body, headers=upstream_headers or None
+                    )
+        except httpx.HTTPError:
+            fb_decision = _try_fallback_decision(decision.node.node_id)
+            if fb_decision is None:
+                raise
+            decision.node.in_flight = max(0, decision.node.in_flight - 1)
+            decision = fb_decision
+            decision.node.in_flight += 1
+            outbound_body = {**body, "model": decision.target_model}
+            target_url = f"{decision.node.engine_url}{endpoint}"
+            upstream = await state.proxy_client.post(
+                target_url, json=outbound_body, headers=upstream_headers or None
+            )
+
+        extra_headers = _splitch_headers(decision)
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
         comp_tokens = 0
         tps: float | None = None

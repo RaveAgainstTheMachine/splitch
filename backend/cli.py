@@ -642,7 +642,11 @@ def main() -> None:
             )
 
     p_up = sub.add_parser("up", help="Start local agent + router + dashboard in one command")
-    p_up.add_argument("--host", default="0.0.0.0")
+    p_up.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Router bind address (default: 127.0.0.1; pass 0.0.0.0 to expose on LAN)",
+    )
     p_up.add_argument("--port", type=int, default=8080)
     p_up.add_argument("--agent-port", type=int, default=8090)
     p_up.add_argument("--engine-url", default=None, help="Inference backend URL (auto-detected if omitted)")

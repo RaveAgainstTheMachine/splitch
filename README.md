@@ -5,7 +5,9 @@
 <h1 align="center">Splitch</h1>
 
 <p align="center">
-  <strong>Hardware-aware multi-node local AI router, Gaming-Mode GPU yielder, and unified Model / MCP / Skills / Agent control plane.</strong>
+  <strong>Your hardware. One AI cluster.</strong><br />
+  Turn your existing computers into a unified, intelligent local AI infrastructure. Route models, automatically yield GPUs when gaming, run coding agents, and generate media — all under your control.<br />
+  <em>One cluster. Any hardware. Your AI.</em>
 </p>
 
 <p align="center">
@@ -17,6 +19,7 @@
 </p>
 
 <p align="center">
+  <a href="#core-pillars">Core Pillars</a> •
   <a href="#quickstart">Quickstart</a> •
   <a href="#screenshots">Screenshots</a> •
   <a href="#examples">Examples</a> •
@@ -27,9 +30,17 @@
 
 ---
 
-**Splitch** (*split + switch*) turns any combination of local machines — a gaming desktop GPU, an always-on Apple Silicon Mac, a Linux server, or a single laptop — into one OpenAI-compatible `/v1` endpoint with live VRAM/RAM telemetry, automatic GPU preemption when you game or render, and a built-in Agent Chat & tool control plane.
+<a id="core-pillars"></a>
 
-## Why Splitch?
+## Core Pillars
+
+1. **Turn Multiple Computers into One Local AI Cluster:** Combine an NVIDIA gaming desktop, an AMD compute workstation, an Apple Silicon Mac, and an always-on Linux server behind one hardware-aware router. Start on a single machine with `splitch up` and add nodes anytime without changing client URLs.
+2. **Your AI Uses Your GPU When Idle — Your Games Get It Back Instantly:** Live GPU process telemetry (`nvidia-smi pmon`, ROCm, Vulkan) detects when a 3D game or creative app launches and transparently fails over requests to your standby node with zero dropped streams.
+3. **Give All Your AI Tools One Unified Endpoint:** Point **Claude Code** (`/v1/messages`), **OpenCode**, **Codex CLI**, **Aider**, **Zed**, **Continue**, or any OpenAI SDK (`/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, `/infill`) at Splitch — or work directly inside the built-in **3-Column Agent Chat IDE** and **Media Studio**.
+
+---
+
+## Key Capabilities
 
 - **Multi-GPU & Heterogeneous GPU Support + Auto-Yield:** Probes all GPUs across vendors in parallel (`nvidia-smi` + per-GPU `pmon`, AMD `rocm-smi`, Intel `xpu-smi`, Linux DRM sysfs, Vulkan, Apple Silicon, Windows CIM), deduplicates by PCI bus ID, auto-selects **Vulkan** for mixed-vendor rigs (e.g. NVIDIA + AMD or NVIDIA + Intel) and `cuda`/`rocm` for homogeneous rigs, displays per-GPU VRAM subgrid rows + single- vs multi-GPU model fit badges, and supports `yield_gpu_indices` so gaming on GPU 0 doesn't yield a dedicated compute GPU 1.
 - **Settings Modal, Connect Clients & Click-to-Install Node Provisioner:** Click the topbar endpoint URL or gear icon to configure routing/guard thresholds live (`settings.json`), copy or push CLI/IDE configs (`Hermes`, `Claude Code`, `Codex CLI`, `OpenCode`, `Aider`, `Zed`) directly to online nodes, run live `/v1/*` protocol probes, and install new cluster nodes directly via **SSH Push** (live SSE `[1/7]`–`[7/7]` progress) or **Self-Hosted `/install.sh` + Single-Use Join Tokens**.
