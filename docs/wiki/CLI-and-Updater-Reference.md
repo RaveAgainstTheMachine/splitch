@@ -30,7 +30,10 @@ Re-running the installer on an existing machine updates Splitch in place without
 | `--repo <url>` | `-Repo <url>` | `SPLITCH_REPO` | GitHub repo URL | Source git repository URL |
 | `--branch <name>` | `-Branch <name>` | `SPLITCH_BRANCH` | `main` | Git branch or ref to track |
 | `--python <ver>` | `-Python <ver>` | `SPLITCH_PYTHON` | `3.12` | Python version managed by `uv` |
-| `--uninstall` | `-Uninstall` | — | — | Remove CLI shims, managed app, managed Node & managed engine |
+| `--no-desktop` | `-NoDesktop` | `SPLITCH_NO_DESKTOP=1` | `0` | Skip Desktop / Application Menu shortcuts and system tray dependencies |
+| `--join <url>` | `-Join <url>` | `SPLITCH_JOIN_URL` | *(none)* | Auto-register installed agent with a cluster router |
+| `--join-token <tok>` | `-JoinToken <tok>` | `SPLITCH_JOIN_TOKEN` | *(none)* | Single-use `spj_*` join token for `--join` |
+| `--uninstall` | `-Uninstall` | — | — | Stop services/tray and remove CLI shims, shortcuts, managed app & engines |
 | `--purge` | `-Purge` | — | — | With uninstall, also erase user chats, skills, and models |
 
 ---
@@ -166,6 +169,27 @@ splitch update --agent-only              # skip UI rebuild on headless worker no
 splitch update --rebuild-ui              # force dashboard rebuild even if unchanged
 splitch update --no-restart              # skip automatic systemd / launchd restart
 splitch update --branch main --force     # override branch or bypass dirty-tree guard
+```
+
+### `splitch launch`, `splitch tray`, `splitch stop` & `splitch desktop` — Desktop Launcher & Universal System Tray
+
+Splitch includes native OS desktop integration and a zero-polling (`/ws/status` WebSocket) system tray across Linux (StatusNotifierItem + `com.canonical.dbusmenu` for Wayland/X11 compositors + `pystray` XEmbed fallback), macOS (`NSStatusBar`), and Windows (`Shell_NotifyIcon`):
+
+```bash
+# Start Splitch if offline (systemd user service or detached router), start system tray, and open Web UI
+splitch launch [--url http://localhost:8080] [--no-tray] [--no-browser]
+
+# Run the system tray icon daemon (foreground or --detach)
+splitch tray [--url http://localhost:8080] [--detach]
+
+# Gracefully stop managed Splitch router/agent processes and system tray
+splitch stop [--keep-tray]
+
+# Install, inspect, or remove Application Menu / Start Menu / Desktop shortcuts & login autostart
+splitch desktop install [--autostart] [--no-desktop-icon] [--url http://localhost:8080] [--mode local|remote] [--service splitch-agent.service]
+splitch desktop status [--json]
+splitch desktop check-updates
+splitch desktop uninstall
 ```
 
 ### `splitch version`

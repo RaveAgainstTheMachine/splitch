@@ -49,14 +49,13 @@ Local models typically run 8k–32k `n_ctx`; multi-round tool calls fill context
 
 ---
 
-## 3. Inline Sandboxed Preview ("Run in Place")
+## 3. Contextual Right Split Artifact Pane ("Run in Place")
 
-Whenever the model outputs a runnable **`html`**, **`htm`**, or **`svg`** fenced code block — or writes an `.html` / `.svg` file via `write_file` — Splitch renders an inline preview toolbar directly beneath the block:
+Whenever the model outputs a runnable **`html`**, **`htm`**, or **`svg`** fenced code block — or writes an `.html` / `.svg` file via `write_file` — Splitch renders a clickable inline artifact chip (`gpu-telemetry-card.html • Click to inspect`), and any fenced code block includes a **Split Pane** button:
 
-- **Run HTML / Run SVG:** Executes the code live inside an isolated `<iframe sandbox="allow-scripts">` right inside the chat thread (try asking: *"Build a single-file HTML/JS Hangman game"*).
-- **Reload:** Cleanly resets the sandbox state and clears logs.
-- **Fullscreen:** Opens the live preview inside a large native `<dialog>` modal.
-- **Console (N):** Captures `console.log`, `console.warn`, `console.error`, runtime exceptions, and unhandled promise rejections from inside the sandbox.
+- **Contextual 3rd-Column Split Inspector:** Clicking an artifact chip opens the right-hand **Artifact Split Pane** (`Preview | Code | Console (N)`) with a draggable vertical resize splitter (automatically collapsing the left conversation sidebar on viewports `< 1380px`).
+- **Preview / Code / Console Tabs:** Run interactive HTML/CSS/JS/SVG inside an isolated `<iframe sandbox="allow-scripts">`, inspect raw source code, or monitor captured `console.log`/`warn`/`error` output and runtime exceptions.
+- **Reload, Copy & Expand:** Reset sandbox state, copy source code, or expand the preview into a fullscreen native `<dialog>` modal.
 
 > **Security:** Preview iframes never receive `allow-same-origin`, enforce `connect-src 'none'` via CSP (no access to Splitch's API or local network), send `referrerPolicy="no-referrer"`, disable focus-stealing (`focus-without-user-activation 'none'`), and validate `postMessage` frames via opaque origin pinning (`Origin.from(event)` / `event.source`).
 

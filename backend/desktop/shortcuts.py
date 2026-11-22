@@ -142,11 +142,11 @@ def _xdg_desktop_dir() -> Path:
 
 
 def _detect_local_user_service() -> str:
-    """Detect existing local systemd user unit for Splitch/Hydrogen if present."""
+    """Detect existing local systemd user unit for Splitch if present."""
     if not sys.platform.startswith("linux") or not shutil.which("systemctl"):
         return ""
     unit_dir = Path.home() / ".config" / "systemd" / "user"
-    for name in ("splitch-router.service", "splitch-agent.service", "hydrogen-agent.service"):
+    for name in ("splitch-router.service", "splitch-agent.service", "splitch-llama.service"):
         if (unit_dir / name).is_file():
             return name
     return ""

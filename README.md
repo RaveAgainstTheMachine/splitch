@@ -39,14 +39,16 @@
   - Built-in **Media Engine Manager** installs `stable-diffusion.cpp` (`sd-server`), pulls checkpoints (`SDXL Turbo`, `SDXL 1.0`, `SD 1.5`), and starts/stops `sd-server` from the browser — or auto-detects **ComfyUI** (`:8188`) for Wan 2.1/2.2 & LTX-Video.
   - **Auto-Evict LLM VRAM:** Automatically unloads GPU LLMs before dispatching diffusion/video jobs to prevent VRAM OOMs.
   - Exposes OpenAI-compatible **`/v1/images/generations`**, **`/v1/videos/generations`**, persistent gallery with lightbox viewer, and inline `generate_image` / `generate_video` tools in Agent Chat.
-- **Built-In Agent Chat Workspace:**
-  - Multi-thread SQLite persistence with **Pinned Chats**, **Multi-Select Bulk Delete** (with `Shift+Click` range select), and a **Recoverable Trash Bin**.
-  - **Context Progress Ring** with **Non-Destructive Auto-Compact** (triggers at 80% active context) and **Manual Compact** — summarizes older turns for the model while keeping your entire original conversation intact.
-  - **Inline Sandboxed Preview ("Run in Place"):** Run model-generated HTML/CSS/JS/SVG apps directly inside an isolated `<iframe sandbox="allow-scripts">` with Reload, Fullscreen modal, and Console/Error capture.
+- **Desktop Icon, App/Start Menu Launcher & Universal System Tray:** Auto-installs native desktop shortcuts (`~/.local/share/applications/splitch.desktop` + `~/Desktop/splitch.desktop` on Linux, `~/Applications/Splitch.app` on macOS, Start Menu & Desktop `.lnk` on Windows) and an event-driven `/ws/status` system tray supporting Wayland & X11 Linux compositors (`org.kde.StatusNotifierItem` + `com.canonical.dbusmenu` for KDE Plasma, Hyprland/Sway/Waybar, GNOME AppIndicator, COSMIC, XFCE, Cinnamon, MATE, LXQt, plus `pystray` XEmbed fallback for i3/dwm/openbox) as well as macOS & Windows.
+- **Built-In 3-Column Agent Chat IDE Workspace:**
+  - Single unified top bar (`49px`), collapsible conversation rail with active amber indicator, Pinned Chats, Multi-Select Bulk Delete (`Shift+Click` range select), and Recoverable Trash Bin.
+  - Slim pill toolbar (`⚡ Model`, `🖥 Node/VRAM`, `📁 Workspace`, native `Tools` and `Auto-Approve` switches) and borderless message flow with inline telemetry (`Node • TTFT • t/s • Model`).
+  - **Contextual Right Split Artifact Pane (`Preview | Code | Console`):** Click any runnable HTML/SVG artifact chip (`file.html • Click to inspect`) or code block `Split Pane` button to inspect live sandboxed previews side-by-side with a draggable resize splitter.
+  - **Context Progress Ring** with **Non-Destructive Auto-Compact** (triggers at 80% active context) and **Manual Compact** inside the `Context & Memory` dialog.
   - **Workspace Tools + Web Search + Scoped Extensions:** Opt-in sandboxed filesystem & shell tools with inline **Allow / Deny** HITL approval cards, unified diffs, visual **Workspace Folder Browser**, **Web Search** toggle, and 3-tier **Global / Project (Workspace) / Per-Chat** Skills & MCP scopes.
   - **Hardened Optional Login & Privacy:** Web UI `SPLITCH_API_KEY` Unlock modal (`HttpOnly` / `SameSite=Strict` HMAC cookie), `0600` DB/MCP/media files, and External MCP Data Egress advisories + HITL approval gates.
 - **Unified Model, MCP & Skills Control Plane:**
-  - **Models & Aliases:** Search Hugging Face GGUFs with live per-node VRAM/RAM fit badges, stream downloads straight to any node's storage disk, and hot-reload logical aliases (`auto`, `heavy`, `fast`, `fim`, `embed`).
+  - **Models & Aliases:** Search Hugging Face GGUFs as full-width horizontal slices with per-Node and per-GPU hardware-fit switch (`Only show models that fit`), click any result to expand its **Hugging Face Model Description** and full-width horizontal GGUF quantization slices inline, stream downloads straight to any node's disk, and hot-reload logical aliases (`auto`, `heavy`, `fast`, `fim`, `embed`).
   - **Local-First MCP Servers:** Prioritizes local `stdio` installations (`Graphify AST Graph`, `Filesystem`, `Git`, `SQLite`, `Playwright`) over remote HTTP/SSE endpoints, flags external data egress, supports Official Registry / npm search, Paste JSON import, guided Python MCP builder, and OpenCode / Zed sync.
   - **Skills Library:** Live `skills.sh` discovery, GitHub `SKILL.md` import, global/project scope assignment, inline editor, and manifest-tracked multi-node sync.
 
@@ -56,10 +58,10 @@
 
 <p align="center">
   <a href="docs/assets/screenshots/chat-preview.png">
-    <img src="docs/assets/screenshots/chat-preview.png" alt="Splitch Agent Chat with Inline Sandboxed Preview" width="100%" />
+    <img src="docs/assets/screenshots/chat-preview.png" alt="Splitch 3-Column Agent Chat IDE with Split Artifact Preview" width="100%" />
   </a>
   <br />
-  <strong>Agent Chat</strong> — <sub>Inline sandboxed HTML/SVG previews, thinking drawer, pinned threads, web search &amp; non-destructive auto-compact · <em>click any preview for full resolution</em></sub>
+  <strong>Agent Chat IDE</strong> — <sub>Unified top bar, collapsible sidebar, slim pill toolbar, inline artifact chips &amp; side-by-side sandboxed <code>Preview | Code | Console</code> split pane · <em>click any preview for full resolution</em></sub>
 </p>
 
 <table>
@@ -91,7 +93,7 @@
       <br />
       <strong>Models &amp; Aliases</strong>
       <br />
-      <sub>Hugging Face GGUF search, live per-node VRAM fit badges, direct pulls &amp; hot-reload aliases.</sub>
+      <sub>Full-width horizontal repo &amp; GGUF slices, per-Node/GPU hardware-fit switch, inline Hugging Face model descriptions &amp; hot-reload aliases.</sub>
     </td>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/mcp-servers.png">

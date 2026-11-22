@@ -119,8 +119,9 @@ curl -X POST "http://localhost:8080/api/chat/conversations/<conv_id>/compact?kee
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/models/search?q=...&sort=downloads&direction=-1` | Search Hugging Face GGUF repositories. |
-| `GET` | `/api/models/files?repo_id=...&node_id=...` | List GGUF files in repo with per-node hardware fit estimates. |
+| `GET` | `/api/models/search?q=...&sort=downloads&direction=-1` | Search Hugging Face GGUF repositories (with `parameters_b`, `architecture`, `context_length`, `est_min_gb`, `est_q4_gb`, and `fits_nodes`). |
+| `GET` | `/api/models/details?repo_id=...` | Fetch cleaned Hugging Face `README.md` description, `base_model`, `architecture`, `context_length`, `parameters_b`, and per-node/multi-GPU GGUF file list concurrently. |
+| `GET` | `/api/models/files?repo_id=...` | List GGUF files in repo with per-node and multi-GPU hardware fit estimates. |
 | `GET` | `/api/models/inventory` | Aggregate on-disk GGUF inventory and active download jobs across online nodes. |
 | `POST` | `/api/models/pull` | Start streaming GGUF download on target node (`node_id`, `repo_id`, `filename`). |
 | `DELETE` | `/api/models/{node_id}/{filename}` | Delete a managed GGUF file from a node. |

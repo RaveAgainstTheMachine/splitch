@@ -8,11 +8,12 @@ Beyond routing and Agent Chat, Splitch provides a unified management plane acros
 
 ![Splitch Models and Aliases](../assets/screenshots/models.png)
 
-### Hugging Face GGUF Discovery & Live Fit Badges
-1. Pick a **Target Node** in the **Models & Aliases** tab.
-2. Search Hugging Face (e.g., `Qwen3-Coder`, `Llama-3.3`, `Gemma-3`) sorted by downloads, likes, or recency.
-3. Expand any repository to inspect every `.gguf` quantization alongside a **live hardware fit badge** computed from that node's actual VRAM / unified memory budget (`Fits comfortably`, `Tight fit`, or `Exceeds VRAM`).
-4. Click **Pull to Node** to stream the GGUF directly into the target node's `SPLITCH_STORAGE_PATH` with real-time progress bars.
+### Hugging Face GGUF Discovery, Fit Switch & Inline Model Cards
+1. Pick a **Target Node** (and specific **GPU** on multi-GPU nodes, or `All GPUs`) in the **Models & Aliases** tab.
+2. Toggle **`Only show models that fit (≤ XX.X GB)`** (`<input type="checkbox" switch>`) to filter both search result repositories and expanded GGUF files to those that fit within the selected GPU or node memory budget.
+3. Search Hugging Face (e.g., `Qwen3-Coder`, `Llama-3.3`, `Gemma-3`) — results render as **full-width horizontal slices** displaying parameter count, estimated minimum GGUF size, fit badge, context length, capabilities, downloads, likes, and recency.
+4. Click any repository slice to expand an inline drawer showing the cleaned **Hugging Face Model Description** (`README.md` excerpt + `Base`, `Arch`, `Context`, `Params` metadata pills) above **full-width horizontal GGUF quantization slices** with single-GPU vs `Multi-GPU` fit badges.
+5. Click **Pull → `<node>`** to stream the GGUF directly into the target node's `SPLITCH_STORAGE_PATH` with real-time progress bars.
 
 ### On-Disk Inventory & Load/Unload
 - View every `.gguf` stored across online nodes, check file sizes, or delete unused managed models (with confirmation dialog).

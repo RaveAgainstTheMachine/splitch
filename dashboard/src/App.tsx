@@ -10,7 +10,6 @@ import {
   MessageSquare,
   Plus,
   Power,
-  RefreshCw,
   Server,
   Settings,
   Sparkles,
@@ -392,34 +391,84 @@ export default function App() {
   };
 
   const control = snapshot?.control ?? { gaming_mode: false, force_node: "auto" };
-  const apiEndpoint = `${window.location.origin}/v1`;
+  const hostLabel = window.location.host || "localhost:8080";
 
   return (
-    <div className="shell">
+    <div className={`shell ${activeTab === "chat" ? "shell--ide" : ""}`}>
       <header className="topbar">
         <div className="brand">
-          <SplitchLogo size={32} />
+          <SplitchLogo size={26} />
           <h1>SPLITCH</h1>
+        </div>
+
+        <div
+          className="tablist topbar__tabs"
+          role="tablist"
+          aria-label="Splitch workspace sections"
+          {...({ focusgroup: "tablist nomemory" } as Record<string, string>)}
+        >
+          {(
+            [
+              { id: "chat", label: "Agent Chat", icon: MessageSquare, dividerAfter: false },
+              { id: "media", label: "Media Studio", icon: Sparkles, dividerAfter: true },
+              { id: "overview", label: "Overview", icon: Activity, dividerAfter: false },
+              { id: "models", label: "Models & Aliases", icon: Layers, dividerAfter: false },
+              { id: "mcp", label: "MCP Servers", icon: Wrench, dividerAfter: false },
+              { id: "skills", label: "Skills Library", icon: BookOpen, dividerAfter: false }
+            ] as const
+          ).map(({ id, label, icon: Icon, dividerAfter }) => {
+            const selected = activeTab === id;
+            return (
+              <button
+                key={id}
+                ref={(el) => {
+                  tabRefs.current[id] = el;
+                }}
+                type="button"
+                role="tab"
+                id={tabIds[id]}
+                className={dividerAfter ? "tab--divider-after" : undefined}
+                aria-selected={selected}
+                tabIndex={selected ? 0 : -1}
+                {...(selected ? ({ focusgroupstart: "" } as Record<string, string>) : {})}
+                onClick={() => selectTab(id)}
+                onKeyDown={(e) => handleTabKeyDown(e, id)}
+              >
+                <Icon size={13} aria-hidden="true" />
+                <span>{label}</span>
+              </button>
+            );
+          })}
         </div>
 
         <div className="topbar__meta">
           <button
             type="button"
-            className="endpoint-pill endpoint-pill--btn"
+            className={`endpoint-pill endpoint-pill--btn status-pill ${
+              wsConnected ? "status-pill--ok" : "status-pill--warn"
+            }`}
             onClick={() => openSettings("clients")}
-            title="Connect CLI agents, IDEs & SDKs"
+            title="Connect CLI agents, IDEs & SDKs (/v1)"
           >
-            <code>{apiEndpoint}</code>
+            <span className="status-pill__dot" aria-hidden="true" />
+            <strong className="status-pill__state">
+              {wsConnected ? "LIVE" : "RECONNECTING"}
+            </strong>
+            <span className="status-pill__host">
+              <span className="status-pill__sep">•</span>
+              <code>{hostLabel}</code>
+            </span>
+            {snapshot && (
+              <span className="status-pill__uptime">
+                <span className="status-pill__sep">•</span>
+                <span>{fmtUptime(snapshot.uptime_s)}</span>
+              </span>
+            )}
           </button>
-          <span className={`pill ${wsConnected ? "pill--ok" : "pill--warn"}`}>
-            <Activity size={12} aria-hidden="true" />
-            {wsConnected ? "LIVE" : "RECONNECTING"}
-          </span>
-          {snapshot && <span className="pill">UP {fmtUptime(snapshot.uptime_s)}</span>}
           {authStatus.auth_required && authStatus.authenticated && (
             <button
               type="button"
-              className="btn btn--ghost"
+              className="btn btn--ghost topbar__icon-btn"
               onClick={() => void logoutSession()}
               title="Lock session (log out)"
               aria-label="Lock session"
@@ -429,20 +478,12 @@ export default function App() {
           )}
           <button
             type="button"
-            className="btn btn--ghost"
+            className="btn btn--ghost topbar__icon-btn"
             onClick={() => openSettings("clients")}
             aria-label="Settings"
             title="Settings"
           >
-            <Settings size={14} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            onClick={fetchStatus}
-            aria-label="Refresh cluster telemetry"
-          >
-            <RefreshCw size={14} aria-hidden="true" />
+            <Settings size={15} aria-hidden="true" />
           </button>
         </div>
       </header>
@@ -454,45 +495,6 @@ export default function App() {
       )}
 
       <div className="tabs">
-        <div
-          className="tablist"
-          role="tablist"
-          aria-label="Splitch workspace sections"
-          {...({ focusgroup: "tablist nomemory" } as Record<string, string>)}
-        >
-          {(
-            [
-              { id: "chat", label: "Agent Chat", icon: MessageSquare },
-              { id: "media", label: "Media Studio", icon: Sparkles },
-              { id: "overview", label: "Overview", icon: Activity },
-              { id: "models", label: "Models & Aliases", icon: Layers },
-              { id: "mcp", label: "MCP Servers", icon: Wrench },
-              { id: "skills", label: "Skills Library", icon: BookOpen }
-            ] as const
-          ).map(({ id, label, icon: Icon }) => {
-            const selected = activeTab === id;
-            return (
-              <button
-                key={id}
-                ref={(el) => {
-                  tabRefs.current[id] = el;
-                }}
-                type="button"
-                role="tab"
-                id={tabIds[id]}
-                aria-selected={selected}
-                tabIndex={selected ? 0 : -1}
-                {...(selected ? ({ focusgroupstart: "" } as Record<string, string>) : {})}
-                onClick={() => selectTab(id)}
-                onKeyDown={(e) => handleTabKeyDown(e, id)}
-              >
-                <Icon size={14} aria-hidden="true" />
-                <span>{label}</span>
-              </button>
-            );
-          })}
-        </div>
-
         <div className="tabpanels-stage">
           <div
             ref={(el) => {

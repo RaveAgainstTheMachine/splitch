@@ -1,10 +1,17 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { AlertCircle, Code2, Maximize2, Play, RotateCw, Terminal, X } from "lucide-react";
+import { AlertCircle, Check, Code2, Copy, Maximize2, Play, RotateCw, Terminal, X } from "lucide-react";
 import { useDialogLightDismiss } from "./ModelsTab";
 
-interface LogEntry {
+export interface LogEntry {
   level: "log" | "warn" | "error";
   text: string;
+}
+
+export interface InspectedArtifact {
+  id: string;
+  lang: string;
+  code: string;
+  label: string;
 }
 
 export function isRunnableArtifact(lang: string, code: string): boolean {
@@ -15,6 +22,23 @@ export function isRunnableArtifact(lang: string, code: string): boolean {
     return true;
   }
   return false;
+}
+
+export function inferArtifactTitle(lang: string, code: string, fallback?: string): string {
+  if (fallback) return fallback;
+  const titleMatch = /<title[^>]*>([^<]{1,48})<\/title>/i.exec(code);
+  if (titleMatch?.[1]?.trim()) {
+    const slug = titleMatch[1]
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    if (slug) return `${slug}.${lang.toLowerCase() === "svg" ? "svg" : "html"}`;
+  }
+  const l = lang.toLowerCase();
+  if (l === "svg" || code.trim().toLowerCase().startsWith("<svg")) return "vector-preview.svg";
+  if (l === "html" || l === "htm" || isRunnableArtifact(l, code)) return "interactive-preview.html";
+  return `snippet.${l || "txt"}`;
 }
 
 const SANDBOX_CSP =
@@ -290,5 +314,206 @@ export function ArtifactPreview({
         )}
       </dialog>
     </div>
+  );
+}
+
+export function ArtifactSplitPane({
+  artifact,
+  onClose
+}: {
+  artifact: InspectedArtifact;
+  onClose: () => void;
+}) {
+  const playable = isRunnableArtifact(artifact.lang, artifact.code);
+  const [tab, setTab] = useState<"preview" | "code" | "console">(playable ? "preview" : "code");
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [copied, setCopied] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  const fsDialogRef = useRef<HTMLDialogElement | null>(null);
+  const fsTitleId = useId();
+  useDialogLightDismiss(fsDialogRef);
+
+  useEffect(() => {
+    setLogs([]);
+    setTab(isRunnableArtifact(artifact.lang, artifact.code) ? "preview" : "code");
+  }, [artifact.id, artifact.lang, artifact.code]);
+
+  useEffect(() => {
+    const d = fsDialogRef.current;
+    if (!d) return;
+    const onDialogClose = () => setFullscreen(false);
+    d.addEventListener("close", onDialogClose);
+    return () => d.removeEventListener("close", onDialogClose);
+  }, []);
+
+  const srcDoc = useMemo(
+    () => (playable ? buildSrcDoc(artifact.lang, artifact.code) : ""),
+    [playable, artifact.lang, artifact.code]
+  );
+  const errorCount = logs.filter((l) => l.level === "error").length;
+
+  const appendLog = (entry: LogEntry) => {
+    setLogs((prev) => [...prev.slice(-49), entry]);
+  };
+
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(artifact.code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // ignore
+    }
+  };
+
+  const openFullscreen = () => {
+    setFullscreen(true);
+    fsDialogRef.current?.showModal();
+  };
+
+  const reload = () => {
+    setLogs([]);
+    setReloadNonce((n) => n + 1);
+  };
+
+  return (
+    <aside className="artifact-pane" aria-label="Artifact Inspector">
+      <header className="artifact-pane__head">
+        <div className="artifact-pane__tabs" role="tablist" aria-label="Artifact view">
+          {playable && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "preview"}
+              className={`artifact-pane__tab ${tab === "preview" ? "artifact-pane__tab--active" : ""}`}
+              onClick={() => setTab("preview")}
+            >
+              Preview
+            </button>
+          )}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "code"}
+            className={`artifact-pane__tab ${tab === "code" ? "artifact-pane__tab--active" : ""}`}
+            onClick={() => setTab("code")}
+          >
+            Code
+          </button>
+          {playable && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === "console"}
+              className={`artifact-pane__tab ${tab === "console" ? "artifact-pane__tab--active" : ""} ${
+                errorCount > 0 ? "text-err" : ""
+              }`}
+              onClick={() => setTab("console")}
+            >
+              Console ({logs.length})
+            </button>
+          )}
+        </div>
+
+        <div className="artifact-pane__actions">
+          {playable && (
+            <button
+              type="button"
+              className="btn btn--sm btn--ghost"
+              onClick={reload}
+              title="Reload preview"
+              aria-label="Reload preview"
+            >
+              <RotateCw size={12} aria-hidden="true" />
+            </button>
+          )}
+          <button type="button" className="btn btn--sm btn--ghost" onClick={copyCode}>
+            {copied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+            {copied ? "Copied" : "Copy"}
+          </button>
+          {playable && (
+            <button type="button" className="btn btn--sm btn--ghost" onClick={openFullscreen}>
+              <Maximize2 size={12} aria-hidden="true" />
+              Expand
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn btn--sm btn--ghost"
+            onClick={onClose}
+            aria-label="Close artifact inspector"
+            title="Close inspector"
+          >
+            <X size={13} aria-hidden="true" />
+          </button>
+        </div>
+      </header>
+
+      <div className="artifact-pane__body">
+        {playable && tab === "preview" && !fullscreen && (
+          <SandboxFrame
+            key={`pane-${reloadNonce}-${srcDoc.length}`}
+            srcDoc={srcDoc}
+            title={`Sandboxed ${artifact.label} preview`}
+            onLog={appendLog}
+          />
+        )}
+        {tab === "code" && (
+          <pre className="artifact-pane__code">
+            <code>{artifact.code}</code>
+          </pre>
+        )}
+        {tab === "console" && (
+          <div className="artifact-pane__console">
+            {logs.length === 0 ? (
+              <span className="muted">No console output from sandbox.</span>
+            ) : (
+              logs.map((entry, idx) => (
+                <div
+                  key={idx}
+                  className={`artifact-console__line artifact-console__line--${entry.level}`}
+                >
+                  [{entry.level}] {entry.text}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      <dialog
+        ref={fsDialogRef}
+        className="artifact-dialog"
+        aria-labelledby={fsTitleId}
+        {...({ closedby: "any" } as Record<string, string>)}
+      >
+        <div className="panel-head">
+          <h2 id={fsTitleId}>Sandboxed Preview — {artifact.label}</h2>
+          <div className="row-actions">
+            <button type="button" className="btn btn--sm" onClick={reload}>
+              <RotateCw size={12} aria-hidden="true" /> Reload
+            </button>
+            <button
+              type="button"
+              className="btn btn--sm"
+              onClick={() => fsDialogRef.current?.close()}
+            >
+              <X size={12} aria-hidden="true" /> Close
+            </button>
+          </div>
+        </div>
+        {fullscreen && playable && (
+          <SandboxFrame
+            key={`pane-fs-${reloadNonce}-${srcDoc.length}`}
+            srcDoc={srcDoc}
+            title={`Fullscreen sandboxed ${artifact.label} preview`}
+            tall
+            onLog={appendLog}
+          />
+        )}
+      </dialog>
+    </aside>
   );
 }

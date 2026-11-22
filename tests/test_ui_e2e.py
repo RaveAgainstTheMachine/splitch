@@ -328,6 +328,24 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
                     "document.querySelector('.chat-pin-btn').getAttribute('aria-pressed') === 'true'"
                 )
 
+                # 5b. Verify unified single topbar (< 12% viewport height) & collapsible sidebar
+                topbar_ok = await eval_js(
+                    "(() => {"
+                    "  const tb = document.querySelector('.topbar');"
+                    "  const tl = document.querySelector('.topbar [role=\"tablist\"]');"
+                    "  return Boolean(tb && tl && tb.contains(tl) && tb.getBoundingClientRect().height <= 56);"
+                    "})()"
+                )
+                assert topbar_ok is True
+                await eval_js("document.querySelector('.chat-sidebar-toggle').click()")
+                await wait_until(
+                    "Math.round(document.querySelector('.chat-sidebar').getBoundingClientRect().width) === 0"
+                )
+                await eval_js("document.querySelector('.chat-sidebar-toggle').click()")
+                await wait_until(
+                    "Math.round(document.querySelector('.chat-sidebar').getBoundingClientRect().width) > 200"
+                )
+
                 # 6. Overview tab -> verify Multi-GPU subgrid renders both NVIDIA + AMD devices
                 await eval_js(
                     "Array.from(document.querySelectorAll('[role=\"tab\"]'))"
