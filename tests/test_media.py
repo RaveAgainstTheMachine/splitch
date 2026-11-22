@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 import zipfile
 from pathlib import Path
 
@@ -71,8 +72,9 @@ def test_select_sd_assets_matrix_and_zip_install(
     assert res.ok is True
     assert res.current_tag == "master-1106-532d2c1"
     assert Path(res.binary_path).is_file()
-    assert (tmp_path / "bin" / "sd-server").is_file()
-    assert (tmp_path / "bin" / "sd-cli").is_file()
+    shim_ext = ".cmd" if sys.platform == "win32" else ""
+    assert (tmp_path / "bin" / f"sd-server{shim_ext}").is_file()
+    assert (tmp_path / "bin" / f"sd-cli{shim_ext}").is_file()
 
 
 def test_workflow_placeholder_substitution_and_lan_url_resolution() -> None:
