@@ -1,0 +1,6 @@
+# ~/.aider.conf.yml — Aider via Splitch
+openai-api-base: http://localhost:8080/v1
+openai-api-key: splitch-local
+model: openai/heavy
+weak-model: openai/fast
+editor-model: openai/heavy

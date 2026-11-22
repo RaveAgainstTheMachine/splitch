@@ -1,0 +1,18 @@
+[Unit]
+Description=Splitch Node Telemetry & Sync Agent
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/splitch
+Environment=SPLITCH_NODE_ID=gpu-rig
+Environment=SPLITCH_NODE_ROLE=gpu
+Environment=SPLITCH_ENGINE_URL=http://127.0.0.1:8081
+Environment=SPLITCH_STORAGE_PATH=%h/.local/share/splitch/models
+Environment=SPLITCH_ENABLE_TOOLS=0
+ExecStart=%h/.local/bin/uv run splitch agent --host 0.0.0.0 --port 8090
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

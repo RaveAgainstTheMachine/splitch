@@ -1,0 +1,84 @@
+# Splitch Declarative Cluster Configuration
+# Copy to splitch.toml (or run `splitch init` / `splitch up` for zero-config single-node mode).
+
+[router]
+host = "0.0.0.0"
+port = 8080
+poll_interval_s = 3.0
+max_traces = 120
+auto_heavy_char_threshold = 12000
+state_file = ".splitch_state.json"
+
+[guards]
+# Automatically yield discrete-GPU nodes when non-LLM apps (games, renders) exceed this VRAM
+non_llm_vram_threshold_mb = 4096
+# Minimum free VRAM required on a discrete-GPU node to cold-load an unloaded model
+min_vram_free_mb = 4096
+# If GPU utilization exceeds this while Splitch has 0 in-flight requests, treat GPU as busy
+max_external_gpu_util_percent = 90.0
+# Seconds to hold GPU yield after game/3D VRAM drops (prevents flapping on menus/loading screens)
+yield_cooldown_s = 60.0
+# Automatically unload loaded GPU LLM models from VRAM when yielding
+auto_evict_on_yield = true
+
+# Optional Native HTTPS / TLS (use direct TLS OR terminate TLS at an external reverse proxy)
+[tls]
+enabled = false
+self_signed = false                  # Set true (or run `splitch tls init`) for LAN HTTPS without Let's Encrypt
+certfile = ""                        # Custom PEM certificate / fullchain path
+keyfile = ""                         # Custom PEM private key path (chmod 600)
+letsencrypt_domain = ""              # Auto-loads /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem
+ca_bundle = ""                       # Optional custom CA bundle for HTTPS router -> agent verification
+
+# Reverse Proxy & HTTP Hardening
+[security]
+trusted_proxies = "127.0.0.1,::1"    # Comma-separated proxy IPs/CIDRs trusted for X-Forwarded-* headers
+allowed_origins = []                 # Add external proxy origins e.g. ["https://ai.example.com"]
+hsts_enabled = true                  # Emit Strict-Transport-Security automatically on HTTPS requests
+login_max_attempts = 10              # Per-IP failed login limit per window
+login_window_s = 60.0
+
+# Example Node 1: Gaming desktop / GPU workstation (NVIDIA CUDA or AMD ROCm)
+[[nodes]]
+id = "gpu-rig"
+display_name = "GPU Workstation"
+role = "gpu"
+yield_on_gaming = true
+agent_url = "http://192.168.1.50:8090"
+engine_url = "http://192.168.1.50:8081"
+storage_path = "/path/to/models"
+
+# Example Node 2: Always-on low-power host (Apple Silicon Mac, mini-PC, or home server)
+[[nodes]]
+id = "always-on"
+display_name = "Always-On Node"
+role = "unified"
+yield_on_gaming = false
+agent_url = "http://127.0.0.1:8090"
+engine_url = "http://127.0.0.1:8081"
+storage_path = "/path/to/models"
+
+# Logical model aliases exposed on /v1/models
+[[aliases]]
+alias = "heavy"
+task_kind = "code"
+primary_node = "gpu-rig"
+primary_model = "coder-heavy"
+fallback_node = "always-on"
+fallback_model = "fast-small"
+
+[[aliases]]
+alias = "fast"
+task_kind = "chat"
+primary_node = "always-on"
+primary_model = "fast-small"
+fallback_node = "gpu-rig"
+fallback_model = "coder-heavy"
+
+[[aliases]]
+alias = "embed"
+task_kind = "embed"
+primary_node = "always-on"
+primary_model = "embed-bge"
+fallback_node = "gpu-rig"
+fallback_model = "embed-bge"

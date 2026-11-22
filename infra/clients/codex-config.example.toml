@@ -1,0 +1,11 @@
+# ~/.codex/config.toml — OpenAI Codex CLI via Splitch (/v1/responses passthrough)
+# Requires a backend that supports /v1/responses (modern llama-server, Ollama, or vLLM).
+
+model = "heavy"
+model_provider = "splitch"
+
+[model_providers.splitch]
+name = "Splitch Local Cluster"
+base_url = "http://localhost:8080/v1"
+wire_api = "responses"
+env_key = "SPLITCH_API_KEY"

@@ -1,0 +1,19 @@
+; Example llama-server router-mode models.ini
+; Start with: llama-server --models-preset models.ini --host 0.0.0.0 --port 8081
+
+version = 1
+
+[*]
+ctx-size = 32768
+flash-attn = on
+parallel = 2
+
+[coder-heavy]
+model = /path/to/models/Qwen3-Coder-30B-A3B-Q4_K_M.gguf
+
+[fast-small]
+model = /path/to/models/Qwen3-8B-Q4_K_M.gguf
+
+[embed-bge]
+model = /path/to/models/bge-small-en-v1.5-f16.gguf
+embeddings = true

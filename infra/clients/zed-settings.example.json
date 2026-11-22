@@ -1,0 +1,22 @@
+{
+  "language_models": {
+    "openai_compatible": {
+      "Splitch": {
+        "api_url": "http://localhost:8080/v1",
+        "available_models": [
+          {
+            "name": "auto",
+            "display_name": "Splitch Auto",
+            "max_tokens": 65536,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": true,
+              "prompt_cache_key": false
+            }
+          }
+        ]
+      }
+    }
+  }
+}

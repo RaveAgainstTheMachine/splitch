@@ -1,0 +1,69 @@
+# Splitch — Traefik v3 Dynamic Configuration (File Provider)
+# Works with Let's Encrypt ACME certResolver OR custom TLS certificates (`tls.certificates`).
+#
+# Ensure your static traefik.yml defines:
+#   entryPoints:
+#     web:       { address: ":80" }
+#     websecure: { address: ":443" }
+#   certificatesResolvers:
+#     letsencrypt:
+#       acme:
+#         email: you@example.com
+#         storage: /letsencrypt/acme.json
+#         httpChallenge: { entryPoint: web }
+
+http:
+  routers:
+    splitch-http:
+      entryPoints:
+        - web
+      rule: "Host(`ai.example.com`)"
+      middlewares:
+        - redirect-to-https
+      service: splitch-svc
+
+    splitch-https:
+      entryPoints:
+        - websecure
+      rule: "Host(`ai.example.com`)"
+      middlewares:
+        - splitch-headers
+      service: splitch-svc
+      tls:
+        # Option A: Automatic Let's Encrypt
+        certResolver: letsencrypt
+        # Option B: Custom / self-signed certs — remove certResolver above and add `tls.certificates` below
+
+  middlewares:
+    redirect-to-https:
+      redirectScheme:
+        scheme: https
+        permanent: true
+    splitch-headers:
+      headers:
+        customRequestHeaders:
+          X-Forwarded-Proto: "https"
+
+  services:
+    splitch-svc:
+      loadBalancer:
+        passHostHeader: true
+        responseForwarding:
+          # Immediate SSE token flushing
+          flushInterval: "-1"
+        serversTransport: splitch-transport
+        servers:
+          - url: "http://127.0.0.1:8080"
+
+  serversTransports:
+    splitch-transport:
+      forwardingTimeouts:
+        dialTimeout: 15s
+        responseHeaderTimeout: 600s
+        idleConnTimeout: 600s
+
+# Option B: Custom / Enterprise / Self-Signed TLS cert (uncomment to use instead of Let's Encrypt)
+# tls:
+#   certificates:
+#     - certFile: /etc/traefik/certs/splitch.crt
+#       keyFile: /etc/traefik/certs/splitch.key

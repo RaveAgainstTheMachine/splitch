@@ -1,0 +1,31 @@
+# ~/.hermes/config.yaml — NousResearch Hermes Agent (CLI & Desktop) via Splitch
+# Set HERMES_MODEL_API_KEY in ~/.hermes/.env if SPLITCH_API_KEY is enabled on your router.
+
+model:
+  provider: custom
+  default: heavy                      # Or "auto", "fast", or "<node>/<model>" from /v1/models
+  base_url: http://localhost:8080/v1  # Replace localhost with your Splitch router LAN/Tailscale IP
+  api_key: splitch-local              # Or ${HERMES_MODEL_API_KEY}
+  context_length: 65536               # Match llama-server -c (recommended >= 64k for Hermes tool loops)
+
+# Optional: exposes Splitch aliases in the Hermes Desktop model picker dropdown
+providers:
+  custom:
+    name: Splitch Cluster
+    base_url: http://localhost:8080/v1
+    api_key: splitch-local
+    transport: openai_chat
+    api_mode: chat_completions
+    discover_models: false
+    default_model: heavy
+    context_length: 65536
+    models:
+      auto:
+        display_name: Splitch Auto
+        context_length: 65536
+      heavy:
+        display_name: Splitch Heavy (GPU -> Standby Failover)
+        context_length: 65536
+      fast:
+        display_name: Splitch Fast (Always-On)
+        context_length: 32768

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "splitch": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Splitch Local Cluster",
+      "options": {
+        "baseURL": "http://localhost:8080/v1",
+        "apiKey": "splitch-local"
+      },
+      "models": {
+        "auto": { "name": "Splitch Auto Routing" },
+        "heavy": { "name": "Splitch Heavy (GPU primary -> fallback)" },
+        "fast": { "name": "Splitch Fast (Always-on primary)" }
+      }
+    }
+  },
+  "model": "splitch/heavy",
+  "small_model": "splitch/fast"
+}

@@ -1,0 +1,25 @@
+# Splitch — Caddy Reverse Proxy
+# Caddy handles Let's Encrypt automatically, WebSockets automatically,
+# and unbuffered SSE streaming via `flush_interval -1`.
+
+# Option A: Public domain with automatic Let's Encrypt HTTPS
+ai.example.com {
+    encode zstd gzip
+
+    reverse_proxy 127.0.0.1:8080 {
+        # Flush SSE tokens immediately without buffering
+        flush_interval -1
+        transport http {
+            read_timeout 600s
+            write_timeout 600s
+        }
+    }
+}
+
+# Option B: LAN / Homelab HTTPS without Let's Encrypt (Caddy local CA)
+# splitch.local {
+#     tls internal
+#     reverse_proxy 127.0.0.1:8080 {
+#         flush_interval -1
+#     }
+# }

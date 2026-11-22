@@ -1,0 +1,17 @@
+services:
+  splitch-router:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./splitch.toml:/app/splitch.toml:ro
+      - splitch_data:/data
+    environment:
+      SPLITCH_CONFIG: /app/splitch.toml
+      # Optional security tokens:
+      # SPLITCH_API_KEY: "change-me"
+      # SPLITCH_AGENT_TOKEN: "change-me"
+    restart: unless-stopped
+
+volumes:
+  splitch_data:

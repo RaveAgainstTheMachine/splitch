@@ -1,0 +1,38 @@
+{
+  "models": [
+    {
+      "title": "Splitch Auto",
+      "provider": "openai",
+      "model": "auto",
+      "apiBase": "http://localhost:8080/v1",
+      "apiKey": "splitch-local"
+    },
+    {
+      "title": "Splitch Heavy",
+      "provider": "openai",
+      "model": "heavy",
+      "apiBase": "http://localhost:8080/v1",
+      "apiKey": "splitch-local"
+    },
+    {
+      "title": "Splitch Fast",
+      "provider": "openai",
+      "model": "fast",
+      "apiBase": "http://localhost:8080/v1",
+      "apiKey": "splitch-local"
+    }
+  ],
+  "tabAutocompleteModel": {
+    "title": "Splitch FIM",
+    "provider": "openai",
+    "model": "fim",
+    "apiBase": "http://localhost:8080/v1",
+    "apiKey": "splitch-local"
+  },
+  "embeddingsProvider": {
+    "provider": "openai",
+    "model": "embed",
+    "apiBase": "http://localhost:8080/v1",
+    "apiKey": "splitch-local"
+  }
+}

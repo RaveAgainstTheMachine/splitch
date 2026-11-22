@@ -1,0 +1,9 @@
+{
+  "name": "splitch",
+  "engine": "openai",
+  "display_name": "Splitch Local Cluster",
+  "base_url": "http://localhost:8080/v1",
+  "api_key_env": "SPLITCH_API_KEY",
+  "models": ["auto", "heavy", "fast"],
+  "stream": true
+}
