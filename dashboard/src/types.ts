@@ -468,6 +468,8 @@ export interface RuntimeSettings {
   hsts_enabled: boolean;
   trusted_proxies: string;
   allowed_origins: string[];
+  login_max_attempts: number;
+  login_window_s: number;
   remote_provision_enabled: boolean;
 }
 
@@ -548,4 +550,47 @@ export interface EngineStatus {
   latest_llama_tag: string | null;
   update_available: boolean;
   error: string | null;
+}
+
+export interface UpdateStatus {
+  version: string;
+  app_dir: string;
+  install_mode: string;
+  is_git_repo: boolean;
+  branch: string;
+  local_sha: string;
+  remote_sha: string;
+  dirty: boolean;
+  behind_count: number;
+  ahead_count: number;
+  update_available: boolean;
+  recent_remote_commits: string[];
+  error: string | null;
+}
+
+export interface BenchTargetResult {
+  requested_model: string;
+  resolved_node: string;
+  resolved_model: string;
+  ok: boolean;
+  ttft_ms: number | null;
+  duration_ms: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  pp_tokens_per_sec: number | null;
+  tg_tokens_per_sec: number | null;
+  aggregate_tokens_per_sec: number | null;
+  tool_eval_passed: boolean | null;
+  tool_eval_detail: string | null;
+  json_eval_passed: boolean | null;
+  error: string | null;
+}
+
+export interface BenchReport {
+  id: string;
+  timestamp: number;
+  router_url: string;
+  concurrency: number;
+  max_tokens: number;
+  results: BenchTargetResult[];
 }

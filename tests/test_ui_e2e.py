@@ -388,6 +388,29 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
                 await wait_until(
                     "(document.querySelector('.settings-pane')?.textContent || '').includes('--join-token spj_')"
                 )
+
+                # 8. Switch to Benchmarks tab in Settings and verify interactive harness renders
+                await eval_js(
+                    "Array.from(document.querySelectorAll('.settings-nav__item'))"
+                    ".find(b => b.textContent.includes('Benchmarks')).click()"
+                )
+                await wait_until(
+                    "(document.querySelector('.settings-pane')?.textContent || '').includes('Cluster & Model Benchmark Harness')"
+                )
+
+                # 9. Switch to Appearance tab -> select Amber (#f59e0b) -> verify <link rel="icon"> updates dynamically
+                await eval_js(
+                    "Array.from(document.querySelectorAll('.settings-nav__item'))"
+                    ".find(b => b.textContent.includes('Appearance')).click()"
+                )
+                await wait_until("document.querySelectorAll('.theme-swatch').length >= 6")
+                await eval_js(
+                    "Array.from(document.querySelectorAll('.theme-swatch'))"
+                    ".find(b => b.textContent.includes('Amber')).click()"
+                )
+                await wait_until(
+                    "(document.querySelector('link[rel=\"icon\"]')?.getAttribute('href') || '').toLowerCase().includes('%23f59e0b')"
+                )
         finally:
             chrome.terminate()
             try:

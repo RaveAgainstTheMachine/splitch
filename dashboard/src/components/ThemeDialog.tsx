@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Monitor, Moon, Palette, RotateCcw, Sun } from "lucide-react";
 import { useDialogLightDismiss } from "./ModelsTab";
+import { syncFaviconFromTheme } from "../utils/favicon";
 
 export type ColorSchemePref = "system" | "dark" | "light";
 export type SurfacePreset = "default" | "oled" | "slate" | "charcoal";
@@ -35,6 +36,7 @@ function applyScheme(pref: ColorSchemePref) {
   } catch {
     // storage disabled; still applied in DOM
   }
+  syncFaviconFromTheme();
 }
 
 function applyAccent(hex: string) {
@@ -49,6 +51,7 @@ function applyAccent(hex: string) {
   } catch {
     // ignore storage errors
   }
+  syncFaviconFromTheme();
 }
 
 function applySurface(surface: SurfacePreset) {
@@ -63,6 +66,7 @@ function applySurface(surface: SurfacePreset) {
   } catch {
     // ignore
   }
+  syncFaviconFromTheme();
 }
 
 function readInitialScheme(): ColorSchemePref {
@@ -100,8 +104,14 @@ export function AppearancePanel() {
   const [scheme, setScheme] = useState<ColorSchemePref>(readInitialScheme);
   const [accent, setAccent] = useState<string>(readInitialAccent);
   const [surface, setSurface] = useState<SurfacePreset>(readInitialSurface);
+  const [osLight, setOsLight] = useState<boolean>(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: light)").matches
+      : false
+  );
+  const [faviconUrl, setFaviconUrl] = useState<string>(() => syncFaviconFromTheme());
 
-  // Cross-tab storage synchronization
+  // Cross-tab storage synchronization & live OS theme indicator
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === "color-scheme") {
@@ -110,11 +120,13 @@ export function AppearancePanel() {
         setScheme(next);
         const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
         if (meta) meta.content = next === "system" ? "light dark" : next;
+        setFaviconUrl(syncFaviconFromTheme());
       } else if (e.key === "splitch-accent") {
         const val = e.newValue ?? "";
         setAccent(val);
         if (val) document.documentElement.style.setProperty("--user-accent", val);
         else document.documentElement.style.removeProperty("--user-accent");
+        setFaviconUrl(syncFaviconFromTheme());
       } else if (e.key === "splitch-surface") {
         const val =
           e.newValue === "oled" || e.newValue === "slate" || e.newValue === "charcoal"
@@ -123,25 +135,43 @@ export function AppearancePanel() {
         setSurface(val);
         if (val === "default") delete document.documentElement.dataset.surface;
         else document.documentElement.dataset.surface = val;
+        setFaviconUrl(syncFaviconFromTheme());
       }
     };
     window.addEventListener("storage", onStorage);
-    return () => window.removeEventListener("storage", onStorage);
+
+    const mq =
+      typeof window !== "undefined" && typeof window.matchMedia === "function"
+        ? window.matchMedia("(prefers-color-scheme: light)")
+        : null;
+    const onMedia = (ev: MediaQueryListEvent) => {
+      setOsLight(ev.matches);
+      setFaviconUrl(syncFaviconFromTheme());
+    };
+    mq?.addEventListener("change", onMedia);
+
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      mq?.removeEventListener("change", onMedia);
+    };
   }, []);
 
   const chooseScheme = (next: ColorSchemePref) => {
     setScheme(next);
     applyScheme(next);
+    setFaviconUrl(syncFaviconFromTheme());
   };
 
   const chooseAccent = (hex: string) => {
     setAccent(hex);
     applyAccent(hex);
+    setFaviconUrl(syncFaviconFromTheme());
   };
 
   const chooseSurface = (next: SurfacePreset) => {
     setSurface(next);
     applySurface(next);
+    setFaviconUrl(syncFaviconFromTheme());
   };
 
   const resetAll = () => {
@@ -153,7 +183,21 @@ export function AppearancePanel() {
   return (
     <div className="modal-form">
       <div className="panel-head">
-        <h3>Appearance &amp; Theme</h3>
+        <div className="row-actions">
+          <img
+            src={faviconUrl}
+            alt="Live Splitch favicon preview"
+            width={24}
+            height={24}
+            className="favicon-preview"
+          />
+          <div>
+            <h3 style={{ margin: 0 }}>Appearance &amp; Theme</h3>
+            <span className="muted" style={{ fontSize: "0.72rem" }}>
+              Browser tab favicon syncs automatically with accent &amp; surface
+            </span>
+          </div>
+        </div>
         <button type="button" className="btn btn--sm" onClick={resetAll}>
           <RotateCcw size={12} aria-hidden="true" /> Reset Defaults
         </button>
@@ -164,7 +208,7 @@ export function AppearancePanel() {
         <div className="theme-scheme-grid">
           {(
             [
-              { id: "system", label: "System", icon: Monitor },
+              { id: "system", label: `System (${osLight ? "Light" : "Dark"})`, icon: Monitor },
               { id: "dark", label: "Dark", icon: Moon },
               { id: "light", label: "Light", icon: Sun }
             ] as const

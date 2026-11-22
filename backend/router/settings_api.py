@@ -148,6 +148,10 @@ def apply_persisted_settings(cluster: ClusterState, data_dir: Path) -> None:
         s.trusted_proxies = raw["trusted_proxies"].strip()
     if isinstance(raw.get("allowed_origins"), list):
         s.allowed_origins = [str(x).strip().rstrip("/") for x in raw["allowed_origins"] if str(x).strip()]
+    if isinstance(raw.get("login_max_attempts"), int):
+        s.login_max_attempts = max(1, min(100, raw["login_max_attempts"]))
+    if isinstance(raw.get("login_window_s"), (int, float)):
+        s.login_window_s = max(5.0, min(3600.0, float(raw["login_window_s"])))
 
 
 def build_settings_router(
@@ -197,6 +201,8 @@ def build_settings_router(
             hsts_enabled=cluster.config.security.hsts_enabled,
             trusted_proxies=cluster.config.security.trusted_proxies,
             allowed_origins=list(cluster.config.security.allowed_origins),
+            login_max_attempts=cluster.config.security.login_max_attempts,
+            login_window_s=cluster.config.security.login_window_s,
             remote_provision_enabled=remote_prov,
         )
 
@@ -263,6 +269,10 @@ def build_settings_router(
                 for o in patch.allowed_origins
                 if o.strip()
             ]
+        if patch.login_max_attempts is not None:
+            s.login_max_attempts = patch.login_max_attempts
+        if patch.login_window_s is not None:
+            s.login_window_s = patch.login_window_s
 
         current = _current_settings()
         persist_dict = {
@@ -279,6 +289,8 @@ def build_settings_router(
             "hsts_enabled": current.hsts_enabled,
             "trusted_proxies": current.trusted_proxies,
             "allowed_origins": current.allowed_origins,
+            "login_max_attempts": current.login_max_attempts,
+            "login_window_s": current.login_window_s,
         }
         await asyncio.to_thread(_write_settings, persist_dict)
         await cluster.broadcast_snapshot()
@@ -300,6 +312,7 @@ def build_settings_router(
             "openai_chat": "/v1/chat/completions",
             "openai_responses": "/v1/responses",
             "anthropic_messages": "/v1/messages",
+            "anthropic_count_tokens": "/v1/messages/count_tokens",
         }
         endpoint = endpoint_map[req.protocol]
 
@@ -329,6 +342,16 @@ def build_settings_router(
                             "model": req.model,
                             "input": "Reply with OK.",
                             "max_output_tokens": 12,
+                        },
+                    )
+                elif req.protocol == "anthropic_count_tokens":
+                    resp = await client.post(
+                        endpoint,
+                        headers={**headers, "anthropic-version": "2023-06-01"},
+                        json={
+                            "model": req.model,
+                            "system": "Be concise.",
+                            "messages": [{"role": "user", "content": "Reply with OK."}],
                         },
                     )
                 else:
@@ -382,6 +405,9 @@ def build_settings_router(
             elif req.protocol == "openai_responses":
                 resolved_model = str(body.get("model") or req.model)
                 snippet = str(body.get("output_text") or "")[:120]
+            elif req.protocol == "anthropic_count_tokens":
+                resolved_model = req.model
+                snippet = f"input_tokens={body.get('input_tokens', 0)}"
             else:
                 resolved_model = str(body.get("model") or req.model)
                 content = body.get("content") or []

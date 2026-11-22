@@ -4,6 +4,7 @@ import {
   BookOpen,
   Cpu,
   Gamepad2,
+  Gauge,
   HardDrive,
   Layers,
   Lock,
@@ -24,6 +25,7 @@ import { ModelsTab } from "./components/ModelsTab";
 import { SettingsDialog, type SettingsTabId } from "./components/SettingsDialog";
 import { SkillsTab } from "./components/SkillsTab";
 import { SplitchLogo } from "./components/SplitchLogo";
+import { syncFaviconFromTheme } from "./utils/favicon";
 import type {
   AuthStatusResponse,
   ControlState,
@@ -261,12 +263,24 @@ export default function App() {
     if (!("interestForElement" in HTMLButtonElement.prototype)) {
       void import("interestfor");
     }
+    if (!("switch" in HTMLInputElement.prototype)) {
+      void import("input-switch-polyfill");
+    }
+
+    syncFaviconFromTheme();
+    const mq =
+      typeof window !== "undefined" && typeof window.matchMedia === "function"
+        ? window.matchMedia("(prefers-color-scheme: light)")
+        : null;
+    const onSchemeChange = () => syncFaviconFromTheme();
+    mq?.addEventListener("change", onSchemeChange);
 
     return () => {
       document.removeEventListener("toggle", onToggle, true);
       if (onBeforeToggle) {
         document.removeEventListener("beforetoggle", onBeforeToggle, true);
       }
+      mq?.removeEventListener("change", onSchemeChange);
     };
   }, []);
 
@@ -604,13 +618,22 @@ export default function App() {
                 <h2 className="muted" style={{ margin: 0, textTransform: "uppercase", fontSize: "0.78rem" }}>
                   Compute Nodes ({snapshot?.nodes.length ?? 0})
                 </h2>
-                <button
-                  type="button"
-                  className="btn btn--sm btn--accent"
-                  onClick={() => openSettings("nodes")}
-                >
-                  <Plus size={12} aria-hidden="true" /> Add Node
-                </button>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    className="btn btn--sm"
+                    onClick={() => openSettings("benchmarks")}
+                  >
+                    <Gauge size={12} aria-hidden="true" /> Run Benchmark
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn--sm btn--accent"
+                    onClick={() => openSettings("nodes")}
+                  >
+                    <Plus size={12} aria-hidden="true" /> Add Node
+                  </button>
+                </div>
               </div>
 
               <section aria-label="Compute Nodes" className="nodes-grid">

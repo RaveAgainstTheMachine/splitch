@@ -676,6 +676,8 @@ class RuntimeSettings(BaseModel):
     hsts_enabled: bool = True
     trusted_proxies: str = "127.0.0.1,::1"
     allowed_origins: list[str] = Field(default_factory=list)
+    login_max_attempts: int = 10
+    login_window_s: float = 60.0
     remote_provision_enabled: bool = False
 
 
@@ -693,10 +695,18 @@ class RuntimeSettingsPatch(BaseModel):
     hsts_enabled: bool | None = None
     trusted_proxies: str | None = None
     allowed_origins: list[str] | None = None
+    login_max_attempts: int | None = Field(default=None, ge=1, le=100)
+    login_window_s: float | None = Field(default=None, ge=5.0, le=3600.0)
 
 
 class ClientProbeRequest(BaseModel):
-    protocol: Literal["models", "openai_chat", "openai_responses", "anthropic_messages"] = "models"
+    protocol: Literal[
+        "models",
+        "openai_chat",
+        "openai_responses",
+        "anthropic_messages",
+        "anthropic_count_tokens",
+    ] = "models"
     model: str = "auto"
 
 

@@ -3,6 +3,8 @@ import {
   Check,
   Copy,
   Cpu,
+  Download,
+  Gauge,
   KeyRound,
   Palette,
   Play,
@@ -20,7 +22,9 @@ import {
 import { useDialogLightDismiss } from "./ModelsTab";
 import { AppearancePanel } from "./ThemeDialog";
 import type {
+  BenchReport,
   ClientProbeResponse,
+  ControlState,
   DashboardSnapshot,
   DoctorReport,
   EngineStatus,
@@ -28,14 +32,22 @@ import type {
   JoinTokenResponse,
   NodeRole,
   NodeSshTestResponse,
-  RuntimeSettings
+  RuntimeSettings,
+  UpdateStatus
 } from "../types";
 
-export type SettingsTabId = "clients" | "routing" | "nodes" | "security" | "appearance";
+export type SettingsTabId =
+  | "clients"
+  | "routing"
+  | "benchmarks"
+  | "nodes"
+  | "security"
+  | "appearance";
 
 const SETTINGS_TABS: Array<{ id: SettingsTabId; label: string; icon: typeof Terminal }> = [
   { id: "clients", label: "Connect Clients", icon: Terminal },
   { id: "routing", label: "Routing & Guards", icon: Sliders },
+  { id: "benchmarks", label: "Benchmarks", icon: Gauge },
   { id: "nodes", label: "Install Nodes", icon: Server },
   { id: "security", label: "Security & System", icon: Shield },
   { id: "appearance", label: "Appearance", icon: Palette }
@@ -269,8 +281,22 @@ export function SettingsDialog({
   // Security & System state
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [loadingSys, setLoadingSys] = useState(false);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [originsText, setOriginsText] = useState("");
+  const [controlBusy, setControlBusy] = useState(false);
+
+  // Benchmark harness state
+  const [benchModels, setBenchModels] = useState<string[]>(["fast"]);
+  const [benchMaxTokens, setBenchMaxTokens] = useState<number>(64);
+  const [benchConcurrency, setBenchConcurrency] = useState<number>(1);
+  const [benchTools, setBenchTools] = useState<boolean>(true);
+  const [benchJson, setBenchJson] = useState<boolean>(true);
+  const [benchPrompt, setBenchPrompt] = useState<string>("");
+  const [benchRunning, setBenchRunning] = useState<boolean>(false);
+  const [benchReport, setBenchReport] = useState<BenchReport | null>(null);
+  const [benchHistory, setBenchHistory] = useState<BenchReport[]>([]);
 
   const onlineNodes = useMemo(
     () => (snapshot?.nodes ?? []).filter((n) => n.online),
@@ -311,19 +337,84 @@ export function SettingsDialog({
     }
   };
 
-  const loadSystemDiagnostics = async () => {
-    setLoadingSys(true);
+  const loadSystemDiagnostics = async (checkRemote = false) => {
+    if (checkRemote) setCheckingUpdates(true);
+    else setLoadingSys(true);
     try {
-      const [docRes, engRes] = await Promise.all([
-        fetch("/api/system/doctor"),
-        fetch("/api/system/engine")
+      const [docRes, engRes, updRes] = await Promise.all([
+        fetch(`/api/system/doctor?check_updates=${checkRemote ? "true" : "false"}`),
+        fetch(`/api/system/engine?check_remote=${checkRemote ? "true" : "false"}`),
+        fetch(`/api/system/update-status?fetch=${checkRemote ? "true" : "false"}`)
       ]);
       if (docRes.ok) setDoctor((await docRes.json()) as DoctorReport);
       if (engRes.ok) setEngineStatus((await engRes.json()) as EngineStatus);
+      if (updRes.ok) setUpdateStatus((await updRes.json()) as UpdateStatus);
     } catch {
       // ignore
     } finally {
       setLoadingSys(false);
+      setCheckingUpdates(false);
+    }
+  };
+
+  const loadBenchHistory = async () => {
+    try {
+      const res = await fetch("/api/bench/history");
+      if (res.ok) {
+        const list = (await res.json()) as BenchReport[];
+        setBenchHistory(list);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const runClusterBenchmark = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targets = benchModels.length > 0 ? benchModels : ["auto"];
+    setBenchRunning(true);
+    setLocalError(null);
+    try {
+      const res = await fetch("/api/bench/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          models: targets,
+          max_tokens: benchMaxTokens,
+          concurrency: benchConcurrency,
+          include_tool_eval: benchTools,
+          include_json_eval: benchJson,
+          prompt: benchPrompt
+        })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      const report = body as BenchReport;
+      setBenchReport(report);
+      await loadBenchHistory();
+      await onStatusRefresh();
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : "Benchmark failed");
+    } finally {
+      setBenchRunning(false);
+    }
+  };
+
+  const patchClusterControl = async (patch: Partial<ControlState>) => {
+    setControlBusy(true);
+    setLocalError(null);
+    try {
+      const res = await fetch("/api/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await onStatusRefresh();
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : "Control update failed");
+    } finally {
+      setControlBusy(false);
     }
   };
 
@@ -334,7 +425,10 @@ export function SettingsDialog({
 
   useEffect(() => {
     if (activeTab === "security" && !doctor && !loadingSys) {
-      void loadSystemDiagnostics();
+      void loadSystemDiagnostics(false);
+    }
+    if (activeTab === "benchmarks") {
+      void loadBenchHistory();
     }
   }, [activeTab, doctor, loadingSys]);
 
@@ -375,7 +469,9 @@ export function SettingsDialog({
           searxng_url: settings.searxng_url,
           hsts_enabled: settings.hsts_enabled,
           trusted_proxies: settings.trusted_proxies,
-          allowed_origins
+          allowed_origins,
+          login_max_attempts: settings.login_max_attempts,
+          login_window_s: settings.login_window_s
         })
       });
       if (!res.ok) {
@@ -395,7 +491,14 @@ export function SettingsDialog({
     }
   };
 
-  const runProbe = async (protocol: "models" | "openai_chat" | "openai_responses" | "anthropic_messages") => {
+  const runProbe = async (
+    protocol:
+      | "models"
+      | "openai_chat"
+      | "openai_responses"
+      | "anthropic_messages"
+      | "anthropic_count_tokens"
+  ) => {
     setProbeBusy(protocol);
     setLocalError(null);
     try {
@@ -636,6 +739,15 @@ export function SettingsDialog({
     return list;
   }, [snapshot]);
 
+  useEffect(() => {
+    setBenchModels((prev) => {
+      const valid = prev.filter((m) => availableModels.includes(m));
+      if (valid.length > 0) return valid;
+      if (availableModels.includes("fast")) return ["fast"];
+      return [availableModels[0] ?? "auto"];
+    });
+  }, [availableModels]);
+
   const effectiveOrigin = (customBaseUrl.trim() || settings?.public_url || window.location.origin).replace(
     /\/+$/,
     ""
@@ -826,6 +938,16 @@ export function SettingsDialog({
                   </div>
                 )}
 
+                {clientId === "claude_code" && (
+                  <p className="muted" style={{ margin: 0, fontSize: "0.78rem" }}>
+                    Native Anthropic <code>/v1/messages</code> &amp; <code>/v1/messages/count_tokens</code>{" "}
+                    adapter translates streaming, thinking blocks, and tool calls to any local engine.
+                    Standard <code>claude-sonnet-*</code> / <code>claude-opus-*</code> requests map
+                    automatically to <code>heavy</code>, and <code>claude-haiku-*</code> maps to{" "}
+                    <code>fast</code>.
+                  </p>
+                )}
+
                 <div className="settings-subcard">
                   <div className="panel-head">
                     <strong>Live Protocol Probe</strong>
@@ -835,7 +957,8 @@ export function SettingsDialog({
                           { id: "models", label: "/v1/models" },
                           { id: "openai_chat", label: "/v1/chat/completions" },
                           { id: "openai_responses", label: "/v1/responses" },
-                          { id: "anthropic_messages", label: "/v1/messages" }
+                          { id: "anthropic_messages", label: "/v1/messages" },
+                          { id: "anthropic_count_tokens", label: "/v1/messages/count_tokens" }
                         ] as const
                       ).map((p) => (
                         <button
@@ -872,6 +995,43 @@ export function SettingsDialog({
 
             {activeTab === "routing" && settings && (
               <form className="settings-stack" onSubmit={saveSettings}>
+                <div className="settings-subcard">
+                  <div className="panel-head">
+                    <strong>Live Cluster Overrides</strong>
+                    <div className="row-actions">
+                      <span className="pill pill--ok">Model-Aware VRAM Fit</span>
+                      <span className="pill pill--ok">Pre-Stream Failover</span>
+                    </div>
+                  </div>
+                  <div className="two-col">
+                    <label className="gaming-toggle">
+                      <input
+                        type="checkbox"
+                        {...({ switch: "" } as Record<string, string>)}
+                        disabled={controlBusy}
+                        checked={Boolean(snapshot?.control.gaming_mode)}
+                        onChange={(e) => void patchClusterControl({ gaming_mode: e.target.checked })}
+                      />
+                      <span>Manual Gaming Mode (yield all gaming GPUs)</span>
+                    </label>
+                    <label className="media-field">
+                      <span>Force Routing Target</span>
+                      <select
+                        disabled={controlBusy}
+                        value={snapshot?.control.force_node ?? "auto"}
+                        onChange={(e) => void patchClusterControl({ force_node: e.target.value })}
+                      >
+                        <option value="auto">Auto Split (Hardware-Aware)</option>
+                        {(snapshot?.nodes ?? []).map((n) => (
+                          <option key={n.node_id} value={n.node_id}>
+                            Force {n.display_name} ({n.node_id})
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                </div>
+
                 <h3>GPU Auto-Yield &amp; VRAM Guards</h3>
                 <div className="two-col">
                   <label className="media-field">
@@ -929,6 +1089,7 @@ export function SettingsDialog({
                 <label className="gaming-toggle">
                   <input
                     type="checkbox"
+                    {...({ switch: "" } as Record<string, string>)}
                     checked={settings.auto_evict_on_yield}
                     onChange={(e) =>
                       setSettings({ ...settings, auto_evict_on_yield: e.target.checked })
@@ -1018,6 +1179,245 @@ export function SettingsDialog({
                   </button>
                 </div>
               </form>
+            )}
+
+            {activeTab === "benchmarks" && (
+              <div className="settings-stack">
+                <form className="settings-stack" onSubmit={runClusterBenchmark}>
+                  <div className="panel-head">
+                    <div>
+                      <h3 style={{ margin: 0 }}>Cluster &amp; Model Benchmark Harness</h3>
+                      <p className="muted" style={{ margin: "0.2rem 0 0", fontSize: "0.78rem" }}>
+                        Measure TTFT, prompt processing (PP t/s), token generation (TG t/s), concurrent
+                        throughput, tool-calling accuracy, and JSON adherence across models &amp; nodes.
+                      </p>
+                    </div>
+                    <button
+                      type="submit"
+                      className="btn btn--accent"
+                      disabled={benchRunning || benchModels.length === 0}
+                    >
+                      <Gauge size={13} aria-hidden="true" />
+                      {benchRunning ? "Running Benchmark…" : "Run Benchmark"}
+                    </button>
+                  </div>
+
+                  <div className="settings-subcard">
+                    <span className="muted" style={{ fontSize: "0.76rem", fontWeight: 600 }}>
+                      Target Models / Aliases (select one or more to compare)
+                    </span>
+                    <div className="client-pill-row" role="group" aria-label="Benchmark targets">
+                      {availableModels.map((m) => {
+                        const selected = benchModels.includes(m);
+                        return (
+                          <button
+                            key={m}
+                            type="button"
+                            className={`btn btn--sm ${selected ? "btn--accent" : ""}`}
+                            aria-pressed={selected}
+                            onClick={() =>
+                              setBenchModels((prev) =>
+                                prev.includes(m)
+                                  ? prev.length > 1
+                                    ? prev.filter((x) => x !== m)
+                                    : prev
+                                  : [...prev, m]
+                              )
+                            }
+                          >
+                            {m}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="two-col">
+                    <label className="media-field">
+                      <span>Max Completion Tokens</span>
+                      <input
+                        type="number"
+                        min={16}
+                        max={512}
+                        value={benchMaxTokens}
+                        onChange={(e) => setBenchMaxTokens(Number(e.target.value))}
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Concurrency (parallel streams)</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={8}
+                        value={benchConcurrency}
+                        onChange={(e) => setBenchConcurrency(Number(e.target.value))}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="checkbox-row">
+                    <label className="gaming-toggle">
+                      <input
+                        type="checkbox"
+                        {...({ switch: "" } as Record<string, string>)}
+                        checked={benchTools}
+                        onChange={(e) => setBenchTools(e.target.checked)}
+                      />
+                      <span>Tool-Calling Accuracy Eval</span>
+                    </label>
+                    <label className="gaming-toggle">
+                      <input
+                        type="checkbox"
+                        {...({ switch: "" } as Record<string, string>)}
+                        checked={benchJson}
+                        onChange={(e) => setBenchJson(e.target.checked)}
+                      />
+                      <span>Structured JSON Adherence Eval</span>
+                    </label>
+                  </div>
+
+                  <label className="media-field">
+                    <span>Custom Prompt Override (optional)</span>
+                    <input
+                      value={benchPrompt}
+                      onChange={(e) => setBenchPrompt(e.target.value)}
+                      placeholder="Leave blank to use Splitch's standardized multi-GPU benchmark prompt"
+                    />
+                  </label>
+                </form>
+
+                {benchReport && (
+                  <div className="settings-subcard">
+                    <div className="panel-head">
+                      <strong>
+                        Latest Result ({benchReport.id}) · c={benchReport.concurrency} ·{" "}
+                        {benchReport.max_tokens} tok
+                      </strong>
+                      <span className="muted" style={{ fontSize: "0.75rem" }}>
+                        {new Date(benchReport.timestamp * 1000).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <div className="table-wrapper">
+                      <table className="data-table bench-table">
+                        <thead>
+                          <tr>
+                            <th scope="col">Target</th>
+                            <th scope="col">Node</th>
+                            <th scope="col">Model</th>
+                            <th scope="col">TTFT</th>
+                            <th scope="col">PP t/s</th>
+                            <th scope="col">TG t/s</th>
+                            <th scope="col">Agg t/s</th>
+                            <th scope="col">Tools</th>
+                            <th scope="col">JSON</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {benchReport.results.map((r) => (
+                            <tr key={`${benchReport.id}-${r.requested_model}`}>
+                              <th scope="row">
+                                <code>{r.requested_model}</code>
+                              </th>
+                              <td>{r.ok ? <span className="node-tag">{r.resolved_node || "—"}</span> : <span className="pill pill--err">ERR</span>}</td>
+                              <td>{r.ok ? <code>{r.resolved_model}</code> : <span className="text-err">{r.error}</span>}</td>
+                              <td>{r.ok && r.ttft_ms !== null ? `${r.ttft_ms}ms` : "—"}</td>
+                              <td>{r.ok && r.pp_tokens_per_sec !== null ? r.pp_tokens_per_sec : "—"}</td>
+                              <td><strong>{r.ok && r.tg_tokens_per_sec !== null ? r.tg_tokens_per_sec : "—"}</strong></td>
+                              <td>{r.ok && r.aggregate_tokens_per_sec !== null ? r.aggregate_tokens_per_sec : "—"}</td>
+                              <td title={r.tool_eval_detail ?? ""}>
+                                {r.tool_eval_passed === null ? (
+                                  "—"
+                                ) : (
+                                  <span className={`pill ${r.tool_eval_passed ? "pill--ok" : "pill--err"}`}>
+                                    {r.tool_eval_passed ? "PASS" : "FAIL"}
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                {r.json_eval_passed === null ? (
+                                  "—"
+                                ) : (
+                                  <span className={`pill ${r.json_eval_passed ? "pill--ok" : "pill--err"}`}>
+                                    {r.json_eval_passed ? "PASS" : "FAIL"}
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                <div className="snippet-card">
+                  <div className="snippet-card__head">
+                    <span className="muted">CLI Equivalent</span>
+                    <button
+                      type="button"
+                      className="btn btn--sm"
+                      onClick={() =>
+                        void copyText(
+                          "bench-cli",
+                          `splitch bench --router ${effectiveOrigin} --model ${benchModels.join(",")} --max-tokens ${benchMaxTokens} --concurrency ${benchConcurrency}${benchTools ? "" : " --no-tools"}${benchJson ? "" : " --no-json-eval"}`
+                        )
+                      }
+                    >
+                      {copiedKey === "bench-cli" ? <Check size={12} /> : <Copy size={12} />}
+                      {copiedKey === "bench-cli" ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                  <pre className="snippet-pre">
+                    <code>
+                      {`splitch bench --router ${effectiveOrigin} --model ${benchModels.join(",")} --max-tokens ${benchMaxTokens} --concurrency ${benchConcurrency}${benchTools ? "" : " --no-tools"}${benchJson ? "" : " --no-json-eval"}`}
+                    </code>
+                  </pre>
+                </div>
+
+                {benchHistory.length > 0 && (
+                  <div className="settings-subcard">
+                    <div className="panel-head">
+                      <strong>Recent Benchmark Runs ({benchHistory.length})</strong>
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        onClick={() => void loadBenchHistory()}
+                      >
+                        <RefreshCw size={12} aria-hidden="true" /> Refresh
+                      </button>
+                    </div>
+                    <div className="probe-list">
+                      {benchHistory.slice(0, 8).map((h) => (
+                        <div key={h.id} className="probe-row">
+                          <code>{h.id}</code>
+                          <span className="muted">
+                            {new Date(h.timestamp * 1000).toLocaleString()} · c={h.concurrency}
+                          </span>
+                          {h.results.map((r) => (
+                            <span
+                              key={`${h.id}-${r.requested_model}`}
+                              className={`pill ${r.ok ? "pill--ok" : "pill--err"}`}
+                            >
+                              {r.requested_model}
+                              {r.ok && r.tg_tokens_per_sec !== null
+                                ? ` ${r.tg_tokens_per_sec} t/s`
+                                : " ERR"}
+                            </span>
+                          ))}
+                          <button
+                            type="button"
+                            className="btn btn--sm btn--ghost"
+                            style={{ marginInlineStart: "auto" }}
+                            onClick={() => setBenchReport(h)}
+                          >
+                            Inspect
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
 
             {activeTab === "nodes" && (
@@ -1167,6 +1567,7 @@ export function SettingsDialog({
                       <label className="gaming-toggle">
                         <input
                           type="checkbox"
+                          {...({ switch: "" } as Record<string, string>)}
                           checked={sshForm.yield_on_gaming}
                           onChange={(e) =>
                             setSshForm({ ...sshForm, yield_on_gaming: e.target.checked })
@@ -1177,6 +1578,7 @@ export function SettingsDialog({
                       <label className="gaming-toggle">
                         <input
                           type="checkbox"
+                          {...({ switch: "" } as Record<string, string>)}
                           checked={sshForm.with_media}
                           onChange={(e) => setSshForm({ ...sshForm, with_media: e.target.checked })}
                         />
@@ -1185,6 +1587,7 @@ export function SettingsDialog({
                       <label className="gaming-toggle">
                         <input
                           type="checkbox"
+                          {...({ switch: "" } as Record<string, string>)}
                           checked={sshForm.enable_tools}
                           onChange={(e) =>
                             setSshForm({ ...sshForm, enable_tools: e.target.checked })
@@ -1195,6 +1598,7 @@ export function SettingsDialog({
                       <label className="gaming-toggle">
                         <input
                           type="checkbox"
+                          {...({ switch: "" } as Record<string, string>)}
                           checked={sshForm.install_service}
                           onChange={(e) =>
                             setSshForm({ ...sshForm, install_service: e.target.checked })
@@ -1329,6 +1733,7 @@ export function SettingsDialog({
                         <label className="gaming-toggle">
                           <input
                             type="checkbox"
+                            {...({ switch: "" } as Record<string, string>)}
                             checked={tokForm.yield_on_gaming}
                             onChange={(e) =>
                               setTokForm({ ...tokForm, yield_on_gaming: e.target.checked })
@@ -1339,6 +1744,7 @@ export function SettingsDialog({
                         <label className="gaming-toggle">
                           <input
                             type="checkbox"
+                            {...({ switch: "" } as Record<string, string>)}
                             checked={tokForm.with_media}
                             onChange={(e) =>
                               setTokForm({ ...tokForm, with_media: e.target.checked })
@@ -1349,6 +1755,7 @@ export function SettingsDialog({
                         <label className="gaming-toggle">
                           <input
                             type="checkbox"
+                            {...({ switch: "" } as Record<string, string>)}
                             checked={tokForm.enable_tools}
                             onChange={(e) =>
                               setTokForm({ ...tokForm, enable_tools: e.target.checked })
@@ -1483,6 +1890,7 @@ export function SettingsDialog({
                     <label className="gaming-toggle">
                       <input
                         type="checkbox"
+                        {...({ switch: "" } as Record<string, string>)}
                         checked={manualNode.yield_on_gaming}
                         onChange={(e) =>
                           setManualNode({ ...manualNode, yield_on_gaming: e.target.checked })
@@ -1547,35 +1955,64 @@ export function SettingsDialog({
                   <span className={`pill ${settings.remote_provision_enabled ? "pill--ok" : ""}`}>
                     SSH Push: {settings.remote_provision_enabled ? "Allowed" : "Locked"}
                   </span>
+                  <span className="pill pill--ok">Tool Approval Boundary: Enforced</span>
+                  <span className="pill pill--ok">SSRF Guard: Active</span>
                 </div>
 
                 <form className="settings-stack" onSubmit={saveSettings}>
                   <label className="gaming-toggle">
                     <input
                       type="checkbox"
+                      {...({ switch: "" } as Record<string, string>)}
                       checked={settings.hsts_enabled}
                       onChange={(e) => setSettings({ ...settings, hsts_enabled: e.target.checked })}
                     />
                     <span>Send HSTS header on HTTPS / proxied TLS requests</span>
                   </label>
-                  <label className="media-field">
-                    <span>Trusted Reverse Proxy IPs / CIDRs</span>
-                    <input
-                      value={settings.trusted_proxies}
-                      onChange={(e) =>
-                        setSettings({ ...settings, trusted_proxies: e.target.value })
-                      }
-                      placeholder="127.0.0.1,::1"
-                    />
-                  </label>
-                  <label className="media-field">
-                    <span>Allowed CORS Origins (comma-separated)</span>
-                    <input
-                      value={originsText}
-                      onChange={(e) => setOriginsText(e.target.value)}
-                      placeholder="https://ai.example.com"
-                    />
-                  </label>
+                  <div className="two-col">
+                    <label className="media-field">
+                      <span>Trusted Reverse Proxy IPs / CIDRs</span>
+                      <input
+                        value={settings.trusted_proxies}
+                        onChange={(e) =>
+                          setSettings({ ...settings, trusted_proxies: e.target.value })
+                        }
+                        placeholder="127.0.0.1,::1"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Allowed CORS Origins (comma-separated)</span>
+                      <input
+                        value={originsText}
+                        onChange={(e) => setOriginsText(e.target.value)}
+                        placeholder="https://ai.example.com"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Max Failed Login Attempts</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={settings.login_max_attempts}
+                        onChange={(e) =>
+                          setSettings({ ...settings, login_max_attempts: Number(e.target.value) })
+                        }
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Login Rate-Limit Window (seconds)</span>
+                      <input
+                        type="number"
+                        min={5}
+                        max={3600}
+                        value={settings.login_window_s}
+                        onChange={(e) =>
+                          setSettings({ ...settings, login_window_s: Number(e.target.value) })
+                        }
+                      />
+                    </label>
+                  </div>
                   <div className="modal-actions">
                     <button type="submit" className="btn btn--accent" disabled={saving}>
                       <Save size={13} aria-hidden="true" />
@@ -1587,13 +2024,75 @@ export function SettingsDialog({
                 <div className="settings-subcard">
                   <div className="panel-head">
                     <strong>
+                      <Download size={13} aria-hidden="true" /> Software &amp; Engine Updates
+                    </strong>
+                    <button
+                      type="button"
+                      className="btn btn--sm"
+                      disabled={checkingUpdates}
+                      onClick={() => void loadSystemDiagnostics(true)}
+                    >
+                      <RefreshCw size={12} aria-hidden="true" />
+                      {checkingUpdates ? "Checking GitHub…" : "Check for Updates"}
+                    </button>
+                  </div>
+                  {updateStatus && (
+                    <div className="probe-list">
+                      <div className="probe-row">
+                        <span className="pill">Splitch v{updateStatus.version}</span>
+                        {updateStatus.local_sha && (
+                          <code>
+                            {updateStatus.branch}@{updateStatus.local_sha}
+                          </code>
+                        )}
+                        <span
+                          className={`pill ${
+                            updateStatus.error
+                              ? "pill--warn"
+                              : updateStatus.update_available
+                                ? "pill--accent"
+                                : "pill--ok"
+                          }`}
+                        >
+                          {updateStatus.error
+                            ? updateStatus.error
+                            : updateStatus.update_available
+                              ? `${updateStatus.behind_count} commit(s) available`
+                              : "Up to date"}
+                        </span>
+                      </div>
+                      {engineStatus?.latest_llama_tag && (
+                        <div className="probe-row">
+                          <span className="muted">llama.cpp upstream</span>
+                          <code>{engineStatus.latest_llama_tag}</code>
+                          <span
+                            className={`pill ${
+                              engineStatus.update_available ? "pill--warn" : "pill--ok"
+                            }`}
+                          >
+                            {engineStatus.update_available ? "Update available" : "Current"}
+                          </span>
+                        </div>
+                      )}
+                      {updateStatus.recent_remote_commits.length > 0 && (
+                        <pre className="provision-log">
+                          {updateStatus.recent_remote_commits.join("\n")}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="settings-subcard">
+                  <div className="panel-head">
+                    <strong>
                       <Cpu size={13} aria-hidden="true" /> Router Host Diagnostics &amp; GPUs
                     </strong>
                     <button
                       type="button"
                       className="btn btn--sm"
                       disabled={loadingSys}
-                      onClick={() => void loadSystemDiagnostics()}
+                      onClick={() => void loadSystemDiagnostics(false)}
                     >
                       <RefreshCw size={12} aria-hidden="true" />
                       {loadingSys ? "Checking…" : "Refresh"}
