@@ -236,6 +236,9 @@ export function ChatComposer({
           </div>
         </div>
       </form>
+      <p className="chat-disclaimer">
+        Splitch is AI and can make mistakes — including in text, code, images and video. Check important output.
+      </p>
     </div>
   );
 }

@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
-  <img src="https://img.shields.io/badge/python-3.11%2B-3776ab.svg" alt="Python 3.11+" />
-  <img src="https://img.shields.io/badge/stack-FastAPI%20%2B%20React%20%2B%20SQLite-6366f1.svg" alt="FastAPI + React + SQLite" />
-  <a href="docs/wiki/Home.md"><img src="https://img.shields.io/badge/docs-Wiki-10b981.svg" alt="Documentation Wiki" /></a>
-  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-f59e0b.svg" alt="PRs Welcome" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge" height="30" alt="MIT License" /></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776ab.svg?style=for-the-badge" height="30" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/stack-FastAPI%20%2B%20React%20%2B%20SQLite-6366f1.svg?style=for-the-badge" height="30" alt="FastAPI + React + SQLite" />
+  <a href="docs/wiki/Home.md"><img src="https://img.shields.io/badge/docs-Wiki-10b981.svg?style=for-the-badge" height="30" alt="Documentation Wiki" /></a>
+  <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-f59e0b.svg?style=for-the-badge" height="30" alt="PRs Welcome" /></a>
 </p>
 
 <p align="center">

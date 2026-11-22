@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.9.1] - 2026-11-22
+
+### UX
+- **AI Disclaimer Under Chat Composer:** Added a muted, centered notice below the chatbox (`.chat-disclaimer`): Splitch is AI and can make mistakes, including in text, code, images and video.
+- **Readable README Badges:** Switched shields.io badges to `style=for-the-badge` at 30px height so they stay legible on 1440p+ displays.
+
 ## [0.9.0] - 2026-11-22
 
 ### Branding
