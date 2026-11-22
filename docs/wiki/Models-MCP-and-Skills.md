@@ -13,11 +13,16 @@ Beyond routing and Agent Chat, Splitch provides a unified management plane acros
 2. Toggle **`Only show models that fit (≤ XX.X GB)`** (`<input type="checkbox" switch>`) to filter both search result repositories and expanded GGUF files to those that fit within the selected GPU or node memory budget.
 3. Search Hugging Face (e.g., `Qwen3-Coder`, `Llama-3.3`, `Gemma-3`) — results render as **full-width horizontal slices** displaying parameter count, estimated minimum GGUF size, fit badge, context length, capabilities, downloads, likes, and recency.
 4. Click any repository slice to expand an inline drawer showing the cleaned **Hugging Face Model Description** (`README.md` excerpt + `Base`, `Arch`, `Context`, `Params` metadata pills) above **full-width horizontal GGUF quantization slices** with single-GPU vs `Multi-GPU` fit badges.
-5. Click **Pull → `<node>`** to stream the GGUF directly into the target node's `SPLITCH_STORAGE_PATH` with real-time progress bars.
+5. Click **Pull → `<node>`** for immediate `Starting…` / `Downloading XX%` feedback. Active downloads track inside the **pinned floating Downloads Dock** at the bottom-right of the viewport (stays visible regardless of search result length), with live GB/%, `Clear done`, and a 1-click **Load on `<node>`** button once ready.
 
-### On-Disk Inventory & Load/Unload
-- View every `.gguf` stored across online nodes, check file sizes, or delete unused managed models (with confirmation dialog).
-- On `llama-server` router-mode nodes, load or unload preset models on demand directly from each node card in **Overview**.
+### On-Disk Inventory, Auto-Index Refresh & 1-Click Load/Unload
+- View every `.gguf` stored across online nodes in **Node Models**, with live **Status** (`Loaded`, `Unloaded`, `On disk`), 1-click **Load / Unload**, and **Delete** (with confirmation dialog).
+- When a `.gguf` finishes downloading or is deleted on a `llama-server --models-dir` node, `splitch-agent` automatically refreshes the `llama-server` model index (via `SPLITCH_ENGINE_RELOAD_CMD`, Linux `systemctl --user restart splitch-llama.service`, or macOS `launchctl kickstart`) so the new model is immediately loadable without manual restarts.
+
+### Media Studio: Multi-File DiT Bundles, Native Video Gen & HF Media Browser
+- **1-Click Starter Bundles:** Inside **Media Studio → Engine & Models**, pull verified ungated Image & Video bundles (**Z-Image-Turbo Q4**, **FLUX.1-schnell Q4**, **SDXL Turbo FP16**, **Wan 2.1 T2V 1.3B**, **Wan 2.1 T2V 14B Q4**). Splitch pulls only missing companion files (reusing shared `ae.safetensors`, `umt5_xxl`, and `wan_2.1_vae`) and auto-wires `--diffusion-model`, `--vae`, `--t5xxl`, `--clip_l`, `--llm`, and `--flash-attn` on launch.
+- **Native `sd-cli -M vid_gen` Video Generation:** Video requests on `sd.cpp` nodes run natively via `sd-cli -M vid_gen` (Wan 2.1/2.2) without requiring ComfyUI, temporarily yielding `sd-server` VRAM during render and returning WebM video. ComfyUI (`:8188`) remains supported for custom node graphs.
+- **Inline Hugging Face Image & Video Browser:** Search Hugging Face directly inside Media Studio (`Image` or `Video` mode, plus quick-pick chips for `Z-Image`, `FLUX`, `SDXL`, `Wan 2.1`, `LTX-Video`), inspect `.gguf`/`.safetensors` file sizes, and click **Pull → `<node>`**.
 
 ### Hot-Reloadable Aliases
 Create or edit logical model aliases (`heavy`, `fast`, `fim`, `embed`, or custom names) with a `primary_node/primary_model` and optional `fallback_node/fallback_model`. Changes persist to `SPLITCH_DATA_DIR` and apply immediately to `/v1/models` and all routing decisions without restarting the router.

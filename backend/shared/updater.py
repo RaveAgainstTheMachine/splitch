@@ -264,10 +264,14 @@ def _probe_local_media_engines(installed_sd_path: str | None) -> DoctorCheck:
             detail=installed_sd_path,
         )
     if installed_sd_path:
+        sd_cli_sibling = Path(installed_sd_path).parent / (
+            "sd-cli.exe" if sys.platform == "win32" else "sd-cli"
+        )
+        vid_note = " + sd-cli video ready" if sd_cli_sibling.is_file() else ""
         return DoctorCheck(
             name="media_engine",
             status="info",
-            summary="sd.cpp binary installed (start from Media Studio)",
+            summary=f"sd.cpp binary installed{vid_note} (start from Media Studio)",
             detail=installed_sd_path,
         )
     return DoctorCheck(

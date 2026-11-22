@@ -49,7 +49,7 @@ splitch up [options]
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--host` | `0.0.0.0` | Router bind address |
+| `--host` | `127.0.0.1` | Router bind address (non-loopback requires `SPLITCH_API_KEY`/`SPLITCH_API_KEY_HASH` unless `--allow-unauthenticated`) |
 | `--port` | `8080` | Router HTTP & dashboard port |
 | `--agent-port` | `8090` | Local agent port |
 | `--engine-url` | auto-detect | Inference engine URL (`:8081`, `:11434`, `:1234`, `:8000`) |
@@ -60,7 +60,15 @@ splitch up [options]
 ### `splitch router` — Run Router & Dashboard Only
 
 ```bash
-splitch router [--config splitch.toml] [--host 0.0.0.0] [--port 8080]
+splitch router [--config splitch.toml] [--host 127.0.0.1] [--port 8080] [--allow-unauthenticated]
+```
+
+### `splitch desktop` — Desktop Shortcuts, Tray & Theme Icon Sync
+
+```bash
+splitch desktop install [--router-url http://127.0.0.1:8080]   # install app menu, desktop & autostart tray
+splitch desktop sync-icon [--router-url http://127.0.0.1:8080] # sync OS/tray/menu icons with active UI accent color
+splitch tray [--url http://127.0.0.1:8080]                     # run live system tray (auto-reconnects & syncs theme)
 ```
 
 ### `splitch agent` — Run Node Telemetry, Pull & Tools Agent
@@ -85,7 +93,7 @@ splitch agent \
 | `--name` | hostname | Human-friendly node display name |
 | `--role` | `SPLITCH_NODE_ROLE` or auto | `gpu`, `unified`, or `cpu` |
 | `--yield-on-gaming` | off | Yield this node whenever Gaming Mode or VRAM guards trigger |
-| `--host` / `--port` | `0.0.0.0` / `8090` | Agent listen address & port |
+| `--host` / `--port` | `127.0.0.1` / `8090` | Agent listen address & port (non-loopback requires `SPLITCH_ROUTER_PUBLIC_KEY`/`SPLITCH_AGENT_TOKEN` unless `--allow-unauthenticated`) |
 | `--engine-url` | `SPLITCH_ENGINE_URL` or auto | Local inference backend URL |
 | `--media-url` | `SPLITCH_MEDIA_URL` or auto | Optional local `sd-server` (`:8082`) or `ComfyUI` (`:8188`) URL |
 | `--storage-path` | `~/.local/share/splitch/models` | Managed GGUF storage directory |

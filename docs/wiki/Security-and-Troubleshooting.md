@@ -6,14 +6,15 @@
 
 Splitch is designed for trusted LAN / Tailscale home and studio networks while maintaining strict guardrails around code execution, web fetches, and generated previews:
 
-### Workspace Tools (Opt-In Only)
+### Workspace Tools (Opt-In & Fail-Closed OS Sandbox)
 - **Disabled by default:** Every `splitch-agent` boots with `SPLITCH_ENABLE_TOOLS=0`. Both `/tools/execute` and `/workspace/dirs` return HTTP `403` until you explicitly opt in (`--enable-tools` or `SPLITCH_ENABLE_TOOLS=1`).
 - **Hard path sandboxing:** Every path argument is resolved via `Path.resolve()` and verified with `Path.is_relative_to(SPLITCH_WORKSPACE_ROOT)`. Symlink escapes and `../` traversal attempts are rejected.
-- **Human-in-the-Loop (HITL) approvals:** Read-only tools (`list_dir`, `read_file`, `grep_search`) run immediately; mutating tools (`write_file`, `run_command`) pause for explicit inline **Allow / Deny** confirmation unless you enable **Auto-Approve** on that conversation.
+- **Fail-closed OS command sandbox (`SPLITCH_CMD_SANDBOX=required` default):** `run_command` runs inside Linux **Bubblewrap (`bwrap`)** (read-only `/`, masked `--tmpfs $HOME`/`/root`/`$SPLITCH_DATA_ROOT` + secret dir masks, writable workspace bind, `--unshare-net`) or macOS **Seatbelt (`sandbox-exec`)** (workspace-only writes, denied reads on `~/.ssh`/`Keychains`/Splitch data, denied outbound net). If no OS sandbox is available, `run_command` fails closed unless you explicitly opt out (`SPLITCH_CMD_SANDBOX=none` or `auto`).
+- **Human-in-the-Loop (HITL) approvals & Ed25519 signing:** Read-only tools (`list_dir`, `read_file`, `grep_search`) run immediately; mutating tools (`write_file`, `edit_file`, `run_command`) pause for explicit inline **Allow / Deny** confirmation (displaying the active sandbox status badge before you click Allow) and require a router-signed Ed25519 or HMAC approval token.
 
-### Bearer Authentication, Rate Limiting & Web UI Session Login
-When exposing Splitch beyond `127.0.0.1` (shared LAN, Tailscale, or reverse proxy):
-1. Set `SPLITCH_API_KEY=<strong-random-secret>` on `splitch-router`.
+### Loopback Defaults, Salted Auth & Web UI Session Login
+`splitch up`, `splitch router`, and `splitch agent` bind `127.0.0.1` by default and refuse non-loopback binds without auth unless `--allow-unauthenticated` (`SPLITCH_ALLOW_UNAUTH_LAN=1`) is explicitly passed. When exposing Splitch beyond `127.0.0.1`:
+1. Set `SPLITCH_API_KEY_HASH="$(splitch secret hash)"` (or `SPLITCH_API_KEY`) on `splitch-router`.
    - Protects `/v1/*`, `/api/*`, `/infill` via constant-time `hmac.compare_digest` on `Authorization: Bearer`, `X-API-Key`, or the `HttpOnly`, `SameSite=Strict` (and `Secure` over HTTPS/proxy) HMAC-SHA256 `splitch_session` cookie issued by `POST /api/auth/login`.
    - `POST /api/auth/login` enforces per-IP sliding-window brute-force rate limiting (default: 10 failed attempts / 60s → HTTP `429` + `Retry-After`).
    - The Web UI automatically displays a mandatory **Unlock Splitch** `<dialog>` modal (`closedby="none"`) when `SPLITCH_API_KEY` is active and provides a topbar **Lock** button (`POST /api/auth/logout`).

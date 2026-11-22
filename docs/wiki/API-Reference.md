@@ -124,10 +124,14 @@ curl -X POST "http://localhost:8080/api/chat/conversations/<conv_id>/compact?kee
 | `GET` | `/api/models/files?repo_id=...` | List GGUF files in repo with per-node and multi-GPU hardware fit estimates. |
 | `GET` | `/api/models/inventory` | Aggregate on-disk GGUF inventory and active download jobs across online nodes. |
 | `POST` | `/api/models/pull` | Start streaming GGUF download on target node (`node_id`, `repo_id`, `filename`). |
-| `DELETE` | `/api/models/{node_id}/{filename}` | Delete a managed GGUF file from a node. |
+| `DELETE` | `/api/models/{node_id}/{filename}` | Delete a managed GGUF file from a node (auto-refreshes `llama-server` index). |
 | `GET` | `/api/aliases` | List all configured routing aliases. |
 | `PUT` | `/api/aliases/{alias_name}` | Create or update an alias (hot-reloaded immediately). |
 | `DELETE` | `/api/aliases/{alias_name}` | Delete an alias. |
+| `GET` | `/api/theme` | Retrieve persisted UI appearance theme (`scheme`, `accent`, `surface`, `resolved_light`). |
+| `PATCH` | `/api/theme` | Persist UI appearance theme, broadcast over `/ws/status`, and sync `/favicon.svg`, system tray, and desktop/menu icons. |
+| `GET` | `/api/media/hf/search?q=...&kind=image\|video` | Search Hugging Face for `.gguf` and `.safetensors` image/video diffusion repositories. |
+| `GET` | `/api/media/hf/files?repo_id=...` | List `.gguf` and `.safetensors` files with sizes inside a Hugging Face media repository. |
 
 ---
 
@@ -174,8 +178,10 @@ Authenticated with `SPLITCH_AGENT_TOKEN` when configured:
 | `GET` | `/metrics` | Live `NodeTelemetry` (GPU/VRAM/non-LLM VRAM/RAM/CPU/disk/models). |
 | `POST` | `/models/{action}` | Load or unload a model on the local engine (`llama-server` / Ollama). |
 | `GET` | `/files/models` | List managed GGUF files and active pull progress. |
-| `POST` | `/files/models/pull` | Download a Hugging Face GGUF into `SPLITCH_STORAGE_PATH`. |
-| `DELETE` | `/files/models/{filename}` | Delete a managed GGUF file. |
+| `POST` | `/files/models/pull` | Download a Hugging Face `.gguf` or `.safetensors` file into `SPLITCH_STORAGE_PATH` (auto-refreshes `llama-server` index on `.gguf` completion). |
+| `DELETE` | `/files/models/{filename}` | Delete a managed GGUF file (auto-refreshes `llama-server` index). |
+| `POST` | `/media/engine/start` | Launch managed `sd-server` with single-file checkpoint or auto-wired multi-file DiT bundle (`model_file`, optional `vae`, `t5xxl`, `clip_l`, `llm`). |
+| `POST` | `/media/video/generate` | Run native `sd-cli -M vid_gen` (Wan 2.1/2.2) and return WebM video bytes. |
 | `POST` | `/sync/skills` | Apply manifest-tracked skills sync locally. |
 | `POST` | `/sync/client-config` | Merge generated client config (`opencode`, `zed`, `hermes`, `codex`, `claude_code`, `aider`) into local user config path. |
 | `POST` | `/sync/mcp-script` | Write a custom generated Python MCP script to local node. |
