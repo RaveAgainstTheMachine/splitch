@@ -420,7 +420,13 @@ def test_install_sh_syntax_and_local_install_uninstall(tmp_path: Path) -> None:
     assert meta["mode"] == "local"
     assert meta["repo_url"] == DEFAULT_REPO_URL
     assert DEFAULT_REPO_URL == "https://github.com/RaveAgainstTheMachine/splitch.git"
-    assert DEFAULT_REPO_URL in (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
+    ps1_text = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
+    sh_text = install_sh.read_text(encoding="utf-8")
+    assert DEFAULT_REPO_URL in ps1_text
+    assert "verify_sha256" in sh_text and "SHASUMS256.txt" in sh_text
+    assert "astral.sh/uv/install.sh | sh" not in sh_text
+    assert "Assert-Sha256Match" in ps1_text and "SHASUMS256.txt" in ps1_text
+    assert "astral.sh/uv/install.ps1 | iex" not in ps1_text
     assert Path(meta["install_dir"]).resolve() == REPO_ROOT.resolve()
 
     # Verify installed global shim actually executes `splitch version`

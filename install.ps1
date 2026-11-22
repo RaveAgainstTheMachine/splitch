@@ -43,6 +43,7 @@ $RepoUrl = if ($Repo) { $Repo } elseif ($env:SPLITCH_REPO) { $env:SPLITCH_REPO }
 $TargetBranch = if ($Branch) { $Branch } elseif ($env:SPLITCH_BRANCH) { $env:SPLITCH_BRANCH } else { "main" }
 $TargetEngine = if ($Engine) { $Engine } elseif ($env:SPLITCH_ENGINE) { $env:SPLITCH_ENGINE } else { "auto" }
 $TargetBackend = if ($Backend) { $Backend } elseif ($env:SPLITCH_ENGINE_BACKEND) { $env:SPLITCH_ENGINE_BACKEND } else { "auto" }
+$UvVersion = if ($env:SPLITCH_UV_VERSION) { $env:SPLITCH_UV_VERSION } else { "0.13.5" }
 $NodeVersion = if ($env:SPLITCH_NODE_VERSION) { $env:SPLITCH_NODE_VERSION } else { "22.14.0" }
 if ($env:SPLITCH_AGENT_ONLY -eq "1") { $AgentOnly = $true }
 if ($env:SPLITCH_NO_UI_BUILD -eq "1") { $NoUiBuild = $true }
@@ -166,12 +167,39 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
 }
 Write-Step "Installing / Updating Splitch on Windows — $HwSummary"
 
-# 2. Bootstrap uv
+function Assert-Sha256Match([string]$FilePath, [string]$ExpectedHash, [string]$Label) {
+    if (-not $ExpectedHash) {
+        throw "Missing expected SHA-256 checksum for $Label"
+    }
+    $Actual = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $Expected = $ExpectedHash.Trim().ToLowerInvariant()
+    if ($Actual -ne $Expected) {
+        throw "SHA-256 verification failed for $Label (expected $Expected, got $Actual)"
+    }
+    Write-Ok "SHA-256 verified: $Label"
+}
+
+# 2. Bootstrap pinned uv with SHA-256 verification (no piped remote script)
 Show-StepBar 1 $TotalSteps "Checking uv runtime"
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Write-Step "Bootstrapping uv package & Python manager..."
-    irm https://astral.sh/uv/install.ps1 | iex
-    $env:PATH = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
+    Write-Step "Downloading pinned uv v$UvVersion with SHA-256 verification..."
+    $UvArch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "i686" }
+    $UvZipName = "uv-$UvArch-pc-windows-msvc.zip"
+    $UvBase = "https://github.com/astral-sh/uv/releases/download/$UvVersion"
+    $UvExpected = ((Invoke-WebRequest -Uri "$UvBase/$UvZipName.sha256" -UseBasicParsing).Content.Trim() -split "\s+")[0]
+    $TmpUvZip = Join-Path $env:TEMP $UvZipName
+    $TmpUvDir = Join-Path $env:TEMP "splitch-uv-extract"
+    Download-WithProgress -Url "$UvBase/$UvZipName" -OutFile $TmpUvZip -Label $UvZipName
+    Assert-Sha256Match -FilePath $TmpUvZip -ExpectedHash $UvExpected -Label $UvZipName
+    if (Test-Path $TmpUvDir) { Remove-Item -Recurse -Force $TmpUvDir }
+    Expand-Archive -Path $TmpUvZip -DestinationPath $TmpUvDir -Force
+    New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+    Get-ChildItem -Path $TmpUvDir -Recurse -Filter "uv*.exe" | ForEach-Object {
+        Copy-Item -Force $_.FullName (Join-Path $BinDir $_.Name)
+    }
+    Remove-Item -Force $TmpUvZip
+    Remove-Item -Recurse -Force $TmpUvDir
+    $env:PATH = "$BinDir;$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
 }
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     throw "uv installation failed or is not on PATH."
@@ -249,10 +277,15 @@ function Ensure-Node {
     if (-not (Test-Path $ManagedExe)) {
         $Arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
         $ZipName = "node-v$NodeVersion-win-$Arch"
-        $Url = "https://nodejs.org/dist/v$NodeVersion/$ZipName.zip"
-        $TmpZip = Join-Path $env:TEMP "$ZipName.zip"
+        $ZipFile = "$ZipName.zip"
+        $Url = "https://nodejs.org/dist/v$NodeVersion/$ZipFile"
+        $ShaText = (Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/SHASUMS256.txt" -UseBasicParsing).Content
+        $ShaLine = ($ShaText -split "`n" | Where-Object { $_ -match "\s+$([regex]::Escape($ZipFile))\s*$" } | Select-Object -First 1)
+        $ExpectedSha = if ($ShaLine) { ($ShaLine.Trim() -split "\s+")[0] } else { "" }
+        $TmpZip = Join-Path $env:TEMP $ZipFile
         $TmpExtract = Join-Path $env:TEMP "$ZipName-extract"
-        Download-WithProgress -Url $Url -OutFile $TmpZip -Label "$ZipName.zip"
+        Download-WithProgress -Url $Url -OutFile $TmpZip -Label $ZipFile
+        Assert-Sha256Match -FilePath $TmpZip -ExpectedHash $ExpectedSha -Label $ZipFile
         if (Test-Path $TmpExtract) { Remove-Item -Recurse -Force $TmpExtract }
         Expand-Archive -Path $TmpZip -DestinationPath $TmpExtract -Force
         if (Test-Path $ManagedNode) { Remove-Item -Recurse -Force $ManagedNode }

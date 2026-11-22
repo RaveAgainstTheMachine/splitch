@@ -154,7 +154,17 @@ def test_agent_mutating_tool_execution_requires_approval_boundary(
         )
         assert r_blocked.status_code == 403, f"Expected 403 for unapproved {mut_tool}"
 
-    # Router-approved mutating call succeeds
+    # Loopback X-Splitch-Router-Approved header alone MUST be blocked (403) when no signing key is configured
+    r_unauth_loopback = tc.post(
+        "/tools/execute",
+        headers={"X-Splitch-Router-Approved": "1"},
+        json={"tool": "write_file", "arguments": {"path": "blocked.txt", "content": "nope\n"}},
+    )
+    assert r_unauth_loopback.status_code == 403
+    assert not (tmp_path / "blocked.txt").exists()
+
+    # Only explicit ALLOW_UNAUTH_TOOLS=True + loopback + router-approval header permits unsigned local dev execution
+    monkeypatch.setattr(agent_mod, "ALLOW_UNAUTH_TOOLS", True)
     r_approved = tc.post(
         "/tools/execute",
         headers={"X-Splitch-Router-Approved": "1"},
@@ -558,11 +568,17 @@ def test_hmac_tool_approval_and_non_loopback_rejection(tmp_path: Path, monkeypat
 
 
 def test_run_command_process_group_kill_and_output_cap(tmp_path: Path, monkeypatch) -> None:
+    import shutil
     import time
+
+    from backend.agent import tools as agent_tools
 
     monkeypatch.setattr(agent_mod, "WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setattr(agent_mod, "ENABLE_TOOLS", True)
     monkeypatch.setattr(agent_mod, "AGENT_TOKEN", "")
+    monkeypatch.setattr(agent_mod, "ROUTER_PUBLIC_KEY", None)
+    monkeypatch.setattr(agent_mod, "ALLOW_UNAUTH_TOOLS", True)
+    monkeypatch.setattr(agent_mod, "CMD_SANDBOX", "none")
     monkeypatch.setattr(agent_mod, "_CMD_TIMEOUT_S", 0.6)
 
     tc = TestClient(agent_mod.app)
@@ -579,6 +595,7 @@ def test_run_command_process_group_kill_and_output_cap(tmp_path: Path, monkeypat
     assert r_cap.status_code == 200
     body_cap = r_cap.json()
     assert body_cap["ok"] is True and body_cap["exit_code"] == 0
+    assert body_cap["sandbox"] == "host"
     assert "output truncated" in body_cap["output"]
     assert len(body_cap["output"]) <= 12_100
 
@@ -605,6 +622,67 @@ def test_run_command_process_group_kill_and_output_cap(tmp_path: Path, monkeypat
             raise AssertionError(f"Orphan child PID {child_pid} survived process-group kill")
         except ProcessLookupError:
             pass
+
+    # 3. OS-level bwrap sandbox blocks writes to host root/etc and isolates /tmp from host
+    if sys.platform.startswith("linux") and shutil.which("bwrap") and agent_tools._probe_bwrap_works():
+        outside = tmp_path.parent / f"splitch-escape-{os.getpid()}.txt"
+        monkeypatch.setattr(agent_mod, "CMD_SANDBOX", "bwrap")
+        monkeypatch.setattr(agent_mod, "_CMD_TIMEOUT_S", 5.0)
+        r_sb = tc.post(
+            "/tools/execute",
+            headers={"X-Splitch-Router-Approved": "1"},
+            json={
+                "tool": "run_command",
+                "arguments": {
+                    "command": (
+                        f"echo inside > ok.txt && "
+                        f"(touch /etc/splitch-escape-test 2>/dev/null && echo RO_ESCAPED || echo BLOCKED_RO) && "
+                        f"touch '{outside}' 2>/dev/null || true"
+                    ),
+                },
+            },
+        )
+        assert r_sb.status_code == 200
+        sb_body = r_sb.json()
+        assert sb_body["ok"] is True and sb_body["sandbox"] == "bwrap"
+        assert "BLOCKED_RO" in sb_body["output"]
+        assert (tmp_path / "ok.txt").read_text(encoding="utf-8").strip() == "inside"
+        assert not outside.exists()  # private ephemeral /tmp inside bwrap cannot touch host /tmp
+
+
+def test_non_loopback_bind_requires_auth_unless_overridden(monkeypatch) -> None:
+    from backend.cli import _enforce_auth_on_exposed_bind
+
+    for var in (
+        "SPLITCH_API_KEY",
+        "SPLITCH_API_KEY_HASH",
+        "SPLITCH_AGENT_TOKEN",
+        "SPLITCH_ROUTER_PUBLIC_KEY",
+        "SPLITCH_ALLOW_UNAUTH_LAN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    # Loopback always allowed without auth
+    assert _enforce_auth_on_exposed_bind("splitch router", "127.0.0.1", require_api_key=True) is True
+    assert _enforce_auth_on_exposed_bind("splitch agent", "127.0.0.1", require_agent_token=True) is True
+
+    # Non-loopback refused by default without auth
+    assert _enforce_auth_on_exposed_bind("splitch router", "0.0.0.0", require_api_key=True) is False
+    assert _enforce_auth_on_exposed_bind("splitch agent", "0.0.0.0", require_agent_token=True) is False
+
+    # Explicit override permits LAN bind
+    assert (
+        _enforce_auth_on_exposed_bind(
+            "splitch router", "0.0.0.0", require_api_key=True, allow_unauthenticated=True
+        )
+        is True
+    )
+
+    # Auth env vars satisfy non-loopback check
+    monkeypatch.setenv("SPLITCH_API_KEY_HASH", "scrypt$16384$8$1$abc$def")
+    monkeypatch.setenv("SPLITCH_ROUTER_PUBLIC_KEY", "ed25519:AAAA")
+    assert _enforce_auth_on_exposed_bind("splitch router", "0.0.0.0", require_api_key=True) is True
+    assert _enforce_auth_on_exposed_bind("splitch agent", "0.0.0.0", require_agent_token=True) is True
 
 
 def test_streaming_first_chunk_failover_and_no_primary_retry_loop(monkeypatch) -> None:

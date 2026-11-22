@@ -427,6 +427,7 @@ class ToolExecResponse(BaseModel):
     diff: str | None = None
     exit_code: int | None = None
     verification: dict | None = None
+    sandbox: str | None = None
 
 
 class ConversationSummary(BaseModel):

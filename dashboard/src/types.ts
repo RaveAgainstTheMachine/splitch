@@ -373,6 +373,7 @@ export interface ChatMessageRecord {
       checker: string;
       output: string;
     } | null;
+    sandbox?: string | null;
     stopped?: boolean;
     media_url?: string | null;
     media_kind?: MediaKind | null;

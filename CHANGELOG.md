@@ -3,6 +3,19 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.6.0] - 2026-11-22
+
+### Security & Supply Chain
+- **Safe Loopback Defaults & Auth-Enforced LAN Binds:** Defaulted `RouterSettings.host`, `splitch router --host`, `splitch agent --host`, and `splitch init` to `127.0.0.1`. Binding non-loopback interfaces without `SPLITCH_API_KEY`/`SPLITCH_API_KEY_HASH` (router) or `SPLITCH_ROUTER_PUBLIC_KEY`/`SPLITCH_AGENT_TOKEN` (agent) is now refused unless `--allow-unauthenticated` / `SPLITCH_ALLOW_UNAUTH_LAN=1` is explicitly set.
+- **Eliminated Loopback Approval Header Bypass:** `splitch up` now auto-mints an ephemeral Ed25519 keypair for local router ↔ agent authentication and signed tool approvals. Unsigned mutating tool calls are refused by default unless `SPLITCH_ALLOW_UNAUTH_TOOLS=1` is explicitly enabled on loopback.
+- **OS-Level `run_command` Sandbox (`SPLITCH_CMD_SANDBOX=auto|bwrap|seatbelt|none`):** Wraps shell commands in Linux Bubblewrap (`bwrap`: read-only root, writable workspace bind, ephemeral `/tmp`, unshared network by default) or macOS Seatbelt (`sandbox-exec`) when available.
+- **SHA-256 Verified Installers:** Replaced piped remote `uv` installer scripts in `install.sh` and `install.ps1` with pinned `uv` (`0.13.5`) release archives verified against `.sha256` checksums, and added official `SHASUMS256.txt` verification for standalone Node.js (`22.14.0`).
+- **Clean Pre-Flight Leak Scanner:** Moved machine-specific leak patterns out of tracked `scripts/preflight.sh` into optional gitignored `.preflight.local.patterns`, keeping generic private-key and token detectors tracked.
+
+### Architecture & Documentation
+- **Modular Backend & Frontend Splits:** Extracted `backend/agent/tools.py`, `backend/agent/sync.py`, `backend/router/chat_store.py`, `backend/router/chat_mcp.py`, `dashboard/src/components/chat/*`, and `dashboard/src/components/settings/*` to reduce monolith file sizes without changing behavior.
+- **Concise README:** Trimmed `README.md` by ~60% to focus on the 3 core pillars, screenshots, quickstart, security model, and wiki links.
+
 ## [0.5.0] - 2026-11-22
 
 ### Security (Cryptographic Secrets, Vault & Asymmetric Ed25519)

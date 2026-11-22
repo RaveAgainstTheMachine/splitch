@@ -42,7 +42,7 @@ class GuardConfig(BaseModel):
 
 
 class RouterSettings(BaseModel):
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"
     port: int = 8080
     poll_interval_s: float = 3.0
     max_traces: int = 120

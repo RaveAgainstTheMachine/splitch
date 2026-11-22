@@ -9,15 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import difflib
 import hmac
-import json
 import logging
 import os
 import platform
 import re
 import shutil
-import signal
 import sys
 import time
 import uuid
@@ -30,6 +27,25 @@ import psutil
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
+from backend.agent.sync import (
+    merge_client_config as _merge_client_config,
+)
+from backend.agent.sync import (
+    sync_skills_to_dir as _sync_skills_to_dir,
+)
+from backend.agent.sync import (
+    write_mcp_script,
+)
+from backend.agent.tools import (
+    MUTATING_WORKSPACE_TOOLS as _MUTATING_WORKSPACE_TOOLS,
+)
+from backend.agent.tools import (
+    exec_fs_tool,
+    list_workspace_dirs,
+    resolve_workspace_path,
+    run_post_edit_verification,
+    run_sandboxed_shell_command,
+)
 from backend.router.config import default_data_root
 from backend.shared.engines import detect_installed_engines, install_or_update_engine
 from backend.shared.gpu_probe import (
@@ -110,6 +126,13 @@ ALLOW_UNAUTH_TOOLS = os.getenv("SPLITCH_ALLOW_UNAUTH_TOOLS", "0").strip().lower(
     "true",
     "yes",
 )
+CMD_SANDBOX = os.getenv("SPLITCH_CMD_SANDBOX", "auto").strip().lower()
+CMD_SANDBOX_ALLOW_NET = os.getenv("SPLITCH_CMD_SANDBOX_ALLOW_NET", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+_CMD_TIMEOUT_S = float(os.getenv("SPLITCH_CMD_TIMEOUT_S", "20.0"))
 
 
 def _collect_storage(path_str: str) -> tuple[bool, float, float]:
@@ -874,39 +897,6 @@ async def delete_model_file(filename: str) -> dict:
 # ── Skills & Client Config Sync ──────────────────────────────────────────────
 
 
-def _sync_skills_to_dir(target_root: Path, skills: list[dict[str, str]]) -> int:
-    target_root.mkdir(parents=True, exist_ok=True)
-    manifest_file = target_root / ".splitch-managed.json"
-    prior_managed: list[str] = []
-    if manifest_file.exists():
-        try:
-            prior_managed = json.loads(manifest_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            prior_managed = []
-
-    new_ids: list[str] = []
-    for item in skills:
-        skill_id = item.get("id", "")
-        content = item.get("content", "")
-        if not re.fullmatch(r"[a-z0-9][a-z0-9_\-]{0,63}", skill_id):
-            continue
-        skill_dir = (target_root / skill_id).resolve()
-        if not skill_dir.is_relative_to(target_root.resolve()):
-            continue
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
-        new_ids.append(skill_id)
-
-    for old_id in set(prior_managed):
-        if old_id not in new_ids and re.fullmatch(r"[a-z0-9][a-z0-9_\-]{0,63}", old_id):
-            old_dir = (target_root / old_id).resolve()
-            if old_dir.is_relative_to(target_root.resolve()) and old_dir.exists():
-                shutil.rmtree(old_dir, ignore_errors=True)
-
-    manifest_file.write_text(json.dumps(sorted(new_ids), indent=2), encoding="utf-8")
-    return len(new_ids)
-
-
 @app.post("/sync/skills")
 async def sync_skills(payload: SkillSyncPayload) -> dict:
     home = Path.home().resolve()
@@ -930,98 +920,12 @@ async def sync_skills(payload: SkillSyncPayload) -> dict:
     return {"ok": True, "synced_count": count, "paths": synced_paths}
 
 
-def _merge_client_config(client: str, incoming: dict, raw_text: str | None = None) -> str:
-    home = Path.home()
-    if client in ("hermes", "codex", "aider"):
-        targets = {
-            "hermes": home / ".hermes" / "config.yaml",
-            "codex": home / ".codex" / "config.toml",
-            "aider": home / ".aider.conf.yml",
-        }
-        path = targets[client]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        body = (raw_text or "").strip()
-        if not body:
-            raise ValueError(f"Missing config text for client '{client}'")
-        if client == "codex" and path.exists():
-            # Preserve unrelated codex settings while replacing/appending [model_providers.splitch]
-            prior = path.read_text(encoding="utf-8", errors="replace")
-            marker_start = "# --- splitch-managed-start ---"
-            marker_end = "# --- splitch-managed-end ---"
-            managed = f"{marker_start}\n{body}\n{marker_end}\n"
-            if marker_start in prior and marker_end in prior:
-                pre = prior.split(marker_start, 1)[0].rstrip()
-                post = prior.split(marker_end, 1)[1].lstrip()
-                combined = (f"{pre}\n\n" if pre else "") + managed + (f"\n{post}" if post else "")
-            else:
-                combined = prior.rstrip() + ("\n\n" if prior.strip() else "") + managed
-            path.write_text(combined, encoding="utf-8")
-        else:
-            path.write_text(body + "\n", encoding="utf-8")
-        if sys.platform != "win32":
-            with contextlib.suppress(OSError):
-                path.chmod(0o600)
-        return str(path)
-
-    if client == "claude_code":
-        path = home / ".claude" / "settings.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing: dict = {}
-        if path.exists():
-            try:
-                existing = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                existing = {}
-        env_map = existing.setdefault("env", {})
-        if isinstance(env_map, dict) and isinstance(incoming.get("env"), dict):
-            env_map.update(incoming["env"])
-        path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-        if sys.platform != "win32":
-            with contextlib.suppress(OSError):
-                path.chmod(0o600)
-        return str(path)
-
-    if client == "opencode":
-        path = home / ".config" / "opencode" / "opencode.json"
-    else:
-        path = home / ".config" / "zed" / "settings.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            existing = {}
-
-    if client == "opencode":
-        existing.setdefault("$schema", "https://opencode.ai/config.json")
-        providers = existing.setdefault("provider", {})
-        if isinstance(providers, dict) and "provider" in incoming:
-            providers.update(incoming["provider"])
-        mcp = existing.setdefault("mcp", {})
-        if isinstance(mcp, dict) and "mcp" in incoming:
-            mcp.update(incoming["mcp"])
-        if "model" in incoming and "model" not in existing:
-            existing["model"] = incoming["model"]
-        if "small_model" in incoming and "small_model" not in existing:
-            existing["small_model"] = incoming["small_model"]
-    else:
-        lm = existing.setdefault("language_models", {})
-        if isinstance(lm, dict) and "language_models" in incoming:
-            oai = lm.setdefault("openai_compatible", {})
-            oai.update(incoming["language_models"].get("openai_compatible", {}))
-        cs = existing.setdefault("context_servers", {})
-        if isinstance(cs, dict) and "context_servers" in incoming:
-            cs.update(incoming["context_servers"])
-
-    path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-    return str(path)
-
-
 @app.post("/sync/client-config")
 async def sync_client_config(req: ClientConfigSyncRequest) -> dict:
     try:
-        written_path = await asyncio.to_thread(_merge_client_config, req.client, req.config, req.raw_text)
+        written_path = await asyncio.to_thread(
+            _merge_client_config, req.client, req.config, req.raw_text
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, "client": req.client, "path": written_path}
@@ -1031,316 +935,23 @@ async def sync_client_config(req: ClientConfigSyncRequest) -> dict:
 async def sync_mcp_script(req: McpScriptSyncRequest) -> dict:
     if not re.fullmatch(r"[a-z0-9][a-z0-9_\-]{0,63}", req.id):
         raise HTTPException(status_code=400, detail="Invalid MCP script id")
-    scripts_root = Path(STORAGE_PATH).parent / "mcp_servers"
-
-    def _write() -> str:
-        scripts_root.mkdir(parents=True, exist_ok=True)
-        target = (scripts_root / f"{req.id}.py").resolve()
-        if not target.is_relative_to(scripts_root.resolve()):
-            raise HTTPException(status_code=403, detail="Path traversal blocked")
-        target.write_text(req.code, encoding="utf-8")
-        if sys.platform != "win32":
-            target.chmod(0o700)
-        return str(target)
-
-    path = await asyncio.to_thread(_write)
+    path = await asyncio.to_thread(write_mcp_script, STORAGE_PATH, req.id, req.code)
     return {"ok": True, "id": req.id, "path": path}
 
 
 # ── Workspace-Sandboxed Agent Tool Execution (Opt-In) ────────────────────────
 
-_IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "target"}
-
 
 def _resolve_workspace_path(subpath: str, rel: str = ".") -> tuple[Path, Path]:
-    base_root = Path(WORKSPACE_ROOT).resolve()
-    ws_root = (base_root / subpath.lstrip("/")).resolve() if subpath.strip() else base_root
-    if not ws_root.is_relative_to(base_root):
-        raise HTTPException(status_code=403, detail="Workspace subpath outside allowed root")
-    target = (ws_root / rel.lstrip("/")).resolve() if rel and rel != "." else ws_root
-    if not target.is_relative_to(ws_root):
-        raise HTTPException(status_code=403, detail="Path traversal blocked")
-    return ws_root, target
+    return resolve_workspace_path(WORKSPACE_ROOT, subpath, rel)
 
 
 def _run_post_edit_verification(target: Path, ws_root: Path) -> dict[str, str | bool]:
-    """
-    Fast (<3s) automatic syntax/lint verification harness triggered after `write_file` / `edit_file`.
-    Feeds immediate diagnostics back to the model so syntax errors self-heal in the next turn.
-    """
-    import py_compile
-    import subprocess
-    import tomllib
-
-    ext = target.suffix.lower()
-    rel_str = str(target.relative_to(ws_root)) if target.is_relative_to(ws_root) else target.name
-
-    if ext == ".py":
-        try:
-            py_compile.compile(str(target), doraise=True)
-        except py_compile.PyCompileError as exc:
-            return {
-                "checked": True,
-                "ok": False,
-                "checker": "py_compile",
-                "output": str(exc.msg)[:600],
-            }
-        ruff_bin = shutil.which("ruff")
-        if ruff_bin:
-            try:
-                proc = subprocess.run(
-                    [ruff_bin, "check", "--output-format=concise", str(target)],
-                    cwd=str(ws_root),
-                    capture_output=True,
-                    text=True,
-                    timeout=3.0,
-                    check=False,
-                )
-                if proc.returncode != 0:
-                    diag = (proc.stdout or proc.stderr).strip()[:600]
-                    return {"checked": True, "ok": False, "checker": "ruff", "output": diag}
-                return {
-                    "checked": True,
-                    "ok": True,
-                    "checker": "py_compile+ruff",
-                    "output": f"{rel_str} syntax & ruff lint clean",
-                }
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        return {
-            "checked": True,
-            "ok": True,
-            "checker": "py_compile",
-            "output": f"{rel_str} Python syntax valid",
-        }
-
-    if ext in (".sh", ".bash"):
-        shell_bin = "bash" if ext == ".bash" and shutil.which("bash") else "sh"
-        try:
-            proc = subprocess.run(
-                [shell_bin, "-n", str(target)],
-                cwd=str(ws_root),
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
-            )
-            if proc.returncode != 0:
-                return {
-                    "checked": True,
-                    "ok": False,
-                    "checker": f"{shell_bin} -n",
-                    "output": (proc.stderr or proc.stdout).strip()[:600],
-                }
-            return {
-                "checked": True,
-                "ok": True,
-                "checker": f"{shell_bin} -n",
-                "output": f"{rel_str} shell syntax valid",
-            }
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return {"checked": True, "ok": False, "checker": shell_bin, "output": str(exc)[:300]}
-
-    if ext == ".json":
-        try:
-            json.loads(target.read_text(encoding="utf-8"))
-            return {"checked": True, "ok": True, "checker": "json", "output": f"{rel_str} valid JSON"}
-        except ValueError as exc:
-            return {"checked": True, "ok": False, "checker": "json", "output": str(exc)[:400]}
-
-    if ext == ".toml":
-        try:
-            tomllib.loads(target.read_text(encoding="utf-8"))
-            return {"checked": True, "ok": True, "checker": "tomllib", "output": f"{rel_str} valid TOML"}
-        except ValueError as exc:
-            return {"checked": True, "ok": False, "checker": "tomllib", "output": str(exc)[:400]}
-
-    if ext in (".js", ".mjs", ".cjs") and shutil.which("node"):
-        try:
-            proc = subprocess.run(
-                ["node", "--check", str(target)],
-                cwd=str(ws_root),
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
-            )
-            if proc.returncode != 0:
-                return {
-                    "checked": True,
-                    "ok": False,
-                    "checker": "node --check",
-                    "output": (proc.stderr or proc.stdout).strip()[:600],
-                }
-            return {
-                "checked": True,
-                "ok": True,
-                "checker": "node --check",
-                "output": f"{rel_str} JS syntax valid",
-            }
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-
-    return {"checked": False, "ok": True, "checker": "none", "output": ""}
+    return run_post_edit_verification(target, ws_root)
 
 
 def _exec_fs_tool(req: ToolExecRequest) -> ToolExecResponse:
-    ws_root, _ = _resolve_workspace_path(req.workspace_subpath)
-    args = req.arguments
-
-    if req.tool == "list_dir":
-        _, target = _resolve_workspace_path(req.workspace_subpath, str(args.get("path", ".")))
-        if not target.exists() or not target.is_dir():
-            return ToolExecResponse(ok=False, output=f"Directory not found: {target}")
-        entries = []
-        for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-            if item.name in _IGNORED_DIRS:
-                continue
-            suffix = "/" if item.is_dir() else f" ({item.stat().st_size} B)"
-            entries.append(f"{item.name}{suffix}")
-            if len(entries) >= 150:
-                entries.append("... (truncated)")
-                break
-        return ToolExecResponse(ok=True, output="\n".join(entries) or "(empty directory)")
-
-    if req.tool == "read_file":
-        rel = str(args.get("path", ""))
-        if not rel:
-            return ToolExecResponse(ok=False, output="Missing 'path' argument")
-        _, target = _resolve_workspace_path(req.workspace_subpath, rel)
-        if not target.is_file():
-            return ToolExecResponse(ok=False, output=f"File not found: {rel}")
-        raw_lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
-        start = max(1, int(args.get("start_line") or 1))
-        end = min(len(raw_lines), int(args.get("end_line") or (start + 249)))
-        numbered = [f"{i}: {raw_lines[i - 1]}" for i in range(start, end + 1)]
-        text = "\n".join(numbered)
-        if len(text) > 30_000:
-            text = text[:30_000] + "\n... (truncated)"
-        return ToolExecResponse(ok=True, output=text or "(empty file)")
-
-    if req.tool == "write_file":
-        rel = str(args.get("path", ""))
-        content = str(args.get("content", ""))
-        if not rel:
-            return ToolExecResponse(ok=False, output="Missing 'path' argument")
-        _, target = _resolve_workspace_path(req.workspace_subpath, rel)
-        old_text = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        diff_lines = list(
-            difflib.unified_diff(
-                old_text.splitlines(keepends=True),
-                content.splitlines(keepends=True),
-                fromfile=f"a/{rel}",
-                tofile=f"b/{rel}",
-                n=3,
-            )
-        )
-        diff_str = "".join(diff_lines)[:12_000] if diff_lines else "(no diff)"
-        ver = _run_post_edit_verification(target, ws_root)
-        ver_note = ""
-        if ver.get("checked"):
-            mark = "✓" if ver.get("ok") else "✗"
-            ver_note = f"\n[post-edit verification ({ver['checker']}): {mark} {ver['output']}]"
-        return ToolExecResponse(
-            ok=True,
-            output=f"Wrote {len(content)} bytes to {rel}{ver_note}",
-            diff=diff_str,
-            verification=ver,
-        )
-
-    if req.tool == "edit_file":
-        rel = str(args.get("path", ""))
-        target_str = str(args.get("target", ""))
-        replacement_str = str(args.get("replacement", ""))
-        if not rel or not target_str:
-            return ToolExecResponse(ok=False, output="Missing 'path' or 'target' argument")
-        _, target = _resolve_workspace_path(req.workspace_subpath, rel)
-        if not target.is_file():
-            return ToolExecResponse(ok=False, output=f"File not found: {rel}")
-        old_text = target.read_text(encoding="utf-8", errors="replace")
-        if target_str not in old_text:
-            return ToolExecResponse(
-                ok=False,
-                output=f"Target string not found in {rel}. Read the file first to verify exact lines.",
-            )
-        count = old_text.count(target_str)
-        new_text = old_text.replace(target_str, replacement_str)
-        target.write_text(new_text, encoding="utf-8")
-        diff_lines = list(
-            difflib.unified_diff(
-                old_text.splitlines(keepends=True),
-                new_text.splitlines(keepends=True),
-                fromfile=f"a/{rel}",
-                tofile=f"b/{rel}",
-                n=3,
-            )
-        )
-        diff_str = "".join(diff_lines)[:12_000] if diff_lines else "(no diff)"
-        ver = _run_post_edit_verification(target, ws_root)
-        ver_note = ""
-        if ver.get("checked"):
-            mark = "✓" if ver.get("ok") else "✗"
-            ver_note = f"\n[post-edit verification ({ver['checker']}): {mark} {ver['output']}]"
-        return ToolExecResponse(
-            ok=True,
-            output=f"Replaced {count} occurrence(s) in {rel}{ver_note}",
-            diff=diff_str,
-            verification=ver,
-        )
-
-    if req.tool == "grep_search":
-        query = str(args.get("query", "")).strip()
-        if not query:
-            return ToolExecResponse(ok=False, output="Missing 'query' argument")
-        _, target = _resolve_workspace_path(req.workspace_subpath, str(args.get("path", ".")))
-        matches: list[str] = []
-        pattern = re.compile(re.escape(query), re.IGNORECASE)
-        for root_dir, dirs, files in os.walk(target):
-            dirs[:] = [d for d in dirs if d not in _IGNORED_DIRS and not d.startswith(".")]
-            for fname in files:
-                fpath = Path(root_dir) / fname
-                try:
-                    if fpath.stat().st_size > 512_000:
-                        continue
-                    for idx, line in enumerate(
-                        fpath.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
-                    ):
-                        if pattern.search(line):
-                            rel_p = fpath.relative_to(ws_root)
-                            matches.append(f"{rel_p}:{idx}: {line.strip()[:160]}")
-                            if len(matches) >= 40:
-                                return ToolExecResponse(
-                                    ok=True, output="\n".join(matches) + "\n... (capped at 40)"
-                                )
-                except OSError:
-                    continue
-        return ToolExecResponse(ok=True, output="\n".join(matches) or "No matches found.")
-
-    return ToolExecResponse(ok=False, output=f"Unsupported filesystem tool: {req.tool}")
-
-
-def _list_workspace_dirs(subpath: str) -> WorkspaceDirListing:
-    base_root = Path(WORKSPACE_ROOT).resolve()
-    ws_root, _ = _resolve_workspace_path(subpath, ".")
-    if not ws_root.exists() or not ws_root.is_dir():
-        raise HTTPException(status_code=404, detail=f"Directory not found: {subpath or '.'}")
-    rel_sub = "" if ws_root == base_root else str(ws_root.relative_to(base_root))
-    parent: str | None = None
-    if ws_root != base_root:
-        p = ws_root.parent
-        parent = "" if p == base_root else str(p.relative_to(base_root))
-    dirs: list[str] = []
-    for item in sorted(ws_root.iterdir(), key=lambda entry: entry.name.lower()):
-        if item.name.startswith(".") or item.name in _IGNORED_DIRS:
-            continue
-        with contextlib.suppress(OSError):
-            if item.is_dir():
-                dirs.append(item.name)
-                if len(dirs) >= 200:
-                    break
-    return WorkspaceDirListing(root=str(base_root), subpath=rel_sub, parent=parent, dirs=dirs)
+    return exec_fs_tool(req, WORKSPACE_ROOT)
 
 
 @app.get("/workspace/dirs", response_model=WorkspaceDirListing)
@@ -1350,25 +961,7 @@ async def browse_workspace_dirs(subpath: str = "") -> WorkspaceDirListing:
             status_code=403,
             detail="Workspace tools are disabled on this node (start with --enable-tools or SPLITCH_ENABLE_TOOLS=1)",
         )
-    return await asyncio.to_thread(_list_workspace_dirs, subpath)
-
-
-_MUTATING_WORKSPACE_TOOLS = frozenset({"write_file", "edit_file", "run_command"})
-_CMD_TIMEOUT_S = float(os.getenv("SPLITCH_CMD_TIMEOUT_S", "20.0"))
-_MAX_CMD_STDOUT_BYTES = 64 * 1024  # 64 KB hard RAM cap
-_MAX_CMD_DRAIN_BYTES = 4 * 1024 * 1024  # 4 MB runaway flood fuse
-_MAX_CMD_OUTPUT_CHARS = 12_000
-
-
-def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
-    if proc.returncode is not None:
-        return
-    if os.name != "nt":
-        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-            os.killpg(proc.pid, signal.SIGKILL)
-            return
-    with contextlib.suppress(ProcessLookupError, OSError):
-        proc.kill()
+    return await asyncio.to_thread(list_workspace_dirs, WORKSPACE_ROOT, subpath)
 
 
 @app.post("/tools/execute", response_model=ToolExecResponse)
@@ -1418,15 +1011,13 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
             has_router_approval = (
                 request.headers.get("x-splitch-router-approved", "").strip() == "1"
             )
-            if not has_router_approval or (
-                not is_loopback_host(peer_host) and not ALLOW_UNAUTH_TOOLS
-            ):
+            if not (ALLOW_UNAUTH_TOOLS and has_router_approval and is_loopback_host(peer_host)):
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        f"Direct execution of mutating tool '{req.tool}' is restricted to "
-                        "loopback router-approved calls when SPLITCH_AGENT_TOKEN is unset. "
-                        "Configure SPLITCH_AGENT_TOKEN on router and agent for remote execution."
+                        f"Execution of mutating tool '{req.tool}' requires signed router auth "
+                        "(configure SPLITCH_ROUTER_PUBLIC_KEY via `splitch secret init-agent-keys` "
+                        "or SPLITCH_AGENT_TOKEN; local dev override: SPLITCH_ALLOW_UNAUTH_TOOLS=1)."
                     ),
                 )
     if req.tool != "run_command":
@@ -1435,67 +1026,15 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
     cmd = str(req.arguments.get("command", "")).strip()
     if not cmd:
         return ToolExecResponse(ok=False, output="Missing 'command' argument", exit_code=1)
-    _, cwd = _resolve_workspace_path(req.workspace_subpath, str(req.arguments.get("cwd", ".")))
+    ws_root, cwd = _resolve_workspace_path(req.workspace_subpath, str(req.arguments.get("cwd", ".")))
     if not cwd.exists() or not cwd.is_dir():
         return ToolExecResponse(ok=False, output=f"Working dir not found: {cwd}", exit_code=1)
 
-    proc: asyncio.subprocess.Process | None = None
-    buf = bytearray()
-    truncated = False
-    flood_killed = False
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            cwd=str(cwd),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            start_new_session=(os.name != "nt"),
-        )
-        assert proc.stdout is not None
-
-        async def _stream_bounded() -> None:
-            nonlocal truncated, flood_killed
-            total_read = 0
-            while True:
-                chunk = await proc.stdout.read(4096)
-                if not chunk:
-                    break
-                total_read += len(chunk)
-                remaining = _MAX_CMD_STDOUT_BYTES - len(buf)
-                if remaining > 0:
-                    buf.extend(chunk[:remaining])
-                if len(chunk) > remaining:
-                    truncated = True
-                if total_read > _MAX_CMD_DRAIN_BYTES:
-                    flood_killed = True
-                    _kill_proc_tree(proc)
-                    break
-            await proc.wait()
-
-        await asyncio.wait_for(_stream_bounded(), timeout=_CMD_TIMEOUT_S)
-        text = buf.decode("utf-8", errors="replace")
-        if len(text) > _MAX_CMD_OUTPUT_CHARS:
-            text = text[:_MAX_CMD_OUTPUT_CHARS]
-            truncated = True
-        if flood_killed:
-            text += "\n... (output truncated; process terminated after exceeding 4 MB output limit)"
-        elif truncated:
-            text += "\n... (output truncated)"
-        code = proc.returncode if proc.returncode is not None else -1
-        return ToolExecResponse(
-            ok=(code == 0 and not flood_killed),
-            output=text or "(no output)",
-            exit_code=code,
-        )
-    except TimeoutError:
-        if proc is not None:
-            _kill_proc_tree(proc)
-            with contextlib.suppress(TimeoutError, OSError):
-                await asyncio.wait_for(proc.wait(), timeout=1.0)
-        return ToolExecResponse(
-            ok=False,
-            output=f"Command timed out after {int(_CMD_TIMEOUT_S)}s",
-            exit_code=124,
-        )
-    except OSError as exc:
-        return ToolExecResponse(ok=False, output=str(exc), exit_code=1)
+    return await run_sandboxed_shell_command(
+        cmd,
+        ws_root,
+        cwd,
+        timeout_s=_CMD_TIMEOUT_S,
+        sandbox_mode=CMD_SANDBOX,
+        allow_net=CMD_SANDBOX_ALLOW_NET,
+    )

@@ -24,10 +24,18 @@ import re, subprocess, sys
 from pathlib import Path
 
 files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
-# Split patterns so preflight.sh itself does not contain literal personal strings
-ip_pat = re.compile(r"\b10\.10\." + r"(?:10|20)\.\d+\b")
-path_pat = re.compile(r"(/Volumes/MacMini" + r"1TB|/games/Code" + r"Projects|/home/fros" + r"ty)")
-key_pat = re.compile(r"-----BEGIN (?:OPENSSH|RSA|EC) PRIVATE KEY-----")
+patterns = [
+    re.compile(r"-----BEGIN (?:OPENSSH|RSA|EC|DSA|PRIVATE) KEY-----"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
+    re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{32,}\b"),
+    re.compile(r"\bxox[baprs]-[0-9]{8,}-[A-Za-z0-9-]{16,}\b"),
+]
+local_pat_file = Path(".preflight.local.patterns")
+if local_pat_file.is_file():
+    for raw in local_pat_file.read_text(encoding="utf-8").splitlines():
+        line_pat = raw.strip()
+        if line_pat and not line_pat.startswith("#"):
+            patterns.append(re.compile(line_pat))
 
 leaks: list[str] = []
 for rel in files:
@@ -39,7 +47,7 @@ for rel in files:
     except Exception:
         continue
     for idx, line in enumerate(text.splitlines(), 1):
-        if ip_pat.search(line) or path_pat.search(line) or key_pat.search(line):
+        if any(pat.search(line) for pat in patterns):
             leaks.append(f"  {rel}:{idx}: {line.strip()[:120]}")
 
 if leaks:

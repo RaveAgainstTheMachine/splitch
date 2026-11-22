@@ -18,6 +18,7 @@ SPLITCH_DATA_ROOT="${SPLITCH_DATA_ROOT:-$HOME/.local/share/splitch}"
 SPLITCH_HOME="${SPLITCH_HOME:-$SPLITCH_DATA_ROOT/app}"
 SPLITCH_BIN_DIR="${SPLITCH_BIN_DIR:-$HOME/.local/bin}"
 SPLITCH_PYTHON="${SPLITCH_PYTHON:-3.12}"
+SPLITCH_UV_VERSION="${SPLITCH_UV_VERSION:-0.13.5}"
 SPLITCH_NODE_VERSION="${SPLITCH_NODE_VERSION:-22.14.0}"
 SPLITCH_ENGINE="${SPLITCH_ENGINE:-auto}"
 SPLITCH_ENGINE_BACKEND="${SPLITCH_ENGINE_BACKEND:-auto}"
@@ -270,14 +271,60 @@ fi
 TOTAL_STEPS=7
 log "Installing / Updating Splitch on ${OS}/${ARCH} — ${HW_SUMMARY}"
 
+verify_sha256() {
+  _file="$1"
+  _expected="$2"
+  _label="${3:-$_file}"
+  [ -n "$_expected" ] || die "Missing expected SHA-256 checksum for $_label"
+  if command -v sha256sum >/dev/null 2>&1; then
+    _actual="$(sha256sum "$_file" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    _actual="$(shasum -a 256 "$_file" | awk '{print $1}')"
+  elif command -v openssl >/dev/null 2>&1; then
+    _actual="$(openssl dgst -sha256 "$_file" | awk '{print $NF}')"
+  else
+    die "No SHA-256 verification tool found (install sha256sum, shasum, or openssl)"
+  fi
+  if [ "$_actual" != "$_expected" ]; then
+    die "SHA-256 verification failed for $_label (expected $_expected, got $_actual)"
+  fi
+  ok "SHA-256 verified: $_label"
+}
+
+install_pinned_uv() {
+  command -v curl >/dev/null 2>&1 || die "curl is required to install uv"
+  case "${OS}/${ARCH}" in
+    linux/x64)    _uv_triple="x86_64-unknown-linux-gnu" ;;
+    linux/arm64)  _uv_triple="aarch64-unknown-linux-gnu" ;;
+    darwin/x64)   _uv_triple="x86_64-apple-darwin" ;;
+    darwin/arm64) _uv_triple="aarch64-apple-darwin" ;;
+    *)            die "Unsupported platform for uv release archive: ${OS}/${ARCH}" ;;
+  esac
+  _uv_archive="uv-${_uv_triple}.tar.gz"
+  _uv_base="https://github.com/astral-sh/uv/releases/download/${SPLITCH_UV_VERSION}"
+  _uv_tmp="$(mktemp -t splitch-uv.XXXXXX)"
+  _uv_sha="$(curl -fsSL "${_uv_base}/${_uv_archive}.sha256" | awk '{print $1}' | head -n 1)"
+  curl -fsSL "${_uv_base}/${_uv_archive}" -o "$_uv_tmp"
+  verify_sha256 "$_uv_tmp" "$_uv_sha" "$_uv_archive"
+  _uv_dir="$(mktemp -d -t splitch-uv-extract.XXXXXX)"
+  tar -xzf "$_uv_tmp" -C "$_uv_dir"
+  mkdir -p "$SPLITCH_BIN_DIR"
+  cp "$_uv_dir/uv-${_uv_triple}/uv" "$SPLITCH_BIN_DIR/uv"
+  chmod +x "$SPLITCH_BIN_DIR/uv"
+  if [ -f "$_uv_dir/uv-${_uv_triple}/uvx" ]; then
+    cp "$_uv_dir/uv-${_uv_triple}/uvx" "$SPLITCH_BIN_DIR/uvx"
+    chmod +x "$SPLITCH_BIN_DIR/uvx"
+  fi
+  rm -rf "$_uv_tmp" "$_uv_dir"
+}
+
 # ── 2. Ensure `uv` (handles isolated Python 3.12+ & all Python deps) ─────────
 step_bar 1 "$TOTAL_STEPS" "Checking uv runtime"
 export PATH="$SPLITCH_BIN_DIR:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 if ! command -v uv >/dev/null 2>&1; then
-  command -v curl >/dev/null 2>&1 || die "curl is required to install uv"
-  run_spin "Installing uv package manager" sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
-  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+  install_pinned_uv
+  export PATH="$SPLITCH_BIN_DIR:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 fi
 command -v uv >/dev/null 2>&1 || die "uv installation failed; ensure ~/.local/bin is writable"
 ok "uv ready: $(uv --version)"
@@ -370,13 +417,17 @@ ensure_node() {
     TAR_FLAGS="-xJf"
   fi
   NODE_BASENAME="node-v${SPLITCH_NODE_VERSION}-${OS}-${ARCH}"
-  NODE_URL="https://nodejs.org/dist/v${SPLITCH_NODE_VERSION}/${NODE_BASENAME}.${NODE_EXT}"
+  NODE_FILE="${NODE_BASENAME}.${NODE_EXT}"
+  NODE_URL="https://nodejs.org/dist/v${SPLITCH_NODE_VERSION}/${NODE_FILE}"
+  NODE_SHA_URL="https://nodejs.org/dist/v${SPLITCH_NODE_VERSION}/SHASUMS256.txt"
+  NODE_EXPECTED_SHA="$(curl -fsSL "$NODE_SHA_URL" | awk -v f="$NODE_FILE" '$2 == f {print $1}' | head -n 1)"
   TMP_TAR="$(mktemp -t splitch-node.XXXXXX)"
   if [ "$IS_TTY" = "1" ]; then
     curl -fSL --progress-bar "$NODE_URL" -o "$TMP_TAR"
   else
     curl -fsSL "$NODE_URL" -o "$TMP_TAR"
   fi
+  verify_sha256 "$TMP_TAR" "$NODE_EXPECTED_SHA" "$NODE_FILE"
   rm -rf "$MANAGED_NODE_DIR"
   mkdir -p "$MANAGED_NODE_DIR"
   run_spin "Extracting Node.js v${SPLITCH_NODE_VERSION}" tar "$TAR_FLAGS" "$TMP_TAR" -C "$MANAGED_NODE_DIR" --strip-components=1

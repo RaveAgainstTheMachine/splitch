@@ -4,17 +4,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertTriangle,
-  ArchiveRestore,
   ArrowDown,
-  ArrowUp,
-  BookOpen,
   Brain,
   Check,
-  CheckSquare,
   Copy,
   Cpu,
   Download,
-  FileCode2,
   Folder,
   Globe,
   ImagePlus,
@@ -23,34 +18,36 @@ import {
   PanelLeftOpen,
   PanelRightOpen,
   Pencil,
-  Pin,
-  Plus,
   RotateCcw,
-  Search,
   ShieldAlert,
-  ShieldCheck,
   SlidersHorizontal,
   Square,
   Terminal,
   Thermometer,
-  Trash2,
   User,
-  Wrench,
   X,
   Zap
 } from "lucide-react";
 import {
-  ArtifactPreview,
   ArtifactSplitPane,
   inferArtifactTitle,
   type InspectedArtifact,
   isRunnableArtifact
 } from "./ArtifactPreview";
 import type { ConfirmState } from "./ConfirmDialog";
-import { ContextRing } from "./ContextRing";
 import { classifyClientMcpEgress } from "./McpTab";
 import { useDialogLightDismiss } from "./ModelsTab";
 import { SplitchLogo } from "./SplitchLogo";
+import { CodeBlock, DiffViewer } from "./chat/ChatCodeBlocks";
+import { ContextMemoryDialog, WorkspaceBrowserDialog } from "./chat/ChatDialogs";
+import { ChatSidebar } from "./chat/ChatSidebar";
+import {
+  DEFAULT_DRAFT,
+  type DraftChatConfig,
+  fmtTokenCompact,
+  parseSseChunk,
+  readFileAsDataUrl
+} from "./chat/chatHelpers";
 import type {
   ChatMessageRecord,
   ConversationSummary,
@@ -67,215 +64,6 @@ interface Props {
   snapshot: DashboardSnapshot | null;
   onError: (msg: string | null) => void;
   onConfirm: (state: ConfirmState) => void;
-}
-
-interface DraftChatConfig {
-  model: string;
-  exec_node: string;
-  workspace_subpath: string;
-  tools_enabled: boolean;
-  web_search_enabled: boolean;
-  auto_approve: boolean;
-  auto_compact: boolean;
-  enabled_skills: string[];
-  enabled_mcps: string[];
-  system_prompt: string;
-}
-
-interface ParsedSseEvent {
-  event: string;
-  data: Record<string, unknown>;
-}
-
-const DEFAULT_DRAFT: DraftChatConfig = {
-  model: "auto",
-  exec_node: "",
-  workspace_subpath: "",
-  tools_enabled: true,
-  web_search_enabled: false,
-  auto_approve: false,
-  auto_compact: true,
-  enabled_skills: [],
-  enabled_mcps: [],
-  system_prompt: ""
-};
-
-function parseSseChunk(rawBlock: string): ParsedSseEvent | null {
-  let event = "message";
-  const dataLines: string[] = [];
-  for (const line of rawBlock.split("\n")) {
-    if (line.startsWith("event:")) {
-      event = line.slice(6).trim();
-    } else if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trim());
-    }
-  }
-  if (dataLines.length === 0) return null;
-  try {
-    return { event, data: JSON.parse(dataLines.join("\n")) as Record<string, unknown> };
-  } catch {
-    return null;
-  }
-}
-
-function fmtShortDate(ts: number): string {
-  return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(new Error("Failed to read image"));
-    reader.readAsDataURL(file);
-  });
-}
-
-function fmtTokenCompact(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-  return String(n);
-}
-
-function CodeBlock({
-  className,
-  children,
-  onInspect,
-  activeArtifactCode
-}: {
-  className?: string;
-  children?: React.ReactNode;
-  onInspect?: (artifact: InspectedArtifact) => void;
-  activeArtifactCode?: string | null;
-}) {
-  const [copied, setCopied] = useState(false);
-  const [showInlineCode, setShowInlineCode] = useState(false);
-  const langMatch = /language-([\w-]+)/.exec(className || "");
-  const codeText = String(children ?? "").replace(/\n$/, "");
-  const isBlock = Boolean(langMatch) || codeText.includes("\n");
-
-  if (!isBlock) {
-    return <code className={className}>{children}</code>;
-  }
-
-  const copyCode = async () => {
-    try {
-      await navigator.clipboard.writeText(codeText);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      // clipboard unavailable
-    }
-  };
-
-  const lang = langMatch?.[1] || "text";
-  const runnable = isRunnableArtifact(lang, codeText);
-  const label = inferArtifactTitle(lang, codeText);
-  const isInspected = activeArtifactCode === codeText;
-
-  if (runnable && onInspect) {
-    return (
-      <div className="artifact-chip-wrap">
-        <button
-          type="button"
-          className={`artifact-chip ${isInspected ? "artifact-chip--active" : ""}`}
-          onClick={() =>
-            onInspect({
-              id: `${lang}-${codeText.length}`,
-              lang,
-              code: codeText,
-              label
-            })
-          }
-        >
-          <span className="artifact-chip__badge">{lang.toUpperCase()}</span>
-          <strong className="artifact-chip__name">{label}</strong>
-          <span className="artifact-chip__hint">
-            • {isInspected ? "Inspecting in split pane" : "Click to inspect"}
-          </span>
-        </button>
-        <button
-          type="button"
-          className="btn btn--sm btn--ghost"
-          onClick={() => setShowInlineCode((v) => !v)}
-          title="Toggle inline source code"
-        >
-          {showInlineCode ? "Hide source" : "Source"}
-        </button>
-        {showInlineCode && (
-          <div className="md-codeblock">
-            <div className="md-codeblock__bar">
-              <span>{lang}</span>
-              <button type="button" className="btn btn--sm btn--ghost" onClick={copyCode}>
-                {copied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
-            <pre>
-              <code className={className}>{codeText}</code>
-            </pre>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="md-codeblock">
-      <div className="md-codeblock__bar">
-        <span>{lang}</span>
-        <div className="row-actions">
-          {onInspect && (
-            <button
-              type="button"
-              className="btn btn--sm btn--ghost"
-              onClick={() =>
-                onInspect({
-                  id: `${lang}-${codeText.length}`,
-                  lang,
-                  code: codeText,
-                  label
-                })
-              }
-            >
-              <FileCode2 size={12} aria-hidden="true" />
-              Split Pane
-            </button>
-          )}
-          <button type="button" className="btn btn--sm btn--ghost" onClick={copyCode}>
-            {copied ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
-            {copied ? "Copied" : "Copy"}
-          </button>
-        </div>
-      </div>
-      {runnable && <ArtifactPreview lang={lang} code={codeText} />}
-      <pre>
-        <code className={className}>{codeText}</code>
-      </pre>
-    </div>
-  );
-}
-
-function DiffViewer({ diff }: { diff: string }) {
-  return (
-    <pre className="diff-block">
-      {diff.split("\n").map((line, i) => {
-        const cls =
-          line.startsWith("+") && !line.startsWith("+++")
-            ? "diff-line diff-line--add"
-            : line.startsWith("-") && !line.startsWith("---")
-              ? "diff-line diff-line--del"
-              : line.startsWith("@@")
-                ? "diff-line diff-line--hunk"
-                : "diff-line";
-        return (
-          <span key={i} className={cls}>
-            {line}
-            {"\n"}
-          </span>
-        );
-      })}
-    </pre>
-  );
 }
 
 export function ChatTab({ snapshot, onError, onConfirm }: Props) {
@@ -1342,6 +1130,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
                 diff: (data.diff as string | null) ?? null,
                 verification:
                   (data.verification as ChatMessageRecord["meta"]["verification"]) ?? null,
+                sandbox: (data.sandbox as string | null) ?? null,
                 media_url: (data.media_url as string | null) ?? null,
                 media_kind: (data.media_kind as "image" | "video" | null) ?? null
               },
@@ -1544,310 +1333,44 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           : undefined
       }
     >
-      <aside
-        className={`chat-sidebar ${sidebarCollapsed ? "chat-sidebar--collapsed" : ""}`}
-        aria-label="Conversations"
-      >
-        <div className="chat-sidebar__head">
-          <button
-            type="button"
-            className="btn chat-new-btn"
-            onClick={() => void createConversation()}
-            disabled={streaming}
-          >
-            <Plus size={14} aria-hidden="true" />
-            New Chat
-          </button>
-          <button
-            type="button"
-            className={`btn btn--sm chat-icon-btn ${searchOpen || sidebarQuery ? "btn--accent" : ""}`}
-            aria-label="Filter conversations"
-            aria-pressed={searchOpen || Boolean(sidebarQuery)}
-            title="Search conversations"
-            onClick={() => {
-              setSearchOpen((v) => {
-                const next = !v;
-                if (next) window.setTimeout(() => searchInputRef.current?.focus(), 20);
-                return next;
-              });
-            }}
-          >
-            <Search size={13} aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            className={`btn btn--sm ${selectMode ? "btn--accent" : ""}`}
-            aria-pressed={selectMode}
-            title={selectMode ? "Exit multi-select (Esc)" : "Select multiple chats"}
-            disabled={
-              streaming ||
-              (!selectMode && (sidebarView === "chats" ? conversations.length === 0 : trash.length === 0))
-            }
-            onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
-          >
-            <CheckSquare size={12} aria-hidden="true" />
-            <span>{selectMode ? "Done" : "Select"}</span>
-          </button>
-        </div>
-
-        <div
-          className={`chat-sidebar__search ${
-            searchOpen || sidebarQuery ? "chat-sidebar__search--open" : ""
-          }`}
-        >
-          <Search size={12} aria-hidden="true" className="muted" />
-          <input
-            ref={searchInputRef}
-            type="search"
-            value={sidebarQuery}
-            onChange={(e) => setSidebarQuery(e.target.value)}
-            placeholder={sidebarView === "chats" ? "Filter chats…" : "Filter trash…"}
-            aria-label="Filter conversations"
-          />
-        </div>
-
-        <div className="chat-sidebar__tabs" role="group" aria-label="Conversation views">
-          <button
-            type="button"
-            className="chat-sidebar__tab"
-            aria-pressed={sidebarView === "chats"}
-            onClick={() => switchSidebarView("chats")}
-          >
-            Chats ({conversations.length})
-          </button>
-          <button
-            type="button"
-            className="chat-sidebar__tab"
-            aria-pressed={sidebarView === "trash"}
-            onClick={() => switchSidebarView("trash")}
-          >
-            <Trash2 size={11} aria-hidden="true" />
-            Trash ({trash.length})
-          </button>
-        </div>
-
-        {selectMode && (
-          <div className="chat-bulk-bar" role="group" aria-label="Bulk actions">
-            <div className="chat-bulk-bar__top">
-              <div className="chat-bulk-select-all">
-                <input
-                  id={selectAllId}
-                  ref={selectAllRef}
-                  type="checkbox"
-                  className="chat-select-box"
-                  checked={allVisibleSelected}
-                  disabled={filteredConversations.length === 0}
-                  onChange={toggleSelectAllVisible}
-                />
-                <label htmlFor={selectAllId} className="chat-bulk-select-all__label">
-                  All ({visibleSelectedCount}/{filteredConversations.length})
-                </label>
-              </div>
-              <span className="muted" style={{ fontSize: "0.68rem" }}>
-                Shift+click range
-              </span>
-            </div>
-            <div className="row-actions">
-              {sidebarView === "chats" ? (
-                <button
-                  type="button"
-                  className="btn btn--sm btn--danger"
-                  style={{ flex: 1, justifyContent: "center" }}
-                  disabled={streaming || selectedIds.size === 0}
-                  onClick={requestBulkTrash}
-                >
-                  <Trash2 size={12} aria-hidden="true" />
-                  Delete ({selectedIds.size})
-                </button>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    className="btn btn--sm"
-                    style={{ flex: 1, justifyContent: "center" }}
-                    disabled={streaming || selectedIds.size === 0}
-                    onClick={() => void bulkRestoreSelected()}
-                  >
-                    <ArchiveRestore size={12} aria-hidden="true" />
-                    Restore ({selectedIds.size})
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn--sm btn--danger"
-                    style={{ flex: 1, justifyContent: "center" }}
-                    disabled={streaming || selectedIds.size === 0}
-                    onClick={requestBulkPermanentDelete}
-                  >
-                    <Trash2 size={12} aria-hidden="true" />
-                    Erase ({selectedIds.size})
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        )}
-
-        {sidebarView === "trash" && !selectMode && trash.length > 0 && (
-          <button
-            type="button"
-            className="btn btn--sm btn--danger"
-            disabled={streaming}
-            onClick={requestEmptyTrash}
-          >
-            <Trash2 size={12} aria-hidden="true" />
-            Empty Trash ({trash.length})
-          </button>
-        )}
-
-        {selectMode ? (
-          <fieldset className="chat-conv-list chat-conv-fieldset">
-            <legend className="visually-hidden">
-              Select {sidebarView === "chats" ? "conversations" : "trashed conversations"}
-            </legend>
-            {filteredConversations.length === 0 ? (
-              <p className="muted chat-conv-empty">
-                {sidebarView === "chats" ? "No matching chats." : "Trash bin is empty."}
-              </p>
-            ) : (
-              filteredConversations.map((c, idx) => {
-                const cbId = `${selectRowPrefix}-${c.id}`;
-                const checked = selectedIds.has(c.id);
-                return (
-                  <div
-                    key={c.id}
-                    className={`chat-conv-item chat-conv-item--selectable ${
-                      sidebarView === "trash" ? "chat-conv-item--trash" : ""
-                    } ${!supportsHasSelector && checked ? "chat-conv-item--checked" : ""}`}
-                    onMouseDown={(e) => {
-                      shiftHeldRef.current = e.shiftKey;
-                    }}
-                  >
-                    <input
-                      id={cbId}
-                      type="checkbox"
-                      className="chat-select-box"
-                      checked={checked}
-                      disabled={streaming}
-                      onKeyDown={(e) => {
-                        shiftHeldRef.current = e.shiftKey;
-                      }}
-                      onChange={(e) => handleSelectChange(idx, c.id, e.target.checked)}
-                    />
-                    <label htmlFor={cbId} className="chat-conv-item__label">
-                      <span className="chat-conv-item__title">
-                        {c.pinned && sidebarView === "chats" && (
-                          <Pin size={11} aria-hidden="true" className="chat-pin-badge" />
-                        )}
-                        {c.title}
-                      </span>
-                      <span className="chat-conv-item__meta">
-                        <code>{c.model}</code>
-                        <span>
-                          {sidebarView === "trash"
-                            ? c.deleted_at
-                              ? fmtShortDate(c.deleted_at)
-                              : ""
-                            : fmtShortDate(c.updated_at)}
-                        </span>
-                      </span>
-                    </label>
-                  </div>
-                );
-              })
-            )}
-          </fieldset>
-        ) : (
-          <ul className="chat-conv-list">
-            {filteredConversations.length === 0 ? (
-              <li className="muted chat-conv-empty">
-                {sidebarView === "chats" ? "No conversations." : "Trash is empty."}
-              </li>
-            ) : sidebarView === "chats" ? (
-              filteredConversations.map((c) => {
-                const isSelected = c.id === activeId;
-                return (
-                  <li
-                    key={c.id}
-                    className={`chat-conv-item ${isSelected ? "chat-conv-item--active" : ""} ${
-                      c.pinned ? "chat-conv-item--pinned" : ""
-                    }`}
-                  >
-                      <button
-                        type="button"
-                        className="chat-conv-item__btn"
-                        onClick={() => !streaming && setActiveId(c.id)}
-                      >
-                        <span className="chat-conv-item__title">
-                          <span
-                            className={`chat-conv-dot ${isSelected ? "chat-conv-dot--active" : ""}`}
-                            aria-hidden="true"
-                          />
-                          <span className="chat-conv-item__text">{c.title}</span>
-                        </span>
-                      </button>
-                    <div className="row-actions chat-conv-item__actions">
-                      <button
-                        type="button"
-                        className="btn btn--sm btn--ghost chat-pin-btn"
-                        aria-label={`Pin ${c.title}`}
-                        aria-pressed={c.pinned}
-                        title={c.pinned ? "Unpin chat" : "Pin chat to top"}
-                        disabled={streaming}
-                        onClick={() => void patchConversation(c.id, { pinned: !c.pinned })}
-                      >
-                        <Pin size={12} aria-hidden="true" />
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn--sm btn--ghost btn--danger"
-                        aria-label={`Move ${c.title} to trash`}
-                        disabled={streaming}
-                        onClick={() => requestTrashConversation(c)}
-                      >
-                        <Trash2 size={12} aria-hidden="true" />
-                      </button>
-                    </div>
-                  </li>
-                );
-              })
-            ) : (
-              filteredConversations.map((c) => (
-                <li key={c.id} className="chat-conv-item chat-conv-item--trash">
-                  <div className="chat-conv-item__btn">
-                    <span className="chat-conv-item__title">{c.title}</span>
-                    <span className="chat-conv-item__meta">
-                      <code>{c.model}</code>
-                      <span>{c.deleted_at ? fmtShortDate(c.deleted_at) : ""}</span>
-                    </span>
-                  </div>
-                  <div className="row-actions">
-                    <button
-                      type="button"
-                      className="btn btn--sm btn--ghost"
-                      aria-label={`Restore ${c.title}`}
-                      title="Restore chat"
-                      disabled={streaming}
-                      onClick={() => void restoreConversation(c)}
-                    >
-                      <ArchiveRestore size={12} aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn--sm btn--ghost btn--danger"
-                      aria-label={`Permanently delete ${c.title}`}
-                      title="Delete forever"
-                      disabled={streaming}
-                      onClick={() => requestPermanentDelete(c)}
-                    >
-                      <Trash2 size={12} aria-hidden="true" />
-                    </button>
-                  </div>
-                </li>
-              ))
-            )}
-          </ul>
-        )}
-      </aside>
+      <ChatSidebar
+        sidebarCollapsed={sidebarCollapsed}
+        streaming={streaming}
+        searchOpen={searchOpen}
+        setSearchOpen={setSearchOpen}
+        sidebarQuery={sidebarQuery}
+        setSidebarQuery={setSidebarQuery}
+        searchInputRef={searchInputRef}
+        selectMode={selectMode}
+        setSelectMode={setSelectMode}
+        exitSelectMode={exitSelectMode}
+        sidebarView={sidebarView}
+        switchSidebarView={switchSidebarView}
+        conversations={conversations}
+        trash={trash}
+        filteredConversations={filteredConversations}
+        activeId={activeId}
+        setActiveId={setActiveId}
+        selectAllId={selectAllId}
+        selectAllRef={selectAllRef}
+        selectRowPrefix={selectRowPrefix}
+        supportsHasSelector={supportsHasSelector}
+        shiftHeldRef={shiftHeldRef}
+        allVisibleSelected={allVisibleSelected}
+        visibleSelectedCount={visibleSelectedCount}
+        selectedIds={selectedIds}
+        toggleSelectAllVisible={toggleSelectAllVisible}
+        handleSelectChange={handleSelectChange}
+        createConversation={createConversation}
+        patchConversation={patchConversation}
+        requestTrashConversation={requestTrashConversation}
+        restoreConversation={restoreConversation}
+        requestPermanentDelete={requestPermanentDelete}
+        requestBulkTrash={requestBulkTrash}
+        bulkRestoreSelected={bulkRestoreSelected}
+        requestBulkPermanentDelete={requestBulkPermanentDelete}
+        requestEmptyTrash={requestEmptyTrash}
+      />
 
       <section className="chat-main" aria-label="Agent Chat Workspace">
         <header className="chat-toolbar">
@@ -2105,6 +1628,19 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
                                         >
                                           {result.meta.ok ? "OK" : "ERR"}
                                         </span>
+                                        {result.meta.sandbox && (
+                                          <span
+                                            className={`pill ${
+                                              result.meta.sandbox.startsWith("bwrap") ||
+                                              result.meta.sandbox.startsWith("seatbelt")
+                                                ? "pill--ok"
+                                                : "pill--warn"
+                                            }`}
+                                            title={`Command execution sandbox: ${result.meta.sandbox}`}
+                                          >
+                                            {result.meta.sandbox}
+                                          </span>
+                                        )}
                                         {result.meta.verification?.checked && (
                                           <span
                                             className={`pill ${
@@ -2539,344 +2075,62 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
         </>
       )}
 
-      <dialog
-        ref={settingsDialogRef}
-        {...({ closedby: "any" } as Record<string, string>)}
-        aria-label="Chat Context and System Prompt"
-      >
-        <div className="panel-head">
-          <h2>Context & Memory</h2>
-          <div className="row-actions">
-            <label
-              className="toolbar-switch"
-              title="Automatically summarize older messages when context reaches 80%"
-            >
-              <span>Auto-Compact</span>
-              <input
-                type="checkbox"
-                {...({ switch: "" } as Record<string, string>)}
-                checked={effectiveConfig.auto_compact}
-                disabled={streaming}
-                onChange={(e) => updateConfig({ auto_compact: e.target.checked })}
-              />
-            </label>
-            <button
-              type="button"
-              className="btn btn--sm"
-              disabled={!activeConv || streaming || compacting || messages.length < 4}
-              onClick={() => void compactNow()}
-              title="Summarize older turns now without deleting chat history"
-            >
-              <Minimize2 size={12} aria-hidden="true" />
-              {compacting ? "Compacting…" : "Compact Now"}
-            </button>
-            <ContextRing
-              usedTokens={contextStats.used}
-              maxTokens={contextStats.max}
-              estimated={contextStats.estimated}
-            />
-          </div>
-        </div>
-        <form className="modal-form" onSubmit={saveContextSettings}>
-          <label>
-            System Prompt
-            <textarea
-              rows={3}
-              value={settingsPrompt}
-              onChange={(e) => setSettingsPrompt(e.target.value)}
-              placeholder="Optional system prompt…"
-            />
-          </label>
+      <ContextMemoryDialog
+        dialogRef={settingsDialogRef}
+        effectiveConfig={effectiveConfig}
+        streaming={streaming}
+        updateConfig={updateConfig}
+        activeConv={activeConv}
+        compacting={compacting}
+        messagesCount={messages.length}
+        compactNow={compactNow}
+        contextStats={contextStats}
+        saveContextSettings={saveContextSettings}
+        settingsPrompt={settingsPrompt}
+        setSettingsPrompt={setSettingsPrompt}
+        contextScopeTarget={contextScopeTarget}
+        selectScopeTarget={selectScopeTarget}
+        activeWorkspaceKey={activeWorkspaceKey}
+        skills={skills}
+        scopedConfig={scopedConfig}
+        settingsSkills={settingsSkills}
+        setSettingsSkills={setSettingsSkills}
+        mcps={mcps}
+        settingsMcps={settingsMcps}
+        setSettingsMcps={setSettingsMcps}
+        toggleSelection={toggleSelection}
+      />
 
-          <div className="context-section">
-            <div className="panel-head">
-              <span className="muted" style={{ fontSize: "0.78rem" }}>
-                Scope
-              </span>
-              <div className="dialog-modes" role="group" aria-label="Extension scope target">
-                <button
-                  type="button"
-                  className={`btn btn--sm ${contextScopeTarget === "chat" ? "btn--accent" : ""}`}
-                  aria-pressed={contextScopeTarget === "chat"}
-                  onClick={() => selectScopeTarget("chat")}
-                >
-                  This Chat
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn--sm ${contextScopeTarget === "workspace" ? "btn--accent" : ""}`}
-                  aria-pressed={contextScopeTarget === "workspace"}
-                  onClick={() => selectScopeTarget("workspace")}
-                >
-                  Project ({activeWorkspaceKey})
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn--sm ${contextScopeTarget === "global" ? "btn--accent" : ""}`}
-                  aria-pressed={contextScopeTarget === "global"}
-                  onClick={() => selectScopeTarget("global")}
-                >
-                  Global
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="context-section">
-            <div className="context-section__title">
-              <BookOpen size={13} aria-hidden="true" />
-              <span>Skills ({settingsSkills.length})</span>
-            </div>
-            {skills.length === 0 ? (
-              <p className="muted">No skills.</p>
-            ) : (
-              <div className="context-check-grid">
-                {skills.map((s) => {
-                  const inGlobal = (scopedConfig.global_scope.skills ?? []).includes(s.id);
-                  const inWs = (scopedConfig.workspaces[activeWorkspaceKey]?.skills ?? []).includes(
-                    s.id
-                  );
-                  return (
-                    <label key={s.id} className="choice-card">
-                      <input
-                        type="checkbox"
-                        checked={settingsSkills.includes(s.id)}
-                        onChange={() => toggleSelection(settingsSkills, s.id, setSettingsSkills)}
-                      />
-                      <span>
-                        {s.name}{" "}
-                        {contextScopeTarget !== "global" && inGlobal && (
-                          <span className="pill">Global</span>
-                        )}
-                        {contextScopeTarget === "chat" && inWs && (
-                          <span className="pill">Project</span>
-                        )}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="context-section">
-            <div className="context-section__title">
-              <Wrench size={13} aria-hidden="true" />
-              <span>MCP Servers ({settingsMcps.length})</span>
-            </div>
-            {mcps.length === 0 ? (
-              <p className="muted">No MCP servers.</p>
-            ) : (
-              <div className="context-check-grid">
-                {[...mcps]
-                  .sort((a, b) => (a.transport === "stdio" ? 0 : 1) - (b.transport === "stdio" ? 0 : 1))
-                  .map((m) => {
-                    const inGlobal = (scopedConfig.global_scope.mcps ?? []).includes(m.id);
-                    const inWs = (scopedConfig.workspaces[activeWorkspaceKey]?.mcps ?? []).includes(
-                      m.id
-                    );
-                    const eg =
-                      m.egress ??
-                      classifyClientMcpEgress({
-                        transport: m.transport,
-                        command: m.command,
-                        args: m.args,
-                        url: m.url,
-                        envKeys: Object.keys(m.env)
-                      }).kind;
-                    return (
-                      <label key={m.id} className="choice-card">
-                        <input
-                          type="checkbox"
-                          checked={settingsMcps.includes(m.id)}
-                          onChange={() => toggleSelection(settingsMcps, m.id, setSettingsMcps)}
-                        />
-                        <span>
-                          {m.name}{" "}
-                          {eg === "local" ? (
-                            <span className="pill pill--ok" title="Runs locally via stdio/LAN">
-                              <ShieldCheck size={10} aria-hidden="true" /> local
-                            </span>
-                          ) : (
-                            <span
-                              className="pill pill--warn"
-                              title="Advised: sends tool context to an external endpoint"
-                            >
-                              <ShieldAlert size={10} aria-hidden="true" /> ext
-                            </span>
-                          )}
-                          {contextScopeTarget !== "global" && inGlobal && (
-                            <span className="pill">Global</span>
-                          )}
-                          {contextScopeTarget === "chat" && inWs && (
-                            <span className="pill">Project</span>
-                          )}
-                        </span>
-                      </label>
-                    );
-                  })}
-              </div>
-            )}
-            {mcps.some((m) => {
-              if (!settingsMcps.includes(m.id)) return false;
-              const eg =
-                m.egress ??
-                classifyClientMcpEgress({
-                  transport: m.transport,
-                  command: m.command,
-                  args: m.args,
-                  url: m.url,
-                  envKeys: Object.keys(m.env)
-                }).kind;
-              return eg !== "local";
-            }) && (
-              <div role="alert" className="banner banner--warn" style={{ fontSize: "0.76rem" }}>
-                <AlertTriangle size={13} aria-hidden="true" /> External MCP active — tool calls
-                require approval.
-              </div>
-            )}
-          </div>
-
-          <div className="modal-actions">
-            <button
-              type="button"
-              className="btn"
-              onClick={() => settingsDialogRef.current?.close()}
-            >
-              Cancel
-            </button>
-            <button type="submit" className="btn btn--accent">
-              Save{" "}
-              {contextScopeTarget === "global"
-                ? "Global Defaults"
-                : contextScopeTarget === "workspace"
-                  ? `Project (${activeWorkspaceKey})`
-                  : "Chat Context"}
-            </button>
-          </div>
-        </form>
-      </dialog>
-
-      <dialog
-        ref={wsDialogRef}
-        aria-labelledby={wsTitleId}
-        {...({ closedby: "any" } as Record<string, string>)}
-      >
-        <div className="panel-head">
-          <h2 id={wsTitleId}>Select Workspace Folder</h2>
-          <select
-            aria-label="Node to browse"
-            value={wsBrowseNode}
-            onChange={(e) => {
-              const nid = e.target.value;
-              setWsBrowseNode(nid);
-              if (nid) void fetchWorkspaceDirs(nid, "");
-            }}
-          >
-            {(snapshot?.nodes ?? []).map((n) => (
-              <option key={n.node_id} value={n.node_id}>
-                {n.display_name} ({n.node_id})
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="workspace-browser">
-          <label className="modal-subpath-field">
-            <span className="muted">Workspace Subpath</span>
-            <input
-              id={workspaceId}
-              type="text"
-              value={effectiveConfig.workspace_subpath}
-              placeholder="e.g. my-project (or leave empty for root)"
-              onChange={(e) => {
-                const val = e.target.value;
-                if (activeConv) {
-                  setConversations((prev) =>
-                    prev.map((c) => (c.id === activeConv.id ? { ...c, workspace_subpath: val } : c))
-                  );
-                } else {
-                  setDraftConfig((prev) => ({ ...prev, workspace_subpath: val }));
-                }
-              }}
-              onBlur={(e) =>
-                activeConv &&
-                void patchConversation(activeConv.id, { workspace_subpath: e.target.value })
-              }
-            />
-          </label>
-          {wsListing && (
-            <div className="workspace-browser__path">
-              <span className="muted">Sandbox Root:</span> <code>{wsListing.root}</code>
-              <div>
-                <span className="muted">Selected:</span>{" "}
-                <code>{wsListing.subpath || "."}</code>
-              </div>
-            </div>
-          )}
-
-          {wsError && <p className="banner--error">{wsError}</p>}
-
-          {wsLoading ? (
-            <p className="muted">Loading folders…</p>
-          ) : wsListing ? (
-            <ul className="workspace-dir-list">
-              {wsListing.parent !== null && (
-                <li>
-                  <button
-                    type="button"
-                    className="btn btn--sm workspace-dir-btn"
-                    onClick={() => void fetchWorkspaceDirs(wsBrowseNode, wsListing.parent ?? "")}
-                  >
-                    <ArrowUp size={13} aria-hidden="true" /> ..
-                  </button>
-                </li>
-              )}
-              {wsListing.dirs.length === 0 ? (
-                <li className="muted" style={{ padding: "0.5rem" }}>
-                  No subfolders here.
-                </li>
-              ) : (
-                wsListing.dirs.map((d) => {
-                  const nextSub = wsListing.subpath ? `${wsListing.subpath}/${d}` : d;
-                  return (
-                    <li key={d}>
-                      <button
-                        type="button"
-                        className="btn btn--sm workspace-dir-btn"
-                        onClick={() => void fetchWorkspaceDirs(wsBrowseNode, nextSub)}
-                      >
-                        <Folder size={13} aria-hidden="true" /> {d}/
-                      </button>
-                    </li>
-                  );
-                })
-              )}
-            </ul>
-          ) : null}
-
-          <div className="modal-actions">
-            <button type="button" className="btn" onClick={() => wsDialogRef.current?.close()}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="btn btn--accent"
-              disabled={!wsListing}
-              onClick={() => {
-                if (!wsListing) return;
-                updateConfig({
-                  exec_node: wsBrowseNode,
-                  workspace_subpath: wsListing.subpath
-                });
-                wsDialogRef.current?.close();
-              }}
-            >
-              Use This Workspace
-            </button>
-          </div>
-        </div>
-      </dialog>
+      <WorkspaceBrowserDialog
+        dialogRef={wsDialogRef}
+        wsTitleId={wsTitleId}
+        workspaceId={workspaceId}
+        nodes={snapshot?.nodes ?? []}
+        wsBrowseNode={wsBrowseNode}
+        setWsBrowseNode={setWsBrowseNode}
+        fetchWorkspaceDirs={fetchWorkspaceDirs}
+        workspaceSubpath={effectiveConfig.workspace_subpath}
+        onWorkspaceSubpathChange={(val) => {
+          if (activeConv) {
+            setConversations((prev) =>
+              prev.map((c) => (c.id === activeConv.id ? { ...c, workspace_subpath: val } : c))
+            );
+          } else {
+            setDraftConfig((prev) => ({ ...prev, workspace_subpath: val }));
+          }
+        }}
+        onWorkspaceSubpathBlur={(val) => {
+          if (activeConv) {
+            void patchConversation(activeConv.id, { workspace_subpath: val });
+          }
+        }}
+        wsListing={wsListing}
+        wsError={wsError}
+        wsLoading={wsLoading}
+        onApplyWorkspace={(nodeId, subpath) =>
+          updateConfig({ exec_node: nodeId, workspace_subpath: subpath })
+        }
+      />
     </div>
   );
 }
