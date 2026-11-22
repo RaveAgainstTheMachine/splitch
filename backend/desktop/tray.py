@@ -37,8 +37,11 @@ import httpx
 from backend.desktop._sni_dbus import run_linux_sni_tray
 from backend.desktop.icons import (
     StatusBadge,
+    ensure_tray_icon_theme,
     render_argb32_pixmap,
     render_png_bytes,
+    theme_tag,
+    tray_icon_stem,
 )
 from backend.desktop.shortcuts import (
     DesktopConfig,
@@ -50,6 +53,7 @@ from backend.desktop.shortcuts import (
     send_desktop_notification,
     set_tray_autostart,
     stop_splitch_graceful,
+    sync_desktop_icons,
     write_pid_file,
 )
 from backend.router.config import default_data_root
@@ -85,13 +89,17 @@ class TrayController:
         self.api_key: str = os.getenv("SPLITCH_API_KEY", "").strip()
         self.online: bool = False
         self.snapshot: dict[str, Any] = {}
+        self.theme: dict[str, Any] = self.cfg.theme.model_dump()
+        self._theme_tag: str = theme_tag(self.theme)
         self.update_note: str = ""
         self.revision: int = 1
         self._listeners: list[Callable[[], None]] = []
         self._action_map: dict[int, Callable[[], None]] = {}
         self._stop_event = threading.Event()
         self._quit_callbacks: list[Callable[[], None]] = []
-        self._pixmap_cache: dict[StatusBadge, list[tuple[int, int, bytes]]] = {}
+        self._pixmap_cache: dict[tuple[StatusBadge, str], list[tuple[int, int, bytes]]] = {}
+        self._desktop_sync_lock = threading.Lock()
+        self._desktop_sync_timer: threading.Timer | None = None
 
     def on_change(self, cb: Callable[[], None]) -> None:
         self._listeners.append(cb)
@@ -107,9 +115,46 @@ class TrayController:
 
     def request_quit(self) -> None:
         self._stop_event.set()
+        with self._desktop_sync_lock:
+            if self._desktop_sync_timer is not None:
+                self._desktop_sync_timer.cancel()
+                self._desktop_sync_timer = None
         for cb in list(self._quit_callbacks):
             with contextlib.suppress(Exception):
                 cb()
+
+    def _schedule_desktop_icon_sync(self, theme_snapshot: dict[str, Any]) -> None:
+        """Debounce desktop/app-menu/launcher icon sync so color-picker drags stay smooth."""
+        def _run() -> None:
+            if self._stop_event.is_set():
+                return
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                sync_desktop_icons(theme_snapshot)
+
+        with self._desktop_sync_lock:
+            if self._desktop_sync_timer is not None:
+                self._desktop_sync_timer.cancel()
+            timer = threading.Timer(0.45, _run)
+            timer.daemon = True
+            self._desktop_sync_timer = timer
+            timer.start()
+
+    def apply_snapshot(self, data: dict[str, Any], *, sync_desktop: bool = True) -> None:
+        """Apply a fresh `/api/status` or `/ws/status` snapshot and react to theme changes."""
+        self.snapshot = data
+        self.online = True
+        raw_theme = data.get("theme")
+        if isinstance(raw_theme, dict):
+            new_tag = theme_tag(raw_theme)
+            if new_tag != self._theme_tag:
+                self.theme = dict(raw_theme)
+                self._theme_tag = new_tag
+                self._pixmap_cache.clear()
+                with contextlib.suppress(OSError, ValueError):
+                    ensure_tray_icon_theme(default_data_root() / "icons", theme=self.theme)
+                if sync_desktop and not os.getenv("PYTEST_CURRENT_TEST"):
+                    self._schedule_desktop_icon_sync(dict(self.theme))
+        self._notify_changed()
 
     def auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
@@ -131,18 +176,18 @@ class TrayController:
         return "ok"
 
     def icon_name(self) -> str:
-        b = self.status_badge()
-        return f"splitch-{b}" if b != "plain" else "splitch"
+        return tray_icon_stem(self.status_badge(), theme=self.theme)
 
     def icon_pixmaps(self) -> list[tuple[int, int, bytes]]:
         badge = self.status_badge()
-        if badge not in self._pixmap_cache:
-            self._pixmap_cache[badge] = [
-                render_argb32_pixmap(22, badge),
-                render_argb32_pixmap(32, badge),
-                render_argb32_pixmap(64, badge),
+        cache_key = (badge, self._theme_tag)
+        if cache_key not in self._pixmap_cache:
+            self._pixmap_cache[cache_key] = [
+                render_argb32_pixmap(22, badge, theme=self.theme),
+                render_argb32_pixmap(32, badge, theme=self.theme),
+                render_argb32_pixmap(64, badge, theme=self.theme),
             ]
-        return self._pixmap_cache[badge]
+        return self._pixmap_cache[cache_key]
 
     def tooltip_summary(self) -> tuple[str, str]:
         nodes = self.snapshot.get("nodes") or []
@@ -422,9 +467,7 @@ class TrayController:
                 timeout=3.0,
             )
             if r.status_code == 200:
-                self.snapshot = r.json()
-                self.online = True
-                self._notify_changed()
+                self.apply_snapshot(r.json())
                 return
         except (httpx.HTTPError, ValueError):
             pass
@@ -459,9 +502,7 @@ class TrayController:
                         except ValueError:
                             continue
                         if isinstance(data, dict):
-                            self.snapshot = data
-                            self.online = True
-                            self._notify_changed()
+                            self.apply_snapshot(data)
             except (OSError, httpx.HTTPError, TimeoutError, ValueError, RuntimeError):
                 # Fallback single HTTP check in case WS blocked by proxy
                 await asyncio.to_thread(self.poll_once_sync)
@@ -476,13 +517,17 @@ def _run_pystray_tray(ctrl: TrayController) -> None:
     import pystray
     from PIL import Image
 
-    img_cache: dict[StatusBadge, Any] = {}
+    img_cache: dict[tuple[StatusBadge, str], Any] = {}
 
     def _get_image() -> Any:
         b = ctrl.status_badge()
-        if b not in img_cache:
-            img_cache[b] = Image.open(io.BytesIO(render_png_bytes(64, b)))
-        return img_cache[b]
+        key = (b, ctrl._theme_tag)
+        if key not in img_cache:
+            # Keep cache bounded to current theme only
+            if len(img_cache) > 8:
+                img_cache.clear()
+            img_cache[key] = Image.open(io.BytesIO(render_png_bytes(64, b, theme=ctrl.theme)))
+        return img_cache[key]
 
     def _to_pystray_items(items: list[TrayMenuItem]) -> list[Any]:
         out: list[Any] = []

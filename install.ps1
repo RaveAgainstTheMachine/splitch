@@ -1,4 +1,4 @@
-﻿# Splitch Universal Installer & Updater for Windows (PowerShell)
+# Splitch Universal Installer & Updater for Windows (PowerShell)
 #
 # Install or update in one command:
 #   irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.ps1 | iex

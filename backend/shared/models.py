@@ -128,6 +128,21 @@ class ControlState(BaseModel):
     force_node: str = "auto"
 
 
+class UiThemeConfig(BaseModel):
+    scheme: Literal["system", "dark", "light"] = "system"
+    accent: str = ""
+    surface: Literal["default", "oled", "slate", "charcoal"] = "default"
+    resolved_light: bool = False
+    updated_at: float = 0.0
+
+
+class UiThemeUpdate(BaseModel):
+    scheme: Literal["system", "dark", "light"] | None = None
+    accent: str | None = None
+    surface: Literal["default", "oled", "slate", "charcoal"] | None = None
+    resolved_light: bool | None = None
+
+
 class TraceEntry(BaseModel):
     id: str
     timestamp: float
@@ -149,6 +164,7 @@ class DashboardSnapshot(BaseModel):
     version: str
     uptime_s: float
     control: ControlState
+    theme: UiThemeConfig = Field(default_factory=UiThemeConfig)
     nodes: list[NodeStatus]
     aliases: list[AliasConfig]
     traces: list[TraceEntry]

@@ -9,33 +9,39 @@ COSMIC, i3, bspwm, AwesomeWM, etc.), macOS, and Windows with zero extra dependen
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import json
 import os
+import re
 import shutil
 import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import webbrowser
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 import psutil
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.desktop.icons import (
     ensure_tray_icon_theme,
     render_ico_bytes,
     render_png_bytes,
     render_svg_text,
+    theme_tag,
 )
 from backend.router.config import default_data_root
+from backend.shared.models import UiThemeConfig
 from backend.version import __version__ as VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SVG_LOGO_SRC = REPO_ROOT / "docs" / "assets" / "splitch-logo.svg"
+_ICON_LINE_RE = re.compile(r"^Icon=.*$", re.MULTILINE)
 
 
 class DesktopConfig(BaseModel):
@@ -45,6 +51,7 @@ class DesktopConfig(BaseModel):
     autostart: bool = False
     desktop_icon: bool = True
     local_service: str = ""
+    theme: UiThemeConfig = Field(default_factory=UiThemeConfig)
 
 
 def desktop_config_path() -> Path:
@@ -207,21 +214,284 @@ def _linux_autostart_content(splitch_bin: str, icon_value: str = "splitch") -> s
     )
 
 
+def _atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
+    """Atomically replace a file in place so DE monitors (KDirWatch) reload icons without losing grid placement."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if mode is not None and sys.platform != "win32":
+            tmp_path.chmod(mode)
+        os.replace(tmp_path, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
+
+
+def _rewrite_desktop_file_icon(desktop_file: Path, icon_value: str) -> bool:
+    """Update all `Icon=` lines inside an existing `.desktop` file atomically."""
+    if not desktop_file.is_file():
+        return False
+    try:
+        old = desktop_file.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    updated = _ICON_LINE_RE.sub(f"Icon={icon_value}", old)
+    if updated == old:
+        return False
+    _atomic_write_text(desktop_file, updated, mode=0o755)
+    return True
+
+
+def _refresh_linux_icon_caches(app_dir: Path | None = None) -> None:
+    """Refresh Freedesktop, GTK, and KDE Plasma in-memory icon & menu caches (non-fatal)."""
+    cmds: list[list[str]] = []
+    if app_dir is not None and app_dir.is_dir():
+        cmds.append(["update-desktop-database", str(app_dir)])
+    hicolor = Path.home() / ".local" / "share" / "icons" / "hicolor"
+    if (hicolor / "index.theme").is_file():
+        cmds.append(["gtk-update-icon-cache", "-f", "-t", str(hicolor)])
+    cmds.extend(
+        [
+            ["kbuildsycoca6", "--noincremental"],
+            ["kbuildsycoca5", "--noincremental"],
+        ]
+    )
+    for cmd in cmds:
+        if shutil.which(cmd[0]):
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5.0,
+                    check=False,
+                )
+
+    # Broadcast KDE icon-change signals on session D-Bus so plasmashell flushes
+    # in-memory icon pixmap caches immediately without restarting the shell
+    if shutil.which("dbus-send"):
+        for sig_cmd in (
+            [
+                "dbus-send",
+                "--session",
+                "--type=signal",
+                "/KIconLoader",
+                "org.kde.KIconLoader.iconChanged",
+                "int32:0",
+            ],
+            [
+                "dbus-send",
+                "--session",
+                "--type=signal",
+                "/KGlobalSettings",
+                "org.kde.KGlobalSettings.notifyChange",
+                "int32:4",
+                "int32:0",
+            ],
+        ):
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                subprocess.run(
+                    sig_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3.0,
+                    check=False,
+                )
+
+
+def _notify_windows_shell_icons() -> None:
+    """Ask Windows Explorer to refresh desktop & Start Menu shortcut icon caches."""
+    if sys.platform != "win32":
+        return
+    with contextlib.suppress(AttributeError, OSError):
+        # SHCNE_ASSOCCHANGED = 0x08000000, SHCNF_IDLIST = 0x0000
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)  # type: ignore[attr-defined]
+
+
+def _write_windows_themed_ico(icons_root: Path, theme: Any = None) -> Path:
+    """Write both canonical `splitch.ico` and cache-busted `splitch-<tag>.ico`, pruning stale ones."""
+    icons_root.mkdir(parents=True, exist_ok=True)
+    tag = theme_tag(theme)
+    ico_bytes = render_ico_bytes("plain", theme=theme)
+    canonical = icons_root / "splitch.ico"
+    hashed = icons_root / f"splitch-{tag}.ico"
+    canonical.write_bytes(ico_bytes)
+    hashed.write_bytes(ico_bytes)
+    for entry in icons_root.iterdir():
+        if (
+            entry.is_file()
+            and entry.name.startswith("splitch-")
+            and entry.name.endswith(".ico")
+            and entry.name != hashed.name
+        ):
+            with contextlib.suppress(OSError):
+                entry.unlink()
+    return hashed
+
+
+def _update_windows_shortcut_icon(lnk_path: Path, icon_path: Path) -> bool:
+    if sys.platform != "win32" or not lnk_path.is_file():
+        return False
+    ps_bin = shutil.which("powershell") or shutil.which("pwsh")
+    if not ps_bin:
+        return False
+
+    def esc(s: str) -> str:
+        return s.replace("'", "''")
+
+    script = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        f"$sc = $ws.CreateShortcut('{esc(str(lnk_path))}'); "
+        f"$sc.IconLocation = '{esc(str(icon_path))},0'; "
+        "$sc.Save()"
+    )
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        proc = subprocess.run([ps_bin, "-NoProfile", "-Command", script], timeout=8.0, check=False)
+        return proc.returncode == 0
+    return False
+
+
+def desktop_shortcuts_installed() -> bool:
+    """Return True if any Splitch OS shortcut / app-menu entry currently exists on this host."""
+    if sys.platform.startswith("linux"):
+        return any(
+            p.is_file()
+            for p in (
+                Path.home() / ".local" / "share" / "applications" / "splitch.desktop",
+                _xdg_desktop_dir() / "splitch.desktop",
+                Path.home() / ".config" / "autostart" / "splitch-tray.desktop",
+            )
+        )
+    if sys.platform == "darwin":
+        return (Path.home() / "Applications" / "Splitch.app").is_dir()
+    if sys.platform == "win32":
+        appdata = os.getenv("APPDATA", "")
+        cands = [Path.home() / "Desktop" / "Splitch.lnk"]
+        if appdata:
+            cands.append(Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Splitch.lnk")
+        return any(p.is_file() for p in cands)
+    return False
+
+
+def sync_desktop_icons(
+    theme: UiThemeConfig | dict[str, Any] | None = None,
+    *,
+    refresh_caches: bool = True,
+) -> dict:
+    """
+    Regenerate Splitch icon assets (tray, hicolor, desktop, app menu / Start Menu / macOS .app)
+    for `theme` and update existing shortcuts atomically with cache-busted icon paths.
+    """
+    cfg = load_desktop_config()
+    if theme is None:
+        eff_theme = cfg.theme
+    elif isinstance(theme, UiThemeConfig):
+        eff_theme = theme
+    else:
+        eff_theme = UiThemeConfig.model_validate(theme)
+
+    if cfg.theme.model_dump() != eff_theme.model_dump():
+        cfg.theme = eff_theme
+        save_desktop_config(cfg)
+
+    tag = theme_tag(eff_theme)
+    icons_root = ensure_tray_icon_theme(default_data_root() / "icons", theme=eff_theme)
+    updated_paths: list[str] = [str(icons_root / f"splitch-256-{tag}.png")]
+
+    if sys.platform.startswith("linux"):
+        hicolor = Path.home() / ".local" / "share" / "icons" / "hicolor"
+        if (hicolor / "scalable" / "apps").is_dir() or desktop_shortcuts_installed():
+            svg_dst = hicolor / "scalable" / "apps" / "splitch.svg"
+            svg_dst.parent.mkdir(parents=True, exist_ok=True)
+            svg_dst.write_text(render_svg_text(theme=eff_theme), encoding="utf-8")
+            updated_paths.append(str(svg_dst))
+
+            for px in (48, 64, 128, 256):
+                png_dst = hicolor / f"{px}x{px}" / "apps" / "splitch.png"
+                png_dst.parent.mkdir(parents=True, exist_ok=True)
+                png_dst.write_bytes(render_png_bytes(px, "plain", theme=eff_theme))
+                updated_paths.append(str(png_dst))
+
+            top_icon = Path.home() / ".local" / "share" / "icons" / "splitch.png"
+            top_icon.parent.mkdir(parents=True, exist_ok=True)
+            top_icon.write_bytes(render_png_bytes(256, "plain", theme=eff_theme))
+            updated_paths.append(str(top_icon))
+
+        abs_icon_path = str(icons_root / f"splitch-256-{tag}.png")
+        app_desktop = Path.home() / ".local" / "share" / "applications" / "splitch.desktop"
+        desk_file = _xdg_desktop_dir() / "splitch.desktop"
+        auto_file = Path.home() / ".config" / "autostart" / "splitch-tray.desktop"
+        for df in (app_desktop, desk_file, auto_file):
+            if _rewrite_desktop_file_icon(df, abs_icon_path):
+                updated_paths.append(str(df))
+
+        if refresh_caches:
+            _refresh_linux_icon_caches(app_desktop.parent)
+
+    elif sys.platform == "darwin":
+        app_dir = Path.home() / "Applications" / "Splitch.app"
+        res_dir = app_dir / "Contents" / "Resources"
+        if res_dir.is_dir():
+            png_dst = res_dir / "splitch.png"
+            png_dst.write_bytes(render_png_bytes(256, "plain", theme=eff_theme))
+            updated_paths.append(str(png_dst))
+            with contextlib.suppress(OSError):
+                os.utime(app_dir, None)
+            lsreg = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+            if refresh_caches and Path(lsreg).is_file():
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    subprocess.run(
+                        [lsreg, "-f", str(app_dir)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=4.0,
+                        check=False,
+                    )
+
+    elif sys.platform == "win32":
+        hashed_ico = _write_windows_themed_ico(icons_root, theme=eff_theme)
+        updated_paths.append(str(hashed_ico))
+        appdata = os.getenv("APPDATA", "")
+        lnks: list[Path] = [Path.home() / "Desktop" / "Splitch.lnk"]
+        if appdata:
+            lnks.append(Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Splitch.lnk")
+            lnks.append(
+                Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Splitch Tray.lnk"
+            )
+        for lnk in lnks:
+            if _update_windows_shortcut_icon(lnk, hashed_ico):
+                updated_paths.append(str(lnk))
+        if refresh_caches:
+            _notify_windows_shell_icons()
+
+    return {
+        "ok": True,
+        "platform": sys.platform,
+        "tag": tag,
+        "theme": eff_theme.model_dump(),
+        "updated_paths": updated_paths,
+    }
+
+
 def set_tray_autostart(enabled: bool, *, splitch_bin: str | None = None) -> Path | None:
     """Enable or disable system tray login autostart across Linux, macOS, and Windows."""
     bin_path = splitch_bin or resolve_splitch_bin()
     cfg = load_desktop_config()
     cfg.autostart = enabled
     save_desktop_config(cfg)
+    tag = theme_tag(cfg.theme)
 
     if sys.platform.startswith("linux"):
         auto_file = Path.home() / ".config" / "autostart" / "splitch-tray.desktop"
         if enabled:
+            hashed_png = default_data_root() / "icons" / f"splitch-256-{tag}.png"
             icon_png = default_data_root() / "icons" / "splitch-256.png"
-            icon_val = str(icon_png) if icon_png.is_file() else "splitch"
-            auto_file.parent.mkdir(parents=True, exist_ok=True)
-            auto_file.write_text(_linux_autostart_content(bin_path, icon_val), encoding="utf-8")
-            auto_file.chmod(0o755)
+            icon_val = str(hashed_png) if hashed_png.is_file() else (str(icon_png) if icon_png.is_file() else "splitch")
+            _atomic_write_text(auto_file, _linux_autostart_content(bin_path, icon_val), mode=0o755)
             return auto_file
         if auto_file.exists():
             auto_file.unlink()
@@ -260,7 +530,8 @@ def set_tray_autostart(enabled: bool, *, splitch_bin: str | None = None) -> Path
             return None
         lnk = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Splitch Tray.lnk"
         if enabled:
-            ico = default_data_root() / "icons" / "splitch.ico"
+            hashed_ico = default_data_root() / "icons" / f"splitch-{tag}.ico"
+            ico = hashed_ico if hashed_ico.is_file() else (default_data_root() / "icons" / "splitch.ico")
             _create_windows_shortcut(lnk, bin_path, "tray", ico, "Splitch System Tray")
             return lnk
         if lnk.exists():
@@ -302,6 +573,7 @@ def install_desktop_integration(
     mode: Literal["local", "remote"] | None = None,
     local_service: str | None = None,
     splitch_bin: str | None = None,
+    theme: UiThemeConfig | dict[str, Any] | None = None,
 ) -> dict:
     """Install OS Application Menu / Start Menu entry, optional Desktop Icon, icons & config."""
     bin_path = splitch_bin or resolve_splitch_bin()
@@ -315,6 +587,11 @@ def install_desktop_integration(
     eff_service = (
         local_service if local_service is not None else (existing.local_service or _detect_local_user_service())
     )
+    eff_theme = (
+        theme
+        if isinstance(theme, UiThemeConfig)
+        else (UiThemeConfig.model_validate(theme) if isinstance(theme, dict) else existing.theme)
+    )
 
     cfg = DesktopConfig(
         mode=eff_mode,
@@ -323,29 +600,31 @@ def install_desktop_integration(
         autostart=autostart,
         desktop_icon=desktop_icon,
         local_service=eff_service,
+        theme=eff_theme,
     )
     save_desktop_config(cfg)
 
-    icons_root = ensure_tray_icon_theme(default_data_root() / "icons")
+    tag = theme_tag(eff_theme)
+    icons_root = ensure_tray_icon_theme(default_data_root() / "icons", theme=eff_theme)
     installed_paths: list[str] = [str(icons_root)]
 
     if sys.platform.startswith("linux"):
         hicolor = Path.home() / ".local" / "share" / "icons" / "hicolor"
         svg_dst = hicolor / "scalable" / "apps" / "splitch.svg"
         svg_dst.parent.mkdir(parents=True, exist_ok=True)
-        svg_dst.write_text(render_svg_text(), encoding="utf-8")
+        svg_dst.write_text(render_svg_text(theme=eff_theme), encoding="utf-8")
         installed_paths.append(str(svg_dst))
 
         for px in (48, 64, 128, 256):
             png_dst = hicolor / f"{px}x{px}" / "apps" / "splitch.png"
             png_dst.parent.mkdir(parents=True, exist_ok=True)
-            png_dst.write_bytes(render_png_bytes(px, "plain"))
+            png_dst.write_bytes(render_png_bytes(px, "plain", theme=eff_theme))
             installed_paths.append(str(png_dst))
 
         # Also place top-level fallback `~/.local/share/icons/splitch.png` per XDG Icon Theme Spec
         top_icon = Path.home() / ".local" / "share" / "icons" / "splitch.png"
         top_icon.parent.mkdir(parents=True, exist_ok=True)
-        top_icon.write_bytes(render_png_bytes(256, "plain"))
+        top_icon.write_bytes(render_png_bytes(256, "plain", theme=eff_theme))
         installed_paths.append(str(top_icon))
 
         # Remove stale icon-theme.cache if hicolor has no index.theme (prevents GTK/KDE empty cache hits)
@@ -354,26 +633,19 @@ def install_desktop_integration(
             with contextlib.suppress(OSError):
                 stale_cache.unlink()
 
-        # Use explicit absolute 256px PNG path in .desktop files so every DE/WM/Qt/GTK renders
-        # the icon immediately without theme inheritance or QtSvg clipPath quirks
-        abs_icon_path = str(icons_root / "splitch-256.png")
+        # Use explicit absolute cache-busted 256px PNG path in .desktop files so every DE/WM/Qt/GTK
+        # renders the active theme color immediately without icon-name cache staleness
+        abs_icon_path = str(icons_root / f"splitch-256-{tag}.png")
         entry_text = _linux_desktop_entry_content(bin_path, abs_icon_path)
         app_desktop = Path.home() / ".local" / "share" / "applications" / "splitch.desktop"
-        app_desktop.parent.mkdir(parents=True, exist_ok=True)
-        app_desktop.write_text(entry_text, encoding="utf-8")
-        app_desktop.chmod(0o755)
+        _atomic_write_text(app_desktop, entry_text, mode=0o755)
         installed_paths.append(str(app_desktop))
 
         if desktop_icon:
             desk_dir = _xdg_desktop_dir()
             if desk_dir.is_dir():
                 desk_file = desk_dir / "splitch.desktop"
-                # Atomic replace so KDE Plasma FolderView / Dolphin KDirWatch reloads the icon
-                if desk_file.exists():
-                    with contextlib.suppress(OSError):
-                        desk_file.unlink()
-                desk_file.write_text(entry_text, encoding="utf-8")
-                desk_file.chmod(0o755)
+                _atomic_write_text(desk_file, entry_text, mode=0o755)
                 installed_paths.append(str(desk_file))
                 if shutil.which("gio"):
                     with contextlib.suppress(OSError, subprocess.TimeoutExpired):
@@ -385,46 +657,7 @@ def install_desktop_integration(
                             check=False,
                         )
 
-        # Refresh KDE / GNOME / Freedesktop icon & menu caches (non-fatal)
-        for cmd in (
-            ["update-desktop-database", str(app_desktop.parent)],
-            ["kbuildsycoca6", "--noincremental"],
-            ["kbuildsycoca5", "--noincremental"],
-        ):
-            if shutil.which(cmd[0]):
-                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5.0, check=False)
-
-        # Broadcast org.kde.KIconLoader.iconChanged(0) on session D-Bus so plasmashell
-        # flushes in-memory icon caches immediately without restarting the shell
-        if shutil.which("dbus-send"):
-            for sig_cmd in (
-                [
-                    "dbus-send",
-                    "--session",
-                    "--type=signal",
-                    "/KIconLoader",
-                    "org.kde.KIconLoader.iconChanged",
-                    "int32:0",
-                ],
-                [
-                    "dbus-send",
-                    "--session",
-                    "--type=signal",
-                    "/KGlobalSettings",
-                    "org.kde.KGlobalSettings.notifyChange",
-                    "int32:4",
-                    "int32:0",
-                ],
-            ):
-                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-                    subprocess.run(
-                        sig_cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=3.0,
-                        check=False,
-                    )
+        _refresh_linux_icon_caches(app_desktop.parent)
 
     elif sys.platform == "darwin":
         app_dir = Path.home() / "Applications" / "Splitch.app"
@@ -432,7 +665,7 @@ def install_desktop_integration(
         res_dir = app_dir / "Contents" / "Resources"
         macos_dir.mkdir(parents=True, exist_ok=True)
         res_dir.mkdir(parents=True, exist_ok=True)
-        (res_dir / "splitch.png").write_bytes(render_png_bytes(256, "plain"))
+        (res_dir / "splitch.png").write_bytes(render_png_bytes(256, "plain", theme=eff_theme))
         (app_dir / "Contents" / "Info.plist").write_text(
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
@@ -454,8 +687,7 @@ def install_desktop_integration(
         installed_paths.append(str(app_dir))
 
     elif sys.platform == "win32":
-        ico = icons_root / "splitch.ico"
-        ico.write_bytes(render_ico_bytes("plain"))
+        ico = _write_windows_themed_ico(icons_root, theme=eff_theme)
         installed_paths.append(str(ico))
         appdata = os.getenv("APPDATA", "")
         if appdata:
@@ -466,6 +698,7 @@ def install_desktop_integration(
             desk_lnk = Path.home() / "Desktop" / "Splitch.lnk"
             _create_windows_shortcut(desk_lnk, bin_path, "launch", ico, "Splitch Local AI Control Plane")
             installed_paths.append(str(desk_lnk))
+        _notify_windows_shell_icons()
 
     auto_path = set_tray_autostart(autostart, splitch_bin=bin_path)
     if auto_path:

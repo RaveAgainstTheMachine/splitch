@@ -1,28 +1,37 @@
-"""Tests for Splitch desktop icon rasterizer, OS shortcuts, autostart, and universal tray."""
+"""Tests for Splitch desktop icon rasterizer, dynamic theming, OS shortcuts, autostart, and universal tray."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from backend.desktop.icons import (
     ensure_tray_icon_theme,
     render_argb32_pixmap,
     render_ico_bytes,
     render_png_bytes,
+    render_svg_text,
+    theme_tag,
 )
 from backend.desktop.shortcuts import (
     DesktopConfig,
     install_desktop_integration,
     load_desktop_config,
     set_tray_autostart,
+    sync_desktop_icons,
     uninstall_desktop_integration,
 )
 from backend.desktop.tray import TrayController
+from backend.router import app as router_app_mod
 from backend.version import __version__ as VERSION
 
 
 def test_icon_rasterizer_png_argb_and_ico(tmp_path: Path) -> None:
+    cyan_theme = {"scheme": "dark", "accent": "#22d3ee", "surface": "oled"}
+    rose_light = {"scheme": "light", "accent": "#fb7185", "surface": "default"}
+
     for status in ("plain", "ok", "warn", "offline"):
         png = render_png_bytes(32, status)  # type: ignore[arg-type]
         assert png.startswith(b"\x89PNG\r\n\x1a\n")
@@ -32,13 +41,45 @@ def test_icon_rasterizer_png_argb_and_ico(tmp_path: Path) -> None:
         assert (w, h) == (22, 22)
         assert len(argb) == 22 * 22 * 4
 
-    ico = render_ico_bytes("plain")
-    assert ico[:4] == b"\x00\x00\x01\x00"
-    assert len(ico) > 400
+    # Changing accent/surface/scheme changes rendered PNG, ARGB32, ICO, and SVG bytes
+    png_cyan = render_png_bytes(32, "ok", theme=cyan_theme)
+    png_rose = render_png_bytes(32, "ok", theme=rose_light)
+    assert png_cyan != png_rose
 
-    theme_dir = ensure_tray_icon_theme(tmp_path / "icons")
-    for fname in ("splitch.png", "splitch-ok.png", "splitch-warn.png", "splitch-offline.png"):
-        assert (theme_dir / fname).is_file()
+    assert render_argb32_pixmap(22, "ok", theme=cyan_theme)[2] != render_argb32_pixmap(
+        22, "ok", theme=rose_light
+    )[2]
+
+    svg_cyan = render_svg_text(theme=cyan_theme)
+    svg_rose = render_svg_text(theme=rose_light)
+    assert "#22d3ee" in svg_cyan and "#000000" in svg_cyan
+    assert "#fb7185" in svg_rose and "#f6f7fb" in svg_rose
+
+    ico_cyan = render_ico_bytes("plain", theme=cyan_theme)
+    ico_rose = render_ico_bytes("plain", theme=rose_light)
+    assert ico_cyan[:4] == b"\x00\x00\x01\x00"
+    assert len(ico_cyan) > 400
+    assert ico_cyan != ico_rose
+
+    icons_dir = tmp_path / "icons"
+    tag1 = theme_tag(cyan_theme)
+    ensure_tray_icon_theme(icons_dir, theme=cyan_theme)
+    for fname in (
+        "splitch.png",
+        "splitch-ok.png",
+        "splitch-warn.png",
+        "splitch-offline.png",
+        f"splitch-ok-{tag1}.png",
+        f"splitch-256-{tag1}.png",
+    ):
+        assert (icons_dir / fname).is_file()
+
+    # Switching theme writes new hashed files and prunes stale hashed PNGs
+    tag2 = theme_tag(rose_light)
+    assert tag1 != tag2
+    ensure_tray_icon_theme(icons_dir, theme=rose_light)
+    assert (icons_dir / f"splitch-ok-{tag2}.png").is_file()
+    assert not (icons_dir / f"splitch-ok-{tag1}.png").exists()
 
 
 def test_linux_desktop_install_autostart_and_uninstall(tmp_path: Path, monkeypatch) -> None:
@@ -75,6 +116,19 @@ def test_linux_desktop_install_autostart_and_uninstall(tmp_path: Path, monkeypat
     assert "[Desktop Action StopSplitch]" in content
     assert "X-KDE-autostart-after=panel" in auto_file.read_text(encoding="utf-8")
 
+    # Syncing a new accent + surface atomically updates Icon= in app menu, desktop, and autostart
+    new_theme = {"scheme": "dark", "accent": "#22d3ee", "surface": "oled"}
+    expected_tag = theme_tag(new_theme)
+    sync_res = sync_desktop_icons(new_theme, refresh_caches=False)
+    assert sync_res["ok"] is True
+    assert sync_res["tag"] == expected_tag
+    expected_icon = f"splitch-256-{expected_tag}.png"
+    assert expected_icon in app_file.read_text(encoding="utf-8")
+    assert expected_icon in desk_file.read_text(encoding="utf-8")
+    assert expected_icon in auto_file.read_text(encoding="utf-8")
+    assert "#22d3ee" in svg_file.read_text(encoding="utf-8")
+    assert load_desktop_config().theme.accent == "#22d3ee"
+
     cfg = load_desktop_config()
     assert cfg.mode == "remote"
     assert cfg.router_url == "http://192.168.1.20:8080"
@@ -98,12 +152,12 @@ def test_tray_controller_state_badges_and_menu_tree(tmp_path: Path, monkeypatch)
     ctrl.cfg = DesktopConfig(mode="local", router_url="http://127.0.0.1:8080")
 
     assert ctrl.status_badge() == "offline"
-    assert ctrl.icon_name() == "splitch-offline"
+    assert ctrl.icon_name().startswith("splitch-offline-")
 
-    ctrl.online = True
-    ctrl.snapshot = {
+    snap = {
         "version": VERSION,
         "control": {"gaming_mode": False, "force_node": "auto"},
+        "theme": {"scheme": "dark", "accent": "#a78bfa", "surface": "default"},
         "nodes": [
             {
                 "node_id": "gpu-rig",
@@ -119,9 +173,13 @@ def test_tray_controller_state_badges_and_menu_tree(tmp_path: Path, monkeypatch)
             }
         ],
     }
+    ctrl.apply_snapshot(snap, sync_desktop=False)
 
     assert ctrl.status_badge() == "ok"
-    assert ctrl.icon_name() == "splitch-ok"
+    violet_icon = ctrl.icon_name()
+    assert violet_icon.startswith("splitch-ok-")
+    violet_pix = ctrl.icon_pixmaps()[0][2]
+
     title, desc = ctrl.tooltip_summary()
     assert "Online (1/1 nodes)" in title
     assert "Workstation (RTX 4090)" in desc
@@ -139,10 +197,56 @@ def test_tray_controller_state_badges_and_menu_tree(tmp_path: Path, monkeypatch)
     assert routing_item.children[0].label == "Auto Split"
     assert routing_item.children[0].toggle_state == 1
 
+    # Theme update over WebSocket snapshot immediately swaps icon_name & ARGB32 pixmap
+    emerald_snap = {
+        **snap,
+        "theme": {"scheme": "dark", "accent": "#34d399", "surface": "slate"},
+    }
+    ctrl.apply_snapshot(emerald_snap, sync_desktop=False)
+    emerald_icon = ctrl.icon_name()
+    assert emerald_icon.startswith("splitch-ok-")
+    assert emerald_icon != violet_icon
+    assert ctrl.icon_pixmaps()[0][2] != violet_pix
+    assert (tmp_path / "icons" / f"{emerald_icon}.png").is_file()
+
     # Gaming mode flips badge to warn (amber)
     ctrl.snapshot["control"]["gaming_mode"] = True
     assert ctrl.status_badge() == "warn"
-    assert ctrl.icon_name() == "splitch-warn"
+    assert ctrl.icon_name().startswith("splitch-warn-")
+
+
+def test_router_theme_api_and_dynamic_favicon(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(router_app_mod.cluster, "data_dir", tmp_path)
+    old_theme = router_app_mod.cluster.theme.model_copy()
+    try:
+        client = TestClient(router_app_mod.app)
+        bad = client.patch("/api/theme", json={"accent": "not-a-hex"})
+        assert bad.status_code == 400
+
+        res = client.patch(
+            "/api/theme",
+            json={"scheme": "dark", "accent": "#fb7185", "surface": "oled", "resolved_light": False},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["accent"] == "#fb7185"
+        assert body["surface"] == "oled"
+        assert body["updated_at"] > 0
+
+        get_res = client.get("/api/theme")
+        assert get_res.status_code == 200
+        assert get_res.json()["accent"] == "#fb7185"
+
+        status_res = client.get("/api/status")
+        assert status_res.status_code == 200
+        assert status_res.json()["theme"]["accent"] == "#fb7185"
+
+        fav_res = client.get("/favicon.svg")
+        assert fav_res.status_code == 200
+        assert "#fb7185" in fav_res.text
+        assert "#000000" in fav_res.text
+    finally:
+        router_app_mod.cluster.theme = old_theme
 
 
 def test_dbus_next_struct_signatures_valid(tmp_path: Path, monkeypatch) -> None:

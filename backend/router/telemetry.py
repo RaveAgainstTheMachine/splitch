@@ -15,6 +15,7 @@ import httpx
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from backend.desktop.icons import normalize_accent_hex
 from backend.router.config import (
     SplitchConfig,
     default_data_root,
@@ -30,6 +31,8 @@ from backend.shared.models import (
     NodeStatus,
     NodeTelemetry,
     TraceEntry,
+    UiThemeConfig,
+    UiThemeUpdate,
 )
 from backend.shared.secrets import (
     SecretVault,
@@ -82,6 +85,7 @@ class ClusterState:
             for n in config.nodes
         }
         self._load_dynamic_nodes()
+        self.theme: UiThemeConfig = self._load_ui_theme()
         self.aliases: dict[str, AliasConfig] = {a.alias: a for a in config.aliases}
         self.traces: deque[TraceEntry] = deque(maxlen=config.router.max_traces)
         self._ws_clients: set[WebSocket] = set()
@@ -101,6 +105,35 @@ class ClusterState:
         if self.data_dir is None:
             return None
         return self.data_dir / "nodes.json"
+
+    def _ui_theme_path(self) -> Path | None:
+        if self.data_dir is None:
+            return None
+        return self.data_dir / "ui_theme.json"
+
+    def _load_ui_theme(self) -> UiThemeConfig:
+        p = self._ui_theme_path()
+        if not p or not p.exists():
+            return UiThemeConfig()
+        try:
+            return UiThemeConfig.model_validate(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError, ValidationError):
+            return UiThemeConfig()
+
+    async def _persist_ui_theme(self) -> None:
+        p = self._ui_theme_path()
+        if not p:
+            return
+        payload = self.theme.model_dump_json(indent=2)
+
+        def _write_theme() -> None:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(payload + "\n", encoding="utf-8")
+            if os.name != "nt":
+                with contextlib.suppress(OSError):
+                    p.chmod(0o600)
+
+        await asyncio.to_thread(_write_theme)
 
     def _load_dynamic_nodes(self) -> None:
         p = self._dynamic_nodes_path()
@@ -284,10 +317,47 @@ class ClusterState:
             version=VERSION,
             uptime_s=round(time.time() - self.started_at, 1),
             control=self.control,
+            theme=self.theme,
             nodes=list(self.nodes.values()),
             aliases=list(self.aliases.values()),
             traces=list(self.traces),
         )
+
+    async def update_theme(self, update: UiThemeUpdate) -> UiThemeConfig:
+        if update.accent is not None:
+            raw = update.accent.strip()
+            if raw and not normalize_accent_hex(raw):
+                raise ValueError("accent must be empty or a 6-digit hex color like #a78bfa")
+            self.theme.accent = normalize_accent_hex(raw)
+        if update.scheme is not None:
+            self.theme.scheme = update.scheme
+        if update.surface is not None:
+            self.theme.surface = update.surface
+        if update.resolved_light is not None:
+            self.theme.resolved_light = update.resolved_light
+        self.theme.updated_at = time.time()
+        await self._persist_ui_theme()
+        await self.broadcast_snapshot()
+        # Best-effort local desktop icon sync when router runs on a desktop host with shortcuts
+        if (
+            not os.getenv("PYTEST_CURRENT_TEST")
+            and os.getenv("SPLITCH_SYNC_DESKTOP_ON_ROUTER", "1") != "0"
+        ):
+            theme_copy = self.theme.model_copy()
+
+            def _sync_local_host_icons() -> None:
+                from backend.desktop.shortcuts import (
+                    desktop_shortcuts_installed,
+                    is_desktop_applicable,
+                    sync_desktop_icons,
+                )
+
+                if is_desktop_applicable() and desktop_shortcuts_installed():
+                    with contextlib.suppress(OSError, RuntimeError, ValueError):
+                        sync_desktop_icons(theme_copy)
+
+            asyncio.create_task(asyncio.to_thread(_sync_local_host_icons))
+        return self.theme
 
     async def update_control(
         self, gaming_mode: bool | None = None, force_node: str | None = None

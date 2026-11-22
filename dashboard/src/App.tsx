@@ -25,7 +25,13 @@ import { ModelsTab } from "./components/ModelsTab";
 import { SettingsDialog, type SettingsTabId } from "./components/SettingsDialog";
 import { SkillsTab } from "./components/SkillsTab";
 import { SplitchLogo } from "./components/SplitchLogo";
-import { syncFaviconFromTheme } from "./utils/favicon";
+import {
+  applyThemeToDom,
+  hasLocalThemeOverride,
+  pushThemeToRouter,
+  readLocalTheme,
+  syncFaviconFromTheme
+} from "./utils/favicon";
 import type {
   AuthStatusResponse,
   ControlState,
@@ -73,6 +79,8 @@ export default function App() {
   const panelRefs = useRef<Partial<Record<TabId, HTMLDivElement | null>>>({});
   const settingsDialogRef = useRef<HTMLDialogElement | null>(null);
   const authDialogRef = useRef<HTMLDialogElement | null>(null);
+  const lastRemoteThemeTsRef = useRef<number>(0);
+  const initialLocalThemePushedRef = useRef<boolean>(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTabId>("clients");
 
   const openSettings = (tab: SettingsTabId) => {
@@ -272,7 +280,13 @@ export default function App() {
       typeof window !== "undefined" && typeof window.matchMedia === "function"
         ? window.matchMedia("(prefers-color-scheme: light)")
         : null;
-    const onSchemeChange = () => syncFaviconFromTheme();
+    const onSchemeChange = () => {
+      syncFaviconFromTheme();
+      const cur = readLocalTheme();
+      if (cur.scheme === "system") {
+        void pushThemeToRouter(cur);
+      }
+    };
     mq?.addEventListener("change", onSchemeChange);
 
     return () => {
@@ -320,6 +334,20 @@ export default function App() {
       ws?.close();
     };
   }, []);
+
+  // Synchronize shared Appearance theme between router snapshots & browser DOM/favicon
+  useEffect(() => {
+    const remote = snapshot?.theme;
+    if (!remote) return;
+    const ts = remote.updated_at ?? 0;
+    if (ts > 0 && ts > lastRemoteThemeTsRef.current) {
+      lastRemoteThemeTsRef.current = ts;
+      applyThemeToDom(remote);
+    } else if (ts === 0 && !initialLocalThemePushedRef.current && hasLocalThemeOverride()) {
+      initialLocalThemePushedRef.current = true;
+      void pushThemeToRouter(readLocalTheme());
+    }
+  }, [snapshot?.theme]);
 
   const selectTab = (id: TabId) => {
     setActiveTab(id);

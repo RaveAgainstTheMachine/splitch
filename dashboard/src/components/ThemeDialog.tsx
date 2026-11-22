@@ -1,7 +1,15 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Monitor, Moon, Palette, RotateCcw, Sun } from "lucide-react";
 import { useDialogLightDismiss } from "./ModelsTab";
-import { syncFaviconFromTheme } from "../utils/favicon";
+import {
+  applyThemeToDom,
+  isOsLightMode,
+  pushThemeToRouter,
+  readLocalTheme,
+  syncFaviconFromTheme,
+  THEME_SYNC_EVENT
+} from "../utils/favicon";
+import type { UiThemeConfig } from "../types";
 
 export type ColorSchemePref = "system" | "dark" | "light";
 export type SurfacePreset = "default" | "oled" | "slate" | "charcoal";
@@ -22,123 +30,58 @@ const SURFACE_PRESETS: Array<{ id: SurfacePreset; label: string }> = [
   { id: "charcoal", label: "Warm Graphite" }
 ];
 
-function applyScheme(pref: ColorSchemePref) {
-  const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
-  if (meta) {
-    meta.content = pref === "system" ? "light dark" : pref;
-  }
-  try {
-    if (pref === "system") {
-      localStorage.removeItem("color-scheme");
-    } else {
-      localStorage.setItem("color-scheme", pref);
-    }
-  } catch {
-    // storage disabled; still applied in DOM
-  }
-  syncFaviconFromTheme();
-}
-
-function applyAccent(hex: string) {
-  if (hex) {
-    document.documentElement.style.setProperty("--user-accent", hex);
-  } else {
-    document.documentElement.style.removeProperty("--user-accent");
-  }
-  try {
-    if (hex) localStorage.setItem("splitch-accent", hex);
-    else localStorage.removeItem("splitch-accent");
-  } catch {
-    // ignore storage errors
-  }
-  syncFaviconFromTheme();
-}
-
-function applySurface(surface: SurfacePreset) {
-  if (surface === "default") {
-    delete document.documentElement.dataset.surface;
-  } else {
-    document.documentElement.dataset.surface = surface;
-  }
-  try {
-    if (surface === "default") localStorage.removeItem("splitch-surface");
-    else localStorage.setItem("splitch-surface", surface);
-  } catch {
-    // ignore
-  }
-  syncFaviconFromTheme();
-}
-
-function readInitialScheme(): ColorSchemePref {
-  try {
-    const v = localStorage.getItem("color-scheme");
-    if (v === "dark" || v === "light") return v;
-  } catch {
-    // ignore
-  }
-  return "system";
-}
-
-function readInitialAccent(): string {
-  try {
-    const v = localStorage.getItem("splitch-accent");
-    if (v && /^#[0-9a-fA-F]{6}$/.test(v)) return v;
-  } catch {
-    // ignore
-  }
-  return "";
-}
-
-function readInitialSurface(): SurfacePreset {
-  try {
-    const v = localStorage.getItem("splitch-surface");
-    if (v === "oled" || v === "slate" || v === "charcoal") return v;
-  } catch {
-    // ignore
-  }
-  return "default";
-}
-
 export function AppearancePanel() {
   const colorInputId = useId();
-  const [scheme, setScheme] = useState<ColorSchemePref>(readInitialScheme);
-  const [accent, setAccent] = useState<string>(readInitialAccent);
-  const [surface, setSurface] = useState<SurfacePreset>(readInitialSurface);
-  const [osLight, setOsLight] = useState<boolean>(() =>
-    typeof window !== "undefined" && typeof window.matchMedia === "function"
-      ? window.matchMedia("(prefers-color-scheme: light)").matches
-      : false
-  );
+  const initial = readLocalTheme();
+  const [scheme, setScheme] = useState<ColorSchemePref>(initial.scheme);
+  const [accent, setAccent] = useState<string>(initial.accent);
+  const [surface, setSurface] = useState<SurfacePreset>(initial.surface);
+  const [osLight, setOsLight] = useState<boolean>(isOsLightMode);
   const [faviconUrl, setFaviconUrl] = useState<string>(() => syncFaviconFromTheme());
+  const [syncBadge, setSyncBadge] = useState<string | null>(null);
+  const debounceTimerRef = useRef<number | null>(null);
+  const badgeTimerRef = useRef<number | null>(null);
 
-  // Cross-tab storage synchronization & live OS theme indicator
-  useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === "color-scheme") {
-        const next: ColorSchemePref =
-          e.newValue === "dark" || e.newValue === "light" ? e.newValue : "system";
-        setScheme(next);
-        const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
-        if (meta) meta.content = next === "system" ? "light dark" : next;
-        setFaviconUrl(syncFaviconFromTheme());
-      } else if (e.key === "splitch-accent") {
-        const val = e.newValue ?? "";
-        setAccent(val);
-        if (val) document.documentElement.style.setProperty("--user-accent", val);
-        else document.documentElement.style.removeProperty("--user-accent");
-        setFaviconUrl(syncFaviconFromTheme());
-      } else if (e.key === "splitch-surface") {
-        const val =
-          e.newValue === "oled" || e.newValue === "slate" || e.newValue === "charcoal"
-            ? e.newValue
-            : "default";
-        setSurface(val);
-        if (val === "default") delete document.documentElement.dataset.surface;
-        else document.documentElement.dataset.surface = val;
-        setFaviconUrl(syncFaviconFromTheme());
+  const scheduleRouterSync = (next: UiThemeConfig, debounced: boolean) => {
+    if (debounceTimerRef.current !== null) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    const send = async () => {
+      const saved = await pushThemeToRouter(next);
+      if (saved) {
+        setSyncBadge("Icons synced");
+        if (badgeTimerRef.current !== null) window.clearTimeout(badgeTimerRef.current);
+        badgeTimerRef.current = window.setTimeout(() => setSyncBadge(null), 2200);
       }
     };
+    if (debounced) {
+      debounceTimerRef.current = window.setTimeout(() => void send(), 180);
+    } else {
+      void send();
+    }
+  };
+
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "color-scheme" || e.key === "splitch-accent" || e.key === "splitch-surface") {
+        const cur = readLocalTheme();
+        setScheme(cur.scheme);
+        setAccent(cur.accent);
+        setSurface(cur.surface);
+        setFaviconUrl(applyThemeToDom(cur));
+      }
+    };
+    const onThemeSync = (e: Event) => {
+      const detail = (e as CustomEvent<UiThemeConfig>).detail;
+      if (!detail) return;
+      setScheme(detail.scheme);
+      setAccent(detail.accent);
+      setSurface(detail.surface);
+      setFaviconUrl(syncFaviconFromTheme());
+    };
     window.addEventListener("storage", onStorage);
+    window.addEventListener(THEME_SYNC_EVENT, onThemeSync);
 
     const mq =
       typeof window !== "undefined" && typeof window.matchMedia === "function"
@@ -152,32 +95,34 @@ export function AppearancePanel() {
 
     return () => {
       window.removeEventListener("storage", onStorage);
+      window.removeEventListener(THEME_SYNC_EVENT, onThemeSync);
       mq?.removeEventListener("change", onMedia);
+      if (debounceTimerRef.current !== null) window.clearTimeout(debounceTimerRef.current);
+      if (badgeTimerRef.current !== null) window.clearTimeout(badgeTimerRef.current);
     };
   }, []);
 
-  const chooseScheme = (next: ColorSchemePref) => {
-    setScheme(next);
-    applyScheme(next);
-    setFaviconUrl(syncFaviconFromTheme());
-  };
-
-  const chooseAccent = (hex: string) => {
-    setAccent(hex);
-    applyAccent(hex);
-    setFaviconUrl(syncFaviconFromTheme());
-  };
-
-  const chooseSurface = (next: SurfacePreset) => {
-    setSurface(next);
-    applySurface(next);
-    setFaviconUrl(syncFaviconFromTheme());
+  const commitTheme = (
+    nextScheme: ColorSchemePref,
+    nextAccent: string,
+    nextSurface: SurfacePreset,
+    debounced = false
+  ) => {
+    const next: UiThemeConfig = {
+      scheme: nextScheme,
+      accent: nextAccent,
+      surface: nextSurface,
+      resolved_light: nextScheme === "light" || (nextScheme === "system" && isOsLightMode())
+    };
+    setScheme(nextScheme);
+    setAccent(nextAccent);
+    setSurface(nextSurface);
+    setFaviconUrl(applyThemeToDom(next));
+    scheduleRouterSync(next, debounced);
   };
 
   const resetAll = () => {
-    chooseScheme("system");
-    chooseAccent("");
-    chooseSurface("default");
+    commitTheme("system", "", "default", false);
   };
 
   return (
@@ -186,7 +131,7 @@ export function AppearancePanel() {
         <div className="row-actions">
           <img
             src={faviconUrl}
-            alt="Live Splitch favicon preview"
+            alt="Live Splitch icon preview"
             width={24}
             height={24}
             className="favicon-preview"
@@ -194,13 +139,16 @@ export function AppearancePanel() {
           <div>
             <h3 style={{ margin: 0 }}>Appearance &amp; Theme</h3>
             <span className="muted" style={{ fontSize: "0.72rem" }}>
-              Browser tab favicon syncs automatically with accent &amp; surface
+              Syncs browser favicon, system tray, desktop &amp; app menu icons automatically
             </span>
           </div>
         </div>
-        <button type="button" className="btn btn--sm" onClick={resetAll}>
-          <RotateCcw size={12} aria-hidden="true" /> Reset Defaults
-        </button>
+        <div className="row-actions">
+          {syncBadge && <span className="pill pill--ok">{syncBadge}</span>}
+          <button type="button" className="btn btn--sm" onClick={resetAll}>
+            <RotateCcw size={12} aria-hidden="true" /> Reset Defaults
+          </button>
+        </div>
       </div>
 
       <fieldset className="theme-fieldset">
@@ -219,7 +167,7 @@ export function AppearancePanel() {
                 name="splitch_color_scheme"
                 value={id}
                 checked={scheme === id}
-                onChange={() => chooseScheme(id)}
+                onChange={() => commitTheme(id, accent, surface, false)}
               />
               <Icon size={13} aria-hidden="true" />
               <span>{label}</span>
@@ -240,7 +188,7 @@ export function AppearancePanel() {
                 className={`theme-swatch ${active ? "theme-swatch--active" : ""}`}
                 style={{ "--swatch-bg": p.hex } as React.CSSProperties}
                 aria-pressed={active}
-                onClick={() => chooseAccent(p.hex)}
+                onClick={() => commitTheme(scheme, p.hex, surface, false)}
               >
                 {p.label}
               </button>
@@ -251,7 +199,7 @@ export function AppearancePanel() {
               id={colorInputId}
               type="color"
               value={accent || "#a78bfa"}
-              onChange={(e) => chooseAccent(e.target.value)}
+              onChange={(e) => commitTheme(scheme, e.target.value, surface, true)}
             />
             <span>Custom</span>
           </label>
@@ -268,7 +216,7 @@ export function AppearancePanel() {
                 name="splitch_surface"
                 value={s.id}
                 checked={surface === s.id}
-                onChange={() => chooseSurface(s.id)}
+                onChange={() => commitTheme(scheme, accent, s.id, false)}
               />
               <span>{s.label}</span>
             </label>

@@ -26,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.desktop.icons import render_svg_text
 from backend.router.anthropic_api import (
     handle_anthropic_count_tokens,
     handle_anthropic_messages,
@@ -57,6 +58,8 @@ from backend.shared.models import (
     ModelActionRequest,
     NodeRegisterRequest,
     NodeStatus,
+    UiThemeConfig,
+    UiThemeUpdate,
     WorkspaceDirListing,
 )
 from backend.shared.secrets import (
@@ -543,6 +546,19 @@ async def update_control(update: ControlUpdate) -> ControlState:
     )
 
 
+@app.get("/api/theme", response_model=UiThemeConfig)
+async def get_ui_theme() -> UiThemeConfig:
+    return cluster.theme
+
+
+@app.patch("/api/theme", response_model=UiThemeConfig)
+async def patch_ui_theme(update: UiThemeUpdate) -> UiThemeConfig:
+    try:
+        return await cluster.update_theme(update)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/nodes", response_model=NodeStatus)
 async def register_node(req: NodeRegisterRequest, request: Request) -> NodeStatus:
     if _auth_enabled() and not _is_request_authenticated(request):
@@ -634,6 +650,15 @@ async def ws_status(websocket: WebSocket) -> None:
         cluster.unregister_ws(websocket)
 
 
+@app.api_route("/favicon.svg", methods=["GET", "HEAD"], include_in_schema=False)
+async def serve_favicon():
+    return Response(
+        content=render_svg_text(theme=cluster.theme),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 # ── Static Dashboard Serving (built Vite bundle) ─────────────────────────────
 
 _DIST_DIR = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
@@ -645,13 +670,6 @@ if _DIST_DIR.exists():
     @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     async def serve_dashboard():
         return FileResponse(str(_DIST_DIR / "index.html"))
-
-    _favicon = _DIST_DIR / "favicon.svg"
-    if _favicon.exists():
-
-        @app.api_route("/favicon.svg", methods=["GET", "HEAD"], include_in_schema=False)
-        async def serve_favicon():
-            return FileResponse(str(_favicon), media_type="image/svg+xml")
 
     _theme_init = _DIST_DIR / "theme-init.js"
     if _theme_init.exists():

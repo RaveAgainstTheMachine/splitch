@@ -1,7 +1,11 @@
 /**
- * Dynamic Splitch SVG favicon generator synchronized with the user's active
- * color scheme (system/dark/light), surface preset, and accent color.
+ * Dynamic Splitch SVG favicon generator + router/desktop theme synchronization
+ * across color scheme (system/dark/light), surface preset, and accent color.
  */
+
+import type { UiThemeConfig } from "../types";
+
+export const THEME_SYNC_EVENT = "splitch-theme-sync";
 
 function clampByte(n: number): number {
   return Math.max(0, Math.min(255, Math.round(n)));
@@ -28,6 +32,44 @@ function mixHex(hexA: string, hexB: string, ratioA: number): string {
   }
 }
 
+export function isOsLightMode(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-color-scheme: light)").matches
+  );
+}
+
+export function readLocalTheme(): UiThemeConfig {
+  let scheme: UiThemeConfig["scheme"] = "system";
+  let accent = "";
+  let surface: UiThemeConfig["surface"] = "default";
+  try {
+    const s = localStorage.getItem("color-scheme");
+    if (s === "dark" || s === "light") scheme = s;
+    const a = (localStorage.getItem("splitch-accent") || "").trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(a)) accent = a.toLowerCase();
+    const sf = localStorage.getItem("splitch-surface");
+    if (sf === "oled" || sf === "slate" || sf === "charcoal") surface = sf;
+  } catch {
+    // storage disabled
+  }
+  const resolved_light = scheme === "light" || (scheme === "system" && isOsLightMode());
+  return { scheme, accent, surface, resolved_light };
+}
+
+export function hasLocalThemeOverride(): boolean {
+  try {
+    return Boolean(
+      localStorage.getItem("color-scheme") ||
+        localStorage.getItem("splitch-accent") ||
+        localStorage.getItem("splitch-surface")
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function resolveEffectiveTheme(): {
   isLight: boolean;
   accent: string;
@@ -37,11 +79,7 @@ export function resolveEffectiveTheme(): {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
   if (meta?.content) schemeMeta = meta.content.trim();
 
-  const osLight =
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-color-scheme: light)").matches;
-
+  const osLight = isOsLightMode();
   const isLight = schemeMeta === "light" || (schemeMeta !== "dark" && osLight);
 
   let rawAccent = document.documentElement.style.getPropertyValue("--user-accent").trim();
@@ -138,4 +176,64 @@ export function syncFaviconFromTheme(): string {
   link.type = "image/svg+xml";
   link.href = dataUrl;
   return dataUrl;
+}
+
+export function applyThemeToDom(theme: UiThemeConfig): string {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
+  if (meta) {
+    meta.content = theme.scheme === "system" ? "light dark" : theme.scheme;
+  }
+  const cleanAccent = /^#[0-9a-fA-F]{6}$/.test(theme.accent) ? theme.accent.toLowerCase() : "";
+  if (cleanAccent) {
+    document.documentElement.style.setProperty("--user-accent", cleanAccent);
+  } else {
+    document.documentElement.style.removeProperty("--user-accent");
+  }
+  if (theme.surface === "default") {
+    delete document.documentElement.dataset.surface;
+  } else {
+    document.documentElement.dataset.surface = theme.surface;
+  }
+  try {
+    if (theme.scheme === "system") localStorage.removeItem("color-scheme");
+    else localStorage.setItem("color-scheme", theme.scheme);
+    if (cleanAccent) localStorage.setItem("splitch-accent", cleanAccent);
+    else localStorage.removeItem("splitch-accent");
+    if (theme.surface === "default") localStorage.removeItem("splitch-surface");
+    else localStorage.setItem("splitch-surface", theme.surface);
+  } catch {
+    // storage disabled
+  }
+  const url = syncFaviconFromTheme();
+  window.dispatchEvent(
+    new CustomEvent<UiThemeConfig>(THEME_SYNC_EVENT, {
+      detail: {
+        scheme: theme.scheme,
+        accent: cleanAccent,
+        surface: theme.surface,
+        resolved_light: theme.scheme === "light" || (theme.scheme === "system" && isOsLightMode()),
+        updated_at: theme.updated_at
+      }
+    })
+  );
+  return url;
+}
+
+export async function pushThemeToRouter(theme: UiThemeConfig): Promise<UiThemeConfig | null> {
+  try {
+    const res = await fetch("/api/theme", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scheme: theme.scheme,
+        accent: theme.accent,
+        surface: theme.surface,
+        resolved_light: theme.resolved_light
+      })
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as UiThemeConfig;
+  } catch {
+    return null;
+  }
 }

@@ -105,6 +105,14 @@ export interface ControlState {
   force_node: string;
 }
 
+export interface UiThemeConfig {
+  scheme: "system" | "dark" | "light";
+  accent: string;
+  surface: "default" | "oled" | "slate" | "charcoal";
+  resolved_light: boolean;
+  updated_at?: number;
+}
+
 export interface TraceEntry {
   id: string;
   timestamp: number;
@@ -126,6 +134,7 @@ export interface DashboardSnapshot {
   version: string;
   uptime_s: number;
   control: ControlState;
+  theme?: UiThemeConfig;
   nodes: NodeStatus[];
   aliases: AliasConfig[];
   traces: TraceEntry[];

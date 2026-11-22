@@ -39,7 +39,7 @@ async def run_linux_sni_tray(ctrl: "TrayController") -> bool:
     from backend.desktop.icons import ensure_tray_icon_theme
     from backend.router.config import default_data_root
 
-    icons_dir = ensure_tray_icon_theme(default_data_root() / "icons")
+    icons_dir = ensure_tray_icon_theme(default_data_root() / "icons", theme=ctrl.theme)
     bus = await MessageBus(bus_type=BusType.SESSION).connect()
 
     async def _list_bus_names() -> set[str]:

@@ -3,6 +3,14 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.7.0] - 2026-11-22
+
+### Desktop, Tray & Theme Synchronization
+- **Router-Synced UI Theme (`GET/PATCH /api/theme` + `DashboardSnapshot.theme`):** Appearance settings (`scheme`, `accent`, `surface`, `resolved_light`) now persist on the router (`ui_theme.json`), broadcast live over `/ws/status` across browsers/devices, and serve dynamically recolored `/favicon.svg`.
+- **Dynamic Pure-Python Icon Rasterizer (`backend/desktop/icons.py`):** Mirrors the Web UI accent, surface, and light/dark palette 1:1 across PNG, ARGB32 SNI pixmaps, Windows `.ico`, and SVG assets with content-hashed cache-busting filenames.
+- **Live System Tray & Desktop/App-Menu/Launcher Icon Sync:** `TrayController` (`backend/desktop/tray.py`) updates system tray icons instantaneously on theme changes (D-Bus SNI `NewIcon()` + `pystray`) and debounces atomic desktop/app-menu/Start-Menu/autostart icon updates with KDE/Freedesktop (`kbuildsycoca6`, `KIconLoader.iconChanged`), macOS (`lsregister`), and Windows (`SHChangeNotify`) cache refreshes.
+- **CLI Support (`splitch desktop sync-icon`):** Added `splitch desktop sync-icon` to sync OS shortcut and tray icons on demand from the router or explicit color flags.
+
 ## [0.6.0] - 2026-11-22
 
 ### Security & Supply Chain

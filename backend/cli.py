@@ -35,8 +35,10 @@ from backend.desktop.shortcuts import (
     install_desktop_integration,
     is_desktop_applicable,
     launch_splitch_gui,
+    load_desktop_config,
     send_desktop_notification,
     stop_splitch_graceful,
+    sync_desktop_icons,
     uninstall_desktop_integration,
 )
 from backend.desktop.tray import run_tray
@@ -581,6 +583,34 @@ def _cmd_desktop(args: argparse.Namespace) -> int:
                 print(f"  ✓ Removed {p}")
         else:
             print("[splitch] No desktop shortcuts found to remove.")
+        return 0
+
+    if args.desktop_cmd == "sync-icon":
+        theme_payload: dict[str, object] | None = None
+        if args.accent is not None or args.scheme is not None or args.surface is not None:
+            cur = load_desktop_config().theme.model_dump()
+            if args.accent is not None:
+                cur["accent"] = args.accent.strip()
+            if args.scheme is not None:
+                cur["scheme"] = args.scheme
+                cur["resolved_light"] = args.scheme == "light"
+            if args.surface is not None:
+                cur["surface"] = args.surface
+            theme_payload = cur
+        else:
+            target_url = (args.url or load_desktop_config().router_url or "http://127.0.0.1:8080").rstrip("/")
+            api_key = os.getenv("SPLITCH_API_KEY", "").strip()
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            try:
+                r = httpx.get(f"{target_url}/api/theme", headers=headers, timeout=3.0)
+                if r.status_code == 200:
+                    theme_payload = r.json()
+            except (httpx.HTTPError, ValueError):
+                pass
+        res = sync_desktop_icons(theme_payload)
+        print(f"[splitch] Synced desktop & tray icons ({res['platform']}, tag={res['tag']}):")
+        for p in res["updated_paths"]:
+            print(f"  ✓ {p}")
         return 0
 
     if args.desktop_cmd == "check-updates":
@@ -1138,6 +1168,16 @@ def main() -> None:
 
     p_dc = desk_sub.add_parser("check-updates", help="Check Splitch & engine updates and show desktop notification")
     p_dc.set_defaults(func=_cmd_desktop)
+
+    p_dsi = desk_sub.add_parser(
+        "sync-icon",
+        help="Sync desktop, app menu/Start Menu & tray icon colors from router theme or flags",
+    )
+    p_dsi.add_argument("--url", default=None, help="Router URL to pull active theme from")
+    p_dsi.add_argument("--accent", default=None, help="Accent hex color override (e.g. #22d3ee, or '' for default)")
+    p_dsi.add_argument("--scheme", choices=["system", "dark", "light"], default=None)
+    p_dsi.add_argument("--surface", choices=["default", "oled", "slate", "charcoal"], default=None)
+    p_dsi.set_defaults(func=_cmd_desktop)
 
     args = parser.parse_args()
     sys.exit(args.func(args))
