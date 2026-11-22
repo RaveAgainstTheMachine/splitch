@@ -25,6 +25,7 @@ import { ModelsTab } from "./components/ModelsTab";
 import { SettingsDialog, type SettingsTabId } from "./components/SettingsDialog";
 import { SkillsTab } from "./components/SkillsTab";
 import { SplitchLogo } from "./components/SplitchLogo";
+import { SplitchWordmark } from "./components/SplitchWordmark";
 import {
   applyThemeToDom,
   hasLocalThemeOverride,
@@ -440,7 +441,9 @@ export default function App() {
       <header className="topbar">
         <div className="brand">
           <SplitchLogo size={26} />
-          <h1>SPLITCH</h1>
+          <h1>
+            <SplitchWordmark />
+          </h1>
         </div>
 
         <div

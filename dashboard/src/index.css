@@ -187,9 +187,17 @@ code {
 
 .brand h1 {
   margin: 0;
-  font-size: 0.96rem;
-  font-weight: 800;
-  letter-spacing: 0.1em;
+  display: flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.splitch-wordmark {
+  block-size: 0.82rem;
+  inline-size: auto;
+  aspect-ratio: 104 / 15.5;
+  flex-shrink: 0;
+  overflow: visible;
 }
 
 .brand p {

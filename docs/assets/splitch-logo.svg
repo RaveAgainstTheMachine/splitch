@@ -1,42 +1,40 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
   <defs>
-    <linearGradient id="splitch-lower" x1="16" y1="32" x2="52" y2="56" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#c4b5fd" />
-      <stop offset="48%" stop-color="#a78bfa" />
-      <stop offset="100%" stop-color="#6366f1" />
+  <style>
+    .mid{fill:#a78bfa} .s-start{stop-color:#c4b5fd} .s-mid{stop-color:#a78bfa} .s-end{stop-color:#7c63c4} .s-up{stop-color:#efeaff}
+    @media (prefers-reduced-motion: no-preference) {
+      .mid{animation:cy-mid 12s linear infinite}
+      .s-start{animation:cy-start 12s linear infinite}
+      .s-mid{animation:cy-mid-s 12s linear infinite}
+      .s-end{animation:cy-end 12s linear infinite}
+      .s-up{animation:cy-up 12s linear infinite}
+    }
+    @keyframes cy-mid{0%{fill:#a78bfa}16.67%{fill:#22d3ee}33.33%{fill:#34d399}50%{fill:#f59e0b}66.67%{fill:#fb7185}83.33%{fill:#60a5fa}100%{fill:#a78bfa}}
+    @keyframes cy-start{0%{stop-color:#c4b5fd}16.67%{stop-color:#67e8f9}33.33%{stop-color:#6ee7b7}50%{stop-color:#fcd34d}66.67%{stop-color:#fda4af}83.33%{stop-color:#93c5fd}100%{stop-color:#c4b5fd}}
+    @keyframes cy-mid-s{0%{stop-color:#a78bfa}16.67%{stop-color:#22d3ee}33.33%{stop-color:#34d399}50%{stop-color:#f59e0b}66.67%{stop-color:#fb7185}83.33%{stop-color:#60a5fa}100%{stop-color:#a78bfa}}
+    @keyframes cy-end{0%{stop-color:#7c63c4}16.67%{stop-color:#1b9eb7}33.33%{stop-color:#289d76}50%{stop-color:#b47710}66.67%{stop-color:#b85769}83.33%{stop-color:#487bb9}100%{stop-color:#7c63c4}}
+    @keyframes cy-up{0%{stop-color:#efeaff}16.67%{stop-color:#d7f7fc}33.33%{stop-color:#daf7ec}50%{stop-color:#fdedd3}66.67%{stop-color:#fee5e9}83.33%{stop-color:#e2effe}100%{stop-color:#efeaff}}
+  </style>
+    <linearGradient id="lower" x1="16" y1="32" x2="52" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" class="s-start" stop-color="#c4b5fd"/>
+      <stop offset="50%" class="s-mid" stop-color="#a78bfa"/>
+      <stop offset="100%" class="s-end" stop-color="#7c63c4"/>
     </linearGradient>
-    <linearGradient id="splitch-upper" x1="14" y1="8" x2="48" y2="32" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#ffffff" />
-      <stop offset="100%" stop-color="#e9e5ff" />
+    <linearGradient id="upper" x1="14" y1="8" x2="48" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" class="s-up" stop-color="#efeaff"/>
     </linearGradient>
-    <clipPath id="clip-top">
-      <rect x="0" y="0" width="64" height="30.6" />
-    </clipPath>
-    <clipPath id="clip-bot">
-      <rect x="0" y="33.4" width="64" height="30.6" />
-    </clipPath>
+    <clipPath id="ct"><rect x="0" y="0" width="64" height="30.6"/></clipPath>
+    <clipPath id="cb"><rect x="0" y="33.4" width="64" height="30.6"/></clipPath>
   </defs>
-
-  <rect width="64" height="64" rx="14" fill="#0a0b10" />
-  <rect x="1" y="1" width="62" height="62" rx="13" stroke="#262a3d" stroke-width="1.5" />
-
-  <g clip-path="url(#clip-top)" transform="translate(-1.8 0)">
-    <path
-      d="M 44 21.5 C 44 15.8 39 13 32 13 C 24.5 13 20 16.2 20 21.5 C 20 27 25 29.2 32.5 31 C 40 32.8 45 35.2 45 42 C 45 48 39.5 51 31.5 51 C 24 51 19 48 19 42.5"
-      stroke="url(#splitch-upper)"
-      stroke-width="10.5"
-      stroke-linecap="butt"
-    />
-    <rect x="12.5" y="29" width="29" height="1.6" rx="0.8" fill="#ffffff" />
+  <rect width="64" height="64" rx="14" fill="#0a0b10"/>
+  <rect x="1" y="1" width="62" height="62" rx="13" stroke="#262a3d" stroke-width="1.5"/>
+  <g clip-path="url(#ct)" transform="translate(-1.8 0)">
+    <path d="M 44 21.5 C 44 15.8 39 13 32 13 C 24.5 13 20 16.2 20 21.5 C 20 27 25 29.2 32.5 31 C 40 32.8 45 35.2 45 42 C 45 48 39.5 51 31.5 51 C 24 51 19 48 19 42.5" stroke="url(#upper)" stroke-width="10.5" stroke-linecap="butt"/>
+    <rect x="12.5" y="29" width="29" height="1.6" rx="0.8" fill="#ffffff"/>
   </g>
-
-  <g clip-path="url(#clip-bot)" transform="translate(1.8 0)">
-    <path
-      d="M 44 21.5 C 44 15.8 39 13 32 13 C 24.5 13 20 16.2 20 21.5 C 20 27 25 29.2 32.5 31 C 40 32.8 45 35.2 45 42 C 45 48 39.5 51 31.5 51 C 24 51 19 48 19 42.5"
-      stroke="url(#splitch-lower)"
-      stroke-width="10.5"
-      stroke-linecap="butt"
-    />
-    <rect x="22.5" y="33.4" width="29" height="1.6" rx="0.8" fill="#a78bfa" />
+  <g clip-path="url(#cb)" transform="translate(1.8 0)">
+    <path d="M 44 21.5 C 44 15.8 39 13 32 13 C 24.5 13 20 16.2 20 21.5 C 20 27 25 29.2 32.5 31 C 40 32.8 45 35.2 45 42 C 45 48 39.5 51 31.5 51 C 24 51 19 48 19 42.5" stroke="url(#lower)" stroke-width="10.5" stroke-linecap="butt"/>
+    <rect class="mid" x="22.5" y="33.4" width="29" height="1.6" rx="0.8" fill="#a78bfa"/>
   </g>
 </svg>

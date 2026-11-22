@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.9.0] - 2026-11-22
+
+### Branding
+- **Unbounded Shear-Cut Wordmark:** Replaced the plain-text `SPLITCH` header with `SplitchWordmark` (`dashboard/src/components/SplitchWordmark.tsx`) — Unbounded Bold (SIL OFL 1.1) glyph outlines as inline SVG with the same Shear Cut as the emblem (upper half follows `--text`, lower half follows the live `--accent`). No font files shipped, so no `font-src` dependency.
+- **Auto-Cycling README Banner:** Added `docs/assets/splitch-banner.svg` (emblem + wordmark) and made `docs/assets/splitch-logo.svg` cycle through all six accent presets (Violet → Cyan → Emerald → Amber → Rose → Cobalt) with pure CSS keyframes gated by `prefers-reduced-motion: no-preference` (static Violet otherwise).
+
 ## [0.8.0] - 2026-11-22
 
 ### Security Hardening & Supply Chain

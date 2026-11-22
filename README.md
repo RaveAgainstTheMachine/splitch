@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="docs/assets/splitch-logo.svg" alt="Splitch Logo" width="84" height="84" />
-</p>
-
-<h1 align="center">Splitch</h1>
+<h1 align="center">
+  <img src="docs/assets/splitch-banner.svg" alt="Splitch" width="284" height="72" />
+</h1>
 
 <p align="center">
   <strong>Your hardware. One AI cluster.</strong><br />
