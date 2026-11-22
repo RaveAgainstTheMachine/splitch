@@ -1340,6 +1340,8 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
               meta: {
                 ok: Boolean(data.ok),
                 diff: (data.diff as string | null) ?? null,
+                verification:
+                  (data.verification as ChatMessageRecord["meta"]["verification"]) ?? null,
                 media_url: (data.media_url as string | null) ?? null,
                 media_kind: (data.media_kind as "image" | "video" | null) ?? null
               },
@@ -2095,13 +2097,28 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
                                       Tool: <code>{tc.function.name}</code>
                                     </span>
                                     {result ? (
-                                      <span
-                                        className={`pill ${
-                                          result.meta.ok ? "pill--ok" : "pill--err"
-                                        }`}
-                                      >
-                                        {result.meta.ok ? "OK" : "ERR"}
-                                      </span>
+                                      <>
+                                        <span
+                                          className={`pill ${
+                                            result.meta.ok ? "pill--ok" : "pill--err"
+                                          }`}
+                                        >
+                                          {result.meta.ok ? "OK" : "ERR"}
+                                        </span>
+                                        {result.meta.verification?.checked && (
+                                          <span
+                                            className={`pill ${
+                                              result.meta.verification.ok
+                                                ? "pill--ok"
+                                                : "pill--warn"
+                                            }`}
+                                            title={result.meta.verification.output}
+                                          >
+                                            {result.meta.verification.ok ? "✓" : "✗"}{" "}
+                                            {result.meta.verification.checker}
+                                          </span>
+                                        )}
+                                      </>
                                     ) : approval ? (
                                       <span className="pill pill--warn">WAITING APPROVAL</span>
                                     ) : (

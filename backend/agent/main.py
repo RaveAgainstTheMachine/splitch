@@ -1028,6 +1028,127 @@ def _resolve_workspace_path(subpath: str, rel: str = ".") -> tuple[Path, Path]:
     return ws_root, target
 
 
+def _run_post_edit_verification(target: Path, ws_root: Path) -> dict[str, str | bool]:
+    """
+    Fast (<3s) automatic syntax/lint verification harness triggered after `write_file` / `edit_file`.
+    Feeds immediate diagnostics back to the model so syntax errors self-heal in the next turn.
+    """
+    import py_compile
+    import subprocess
+    import tomllib
+
+    ext = target.suffix.lower()
+    rel_str = str(target.relative_to(ws_root)) if target.is_relative_to(ws_root) else target.name
+
+    if ext == ".py":
+        try:
+            py_compile.compile(str(target), doraise=True)
+        except py_compile.PyCompileError as exc:
+            return {
+                "checked": True,
+                "ok": False,
+                "checker": "py_compile",
+                "output": str(exc.msg)[:600],
+            }
+        ruff_bin = shutil.which("ruff")
+        if ruff_bin:
+            try:
+                proc = subprocess.run(
+                    [ruff_bin, "check", "--output-format=concise", str(target)],
+                    cwd=str(ws_root),
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                    check=False,
+                )
+                if proc.returncode != 0:
+                    diag = (proc.stdout or proc.stderr).strip()[:600]
+                    return {"checked": True, "ok": False, "checker": "ruff", "output": diag}
+                return {
+                    "checked": True,
+                    "ok": True,
+                    "checker": "py_compile+ruff",
+                    "output": f"{rel_str} syntax & ruff lint clean",
+                }
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return {
+            "checked": True,
+            "ok": True,
+            "checker": "py_compile",
+            "output": f"{rel_str} Python syntax valid",
+        }
+
+    if ext in (".sh", ".bash"):
+        shell_bin = "bash" if ext == ".bash" and shutil.which("bash") else "sh"
+        try:
+            proc = subprocess.run(
+                [shell_bin, "-n", str(target)],
+                cwd=str(ws_root),
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return {
+                    "checked": True,
+                    "ok": False,
+                    "checker": f"{shell_bin} -n",
+                    "output": (proc.stderr or proc.stdout).strip()[:600],
+                }
+            return {
+                "checked": True,
+                "ok": True,
+                "checker": f"{shell_bin} -n",
+                "output": f"{rel_str} shell syntax valid",
+            }
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"checked": True, "ok": False, "checker": shell_bin, "output": str(exc)[:300]}
+
+    if ext == ".json":
+        try:
+            json.loads(target.read_text(encoding="utf-8"))
+            return {"checked": True, "ok": True, "checker": "json", "output": f"{rel_str} valid JSON"}
+        except ValueError as exc:
+            return {"checked": True, "ok": False, "checker": "json", "output": str(exc)[:400]}
+
+    if ext == ".toml":
+        try:
+            tomllib.loads(target.read_text(encoding="utf-8"))
+            return {"checked": True, "ok": True, "checker": "tomllib", "output": f"{rel_str} valid TOML"}
+        except ValueError as exc:
+            return {"checked": True, "ok": False, "checker": "tomllib", "output": str(exc)[:400]}
+
+    if ext in (".js", ".mjs", ".cjs") and shutil.which("node"):
+        try:
+            proc = subprocess.run(
+                ["node", "--check", str(target)],
+                cwd=str(ws_root),
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return {
+                    "checked": True,
+                    "ok": False,
+                    "checker": "node --check",
+                    "output": (proc.stderr or proc.stdout).strip()[:600],
+                }
+            return {
+                "checked": True,
+                "ok": True,
+                "checker": "node --check",
+                "output": f"{rel_str} JS syntax valid",
+            }
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    return {"checked": False, "ok": True, "checker": "none", "output": ""}
+
+
 def _exec_fs_tool(req: ToolExecRequest) -> ToolExecResponse:
     ws_root, _ = _resolve_workspace_path(req.workspace_subpath)
     args = req.arguments
@@ -1082,10 +1203,56 @@ def _exec_fs_tool(req: ToolExecRequest) -> ToolExecResponse:
             )
         )
         diff_str = "".join(diff_lines)[:12_000] if diff_lines else "(no diff)"
+        ver = _run_post_edit_verification(target, ws_root)
+        ver_note = ""
+        if ver.get("checked"):
+            mark = "✓" if ver.get("ok") else "✗"
+            ver_note = f"\n[post-edit verification ({ver['checker']}): {mark} {ver['output']}]"
         return ToolExecResponse(
             ok=True,
-            output=f"Wrote {len(content)} bytes to {rel}",
+            output=f"Wrote {len(content)} bytes to {rel}{ver_note}",
             diff=diff_str,
+            verification=ver,
+        )
+
+    if req.tool == "edit_file":
+        rel = str(args.get("path", ""))
+        target_str = str(args.get("target", ""))
+        replacement_str = str(args.get("replacement", ""))
+        if not rel or not target_str:
+            return ToolExecResponse(ok=False, output="Missing 'path' or 'target' argument")
+        _, target = _resolve_workspace_path(req.workspace_subpath, rel)
+        if not target.is_file():
+            return ToolExecResponse(ok=False, output=f"File not found: {rel}")
+        old_text = target.read_text(encoding="utf-8", errors="replace")
+        if target_str not in old_text:
+            return ToolExecResponse(
+                ok=False,
+                output=f"Target string not found in {rel}. Read the file first to verify exact lines.",
+            )
+        count = old_text.count(target_str)
+        new_text = old_text.replace(target_str, replacement_str)
+        target.write_text(new_text, encoding="utf-8")
+        diff_lines = list(
+            difflib.unified_diff(
+                old_text.splitlines(keepends=True),
+                new_text.splitlines(keepends=True),
+                fromfile=f"a/{rel}",
+                tofile=f"b/{rel}",
+                n=3,
+            )
+        )
+        diff_str = "".join(diff_lines)[:12_000] if diff_lines else "(no diff)"
+        ver = _run_post_edit_verification(target, ws_root)
+        ver_note = ""
+        if ver.get("checked"):
+            mark = "✓" if ver.get("ok") else "✗"
+            ver_note = f"\n[post-edit verification ({ver['checker']}): {mark} {ver['output']}]"
+        return ToolExecResponse(
+            ok=True,
+            output=f"Replaced {count} occurrence(s) in {rel}{ver_note}",
+            diff=diff_str,
+            verification=ver,
         )
 
     if req.tool == "grep_search":

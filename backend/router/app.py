@@ -24,6 +24,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend.router.anthropic_api import (
+    handle_anthropic_count_tokens,
+    handle_anthropic_messages,
+)
 from backend.router.chat_api import build_chat_router
 from backend.router.config import default_data_root, load_config
 from backend.router.mcp_api import build_mcp_router
@@ -34,6 +38,13 @@ from backend.router.proxy import build_openai_models_list, forward_inference
 from backend.router.settings_api import build_settings_router
 from backend.router.skills_api import build_skills_router
 from backend.router.telemetry import VERSION, ClusterState
+from backend.shared.bench import (
+    BenchReport,
+    BenchRunRequest,
+    append_bench_history,
+    load_bench_history,
+    run_benchmark_suite,
+)
 from backend.shared.engines import EngineStatus, get_engine_status
 from backend.shared.models import (
     AuthLoginRequest,
@@ -229,12 +240,12 @@ async def responses_api(request: Request):
 
 @app.post("/v1/messages")
 async def anthropic_messages(request: Request):
-    return await forward_inference(request, cluster, "/v1/messages")
+    return await handle_anthropic_messages(request, cluster)
 
 
 @app.post("/v1/messages/count_tokens")
 async def anthropic_count_tokens(request: Request):
-    return await forward_inference(request, cluster, "/v1/messages/count_tokens")
+    return await handle_anthropic_count_tokens(request, cluster)
 
 
 @app.post("/v1/completions")
@@ -338,6 +349,29 @@ async def get_system_engine(check_remote: bool = False) -> EngineStatus:
 @app.get("/api/system/update-status", response_model=UpdateStatus)
 async def get_system_update_status(fetch: bool = False) -> UpdateStatus:
     return await asyncio.to_thread(check_update, fetch_remote=fetch)
+
+
+@app.get("/api/bench/history", response_model=list[BenchReport])
+async def get_bench_history() -> list[BenchReport]:
+    return await asyncio.to_thread(load_bench_history, DATA_DIR)
+
+
+@app.post("/api/bench/run", response_model=BenchReport)
+async def run_cluster_benchmark(req: BenchRunRequest) -> BenchReport:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://splitch.internal",
+        timeout=httpx.Timeout(90.0, connect=5.0),
+    ) as client:
+        report = await run_benchmark_suite(
+            req,
+            router_url="http://splitch.internal",
+            api_key=API_KEY,
+            client=client,
+        )
+    await asyncio.to_thread(append_bench_history, DATA_DIR, report)
+    return report
 
 
 @app.post("/api/control", response_model=ControlState)

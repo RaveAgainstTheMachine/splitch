@@ -1,0 +1,54 @@
+name: Splitch CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint, Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Astral uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync Python dependencies
+        run: uv sync --python 3.12 --extra desktop
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install & build dashboard UI
+        working-directory: dashboard
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Validate POSIX shell scripts
+        run: |
+          sh -n install.sh
+          sh -n scripts/preflight.sh
+
+      - name: Run Ruff static analysis
+        run: uv run --no-sync ruff check backend tests
+
+      - name: Run pytest suite
+        run: uv run --no-sync pytest --ignore=tests/test_ui_e2e.py -q

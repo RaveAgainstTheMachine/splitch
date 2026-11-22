@@ -416,7 +416,7 @@ class SkillRegistryInstallRequest(BaseModel):
 
 
 class ToolExecRequest(BaseModel):
-    tool: Literal["list_dir", "read_file", "write_file", "grep_search", "run_command"]
+    tool: Literal["list_dir", "read_file", "write_file", "edit_file", "grep_search", "run_command"]
     arguments: dict = Field(default_factory=dict)
     workspace_subpath: str = ""
 
@@ -426,6 +426,7 @@ class ToolExecResponse(BaseModel):
     output: str
     diff: str | None = None
     exit_code: int | None = None
+    verification: dict | None = None
 
 
 class ConversationSummary(BaseModel):

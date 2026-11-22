@@ -133,7 +133,7 @@ WORKSPACE_TOOLS_SCHEMA: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create or overwrite a file inside the workspace.",
+            "description": "Create or overwrite a file inside the workspace (automatically runs post-edit syntax/lint verification).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -141,6 +141,22 @@ WORKSPACE_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     "content": {"type": "string", "description": "Complete file contents"},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Surgically replace an exact target text block inside an existing workspace file (automatically runs post-edit syntax/lint verification).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative file path"},
+                    "target": {"type": "string", "description": "Exact existing string to replace"},
+                    "replacement": {"type": "string", "description": "New replacement string"},
+                },
+                "required": ["path", "target", "replacement"],
             },
         },
     },
@@ -176,7 +192,7 @@ WORKSPACE_TOOLS_SCHEMA: list[dict[str, Any]] = [
     },
 ]
 
-APPROVAL_REQUIRED_TOOLS = {"write_file", "run_command"}
+APPROVAL_REQUIRED_TOOLS = {"write_file", "edit_file", "run_command"}
 
 
 class ChatStore:
@@ -1566,6 +1582,7 @@ def build_chat_router(
                             pending_approvals.pop(approval_id, None)
 
                     tool_diff: str | None = None
+                    tool_verification: dict | None = None
                     tool_media_url: str | None = None
                     tool_media_kind: str | None = None
                     if not approved:
@@ -1674,6 +1691,7 @@ def build_chat_router(
                                         tool_ok = bool(body.get("ok", False))
                                         tool_output = str(body.get("output", ""))
                                         tool_diff = body.get("diff")
+                                        tool_verification = body.get("verification")
                                     else:
                                         tool_ok = False
                                         tool_output = f"HTTP {r.status_code}: {r.text[:300]}"
@@ -1691,6 +1709,7 @@ def build_chat_router(
                         meta={
                             "ok": tool_ok,
                             "diff": tool_diff,
+                            "verification": tool_verification,
                             "media_url": tool_media_url,
                             "media_kind": tool_media_kind,
                         },
@@ -1713,6 +1732,7 @@ def build_chat_router(
                             "ok": tool_ok,
                             "output": tool_output,
                             "diff": tool_diff,
+                            "verification": tool_verification,
                             "media_url": tool_media_url,
                             "media_kind": tool_media_kind,
                         },

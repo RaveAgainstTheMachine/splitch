@@ -367,6 +367,12 @@ export interface ChatMessageRecord {
     context_window?: number;
     ok?: boolean;
     diff?: string | null;
+    verification?: {
+      checked: boolean;
+      ok: boolean;
+      checker: string;
+      output: string;
+    } | null;
     stopped?: boolean;
     media_url?: string | null;
     media_kind?: MediaKind | null;

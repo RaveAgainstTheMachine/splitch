@@ -40,6 +40,7 @@ from backend.desktop.shortcuts import (
 from backend.desktop.tray import run_tray
 from backend.router.config import load_config
 from backend.router.telemetry import VERSION
+from backend.shared.bench import BenchRunRequest, format_bench_table, run_benchmark_suite
 from backend.shared.engines import get_engine_status, install_or_update_engine
 from backend.shared.progress import TerminalProgress
 from backend.shared.tls import (
@@ -377,6 +378,38 @@ def _cmd_tls(args: argparse.Namespace) -> int:
 def _cmd_version(_args: argparse.Namespace) -> int:
     print(f"splitch {VERSION}")
     return 0
+
+
+def _cmd_bench(args: argparse.Namespace) -> int:
+    import asyncio
+
+    models: list[str] = []
+    for raw in args.model or ["auto"]:
+        for part in str(raw).split(","):
+            cleaned = part.strip()
+            if cleaned and cleaned not in models:
+                models.append(cleaned)
+    req = BenchRunRequest(
+        models=models or ["auto"],
+        max_tokens=args.max_tokens,
+        concurrency=args.concurrency,
+        include_tool_eval=not bool(args.no_tools),
+        include_json_eval=not bool(args.no_json_eval),
+        prompt=args.prompt or "",
+    )
+    api_key = (args.api_key or os.getenv("SPLITCH_API_KEY", "")).strip()
+    report = asyncio.run(
+        run_benchmark_suite(
+            req,
+            router_url=args.router,
+            api_key=api_key,
+        )
+    )
+    if args.json:
+        print(json.dumps(report.model_dump(mode="json"), indent=2))
+    else:
+        print(format_bench_table(report))
+    return 0 if all(r.ok for r in report.results) else 1
 
 
 def _cmd_launch(args: argparse.Namespace) -> int:
@@ -759,6 +792,36 @@ def main() -> None:
 
     p_ver = sub.add_parser("version", help="Print installed Splitch version")
     p_ver.set_defaults(func=_cmd_version)
+
+    p_bench = sub.add_parser(
+        "bench",
+        help="Run TTFT, PP/TG t/s, concurrency, tool-calling & JSON eval benchmark across models/nodes",
+    )
+    p_bench.add_argument(
+        "--router",
+        default=os.getenv("SPLITCH_ROUTER_URL", "http://127.0.0.1:8080"),
+        help="Target Splitch router or OpenAI-compatible base URL (default: http://127.0.0.1:8080)",
+    )
+    p_bench.add_argument(
+        "--model",
+        "-m",
+        action="append",
+        help="Target model or alias to benchmark (repeatable or comma-separated; default: auto)",
+    )
+    p_bench.add_argument("--max-tokens", type=int, default=96, help="Max completion tokens per run")
+    p_bench.add_argument(
+        "--concurrency",
+        "-c",
+        type=int,
+        default=1,
+        help="Parallel requests per model to measure aggregate throughput",
+    )
+    p_bench.add_argument("--no-tools", action="store_true", help="Skip native tool-calling accuracy probe")
+    p_bench.add_argument("--no-json-eval", action="store_true", help="Skip structured JSON adherence probe")
+    p_bench.add_argument("--prompt", default="", help="Custom benchmark prompt text")
+    p_bench.add_argument("--api-key", default="", help="Optional SPLITCH_API_KEY bearer token")
+    p_bench.add_argument("--json", action="store_true", help="Emit JSON benchmark report")
+    p_bench.set_defaults(func=_cmd_bench)
 
     p_launch = sub.add_parser("launch", help="Start Splitch if stopped, launch tray, and open Web UI")
     p_launch.add_argument("--url", default=None, help="Target Splitch router URL override")
