@@ -478,6 +478,7 @@ class TrayController:
     async def watch_status_loop(self) -> None:
         """Async WebSocket subscriber to `/ws/status` (auto-reconnects cleanly)."""
         import websockets
+        import websockets.exceptions
 
         ws_base = self.router_url.replace("https://", "wss://").replace("http://", "ws://")
         ws_url = f"{ws_base}/ws/status"
@@ -503,11 +504,23 @@ class TrayController:
                             continue
                         if isinstance(data, dict):
                             self.apply_snapshot(data)
-            except (OSError, httpx.HTTPError, TimeoutError, ValueError, RuntimeError):
-                # Fallback single HTTP check in case WS blocked by proxy
-                await asyncio.to_thread(self.poll_once_sync)
-                await asyncio.sleep(backoff)
-                backoff = min(10.0, backoff * 1.4)
+            except (
+                websockets.exceptions.WebSocketException,
+                OSError,
+                httpx.HTTPError,
+                TimeoutError,
+                ValueError,
+                RuntimeError,
+            ) as exc:
+                logger.debug("Tray WebSocket reconnecting after %s", type(exc).__name__)
+            except Exception as exc:  # noqa: BLE001 — keep tray watcher alive across transport errors
+                logger.warning("Unexpected tray WebSocket error: %s", exc)
+            if self._stop_event.is_set():
+                break
+            # Fallback single HTTP check in case WS dropped or is blocked by proxy
+            await asyncio.to_thread(self.poll_once_sync)
+            await asyncio.sleep(backoff)
+            backoff = min(10.0, backoff * 1.4)
 
 
 # ── Tier 2 / macOS / Windows: `pystray` + Pillow Backend ────────────────────

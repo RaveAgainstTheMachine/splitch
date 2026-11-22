@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.9.3] - 2026-11-22
+
+### Bug Fixes
+- **System Tray WebSocket Auto-Reconnect (`backend/desktop/tray.py`):** Caught `websockets.exceptions.WebSocketException` (including `ConnectionClosedError`, which does not inherit from `OSError`) inside `TrayController.watch_status_loop()`, preventing the tray from permanently losing live theme/icon sync after a router restart.
+
 ## [0.9.2] - 2026-11-22
 
 ### Models & Downloads UX

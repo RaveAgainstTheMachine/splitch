@@ -288,3 +288,68 @@ def test_dbus_next_struct_signatures_valid(tmp_path: Path, monkeypatch) -> None:
         [Variant("(ia{sv}av)", pack(it)) for it in ctrl.build_menu()],
     ]
     assert Variant("(ia{sv}av)", root).value[0] == 0
+
+
+def test_tray_watch_status_loop_reconnects_after_websocket_close(monkeypatch, tmp_path):
+    """WebSocket ConnectionClosedError (router restart) must reconnect and apply new themes."""
+    import asyncio
+    import json
+
+    import websockets
+    import websockets.exceptions
+
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path))
+    ctrl = TrayController(router_url="http://127.0.0.1:8080")
+    attempts = 0
+
+    class _FakeWs:
+        def __init__(self, idx: int) -> None:
+            self._idx = idx
+            self._sent = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._idx == 1:
+                raise websockets.exceptions.ConnectionClosedError(None, None)
+            if not self._sent:
+                self._sent = True
+                return json.dumps(
+                    {
+                        "version": VERSION,
+                        "control": {"gaming_mode": False, "force_node": "auto"},
+                        "nodes": [],
+                        "theme": {
+                            "scheme": "dark",
+                            "accent": "#22d3ee",
+                            "surface": "oled",
+                            "resolved_light": False,
+                        },
+                    }
+                )
+            ctrl._stop_event.set()
+            raise StopAsyncIteration
+
+    def _fake_connect(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        return _FakeWs(attempts)
+
+    async def _fast_sleep(_sec: float) -> None:
+        return None
+
+    monkeypatch.setattr(websockets, "connect", _fake_connect)
+    monkeypatch.setattr(ctrl, "poll_once_sync", lambda: None)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    asyncio.run(ctrl.watch_status_loop())
+    assert attempts == 2
+    assert ctrl.theme["accent"] == "#22d3ee"
+    assert ctrl.theme["surface"] == "oled"
