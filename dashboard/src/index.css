@@ -1642,28 +1642,192 @@ input[type="checkbox"][switch]:focus-visible {
   text-overflow: ellipsis;
 }
 
-.downloads-box {
-  display: grid;
+@keyframes splitch-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spin {
+  @media (prefers-reduced-motion: no-preference) {
+    animation: splitch-spin 0.9s linear infinite;
+  }
+}
+
+.btn--downloading {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+  color: var(--text);
+}
+
+/* Floating Pinned Downloads Activity Dock */
+.downloads-dock {
+  position: fixed;
+  inset-block-end: 1rem;
+  inset-inline-end: 1rem;
+  z-index: 40;
+  inline-size: min(440px, calc(100vw - 2rem));
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.35);
+  overflow: hidden;
+}
+
+.downloads-dock--collapsed {
+  inline-size: auto;
+  max-inline-size: calc(100vw - 2rem);
+}
+
+.downloads-dock__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 0.5rem;
-  padding-top: 0.5rem;
-  border-top: 1px solid var(--border);
+  padding: 0.55rem 0.75rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
 }
 
-.downloads-box h3 {
-  margin: 0;
-  font-size: 0.78rem;
-  color: var(--muted);
-  text-transform: uppercase;
+.downloads-dock--collapsed .downloads-dock__header {
+  border-bottom: none;
 }
 
-.download-row {
+.downloads-dock__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.downloads-dock__title {
+  white-space: nowrap;
+}
+
+.downloads-dock__list {
   display: grid;
-  gap: 0.3rem;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  max-block-size: min(320px, 45dvh);
+  overflow-y: auto;
 }
 
-.download-row progress {
-  width: 100%;
-  height: 7px;
+.downloads-dock__row {
+  display: grid;
+  gap: 0.35rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.downloads-dock__row:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.downloads-dock__row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-inline-size: 0;
+}
+
+.downloads-dock__file {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-inline-size: 0;
+  overflow: hidden;
+}
+
+.downloads-dock__file code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+}
+
+.downloads-dock__status {
+  flex-shrink: 0;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.downloads-dock__actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 0.15rem;
+}
+
+/* Custom-styled native <progress> (modern-web-guidance: progress) */
+.downloads-dock__progress {
+  appearance: none;
+  border: 0 solid;
+  overflow: clip;
+  inline-size: 100%;
+  block-size: 7px;
+  container-type: inline-size;
+  --progress-bar-radius: 1e5px;
+  --progress-bar-indeterminate-size: 32%;
+  --progress-bar-indeterminate-animation-duration: 1.4s;
+  border-radius: var(--progress-bar-radius);
+  background: var(--surface-2);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.18);
+
+  @media (prefers-reduced-motion: reduce) {
+    --progress-bar-indeterminate-animation-duration: 10s;
+  }
+}
+
+.downloads-dock__progress:indeterminate {
+  --progress-bar-animation: var(
+    --progress-bar-indeterminate-animation,
+    splitch-progress-indeterminate var(--progress-bar-indeterminate-animation-duration) infinite linear
+  );
+}
+
+.downloads-dock__progress:dir(rtl) {
+  --progress-bar-indeterminate-animation: splitch-progress-indeterminate
+    var(--progress-bar-indeterminate-animation-duration) infinite linear reverse;
+}
+
+.downloads-dock__progress::-webkit-progress-bar {
+  background: transparent;
+}
+
+.downloads-dock__progress::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: var(--progress-bar-radius);
+  transition: inline-size 0.3s;
+  animation: var(--progress-bar-animation, revert-rule);
+}
+
+.downloads-dock__progress::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: var(--progress-bar-radius);
+  transition: inline-size 0.3s;
+  animation: var(--progress-bar-animation, revert-rule);
+}
+
+@keyframes splitch-progress-indeterminate {
+  from,
+  to {
+    inline-size: var(--progress-bar-indeterminate-size);
+    margin-right: auto;
+  }
+  from {
+    translate: -100%;
+  }
+  to {
+    translate: 100cqi;
+  }
 }
 
 .sync-pills {

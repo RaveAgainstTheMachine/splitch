@@ -804,6 +804,8 @@ export default function App() {
             <ModelsTab
               nodes={snapshot?.nodes ?? []}
               aliases={snapshot?.aliases ?? []}
+              busyAction={busyAction}
+              onModelAction={triggerModelAction}
               onStatusRefresh={fetchStatus}
               onError={setErrorMsg}
               onConfirm={setConfirmState}

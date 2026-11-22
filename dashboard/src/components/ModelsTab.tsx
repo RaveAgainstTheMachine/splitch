@@ -5,30 +5,38 @@ import {
   ArrowDownWideNarrow,
   ArrowUpNarrowWide,
   BookOpen,
+  Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   Clock,
   Download,
   ExternalLink,
   Flame,
   HardDrive,
   Heart,
+  Loader2,
   Lock,
+  Play,
   Plus,
   RefreshCw,
   Search,
+  Square,
   Trash2,
   X
 } from "lucide-react";
 import type { ConfirmState } from "./ConfirmDialog";
 import type {
   AliasConfig,
+  DownloadJob,
   HfGgufFile,
   HfRepoDetails,
   HfRepoResult,
   NodeModelInventory,
   NodeStatus
 } from "../types";
+
+type EngineModel = NonNullable<NodeStatus["telemetry"]>["models"][number];
 
 type SortKey =
   | "downloads"
@@ -155,12 +163,16 @@ function runWithViewTransition(
 export function ModelsTab({
   nodes,
   aliases,
+  busyAction,
+  onModelAction,
   onStatusRefresh,
   onError,
   onConfirm
 }: {
   nodes: NodeStatus[];
   aliases: AliasConfig[];
+  busyAction: string | null;
+  onModelAction: (nodeId: string, model: string, action: "load" | "unload") => Promise<void>;
   onStatusRefresh: () => Promise<void>;
   onError: (msg: string | null) => void;
   onConfirm: (state: ConfirmState) => void;
@@ -180,6 +192,11 @@ export function ModelsTab({
   const [fitFilter, setFitFilter] = useState<string>("all");
   const [searching, setSearching] = useState(false);
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [startingPulls, setStartingPulls] = useState<Record<string, boolean>>({});
+  const [downloadsOpen, setDownloadsOpen] = useState(true);
+  const [dismissedDownloads, setDismissedDownloads] = useState<Record<string, boolean>>({});
+  const [downloadNotice, setDownloadNotice] = useState("");
+  const prevActiveIdsRef = useRef<Set<string>>(new Set());
 
   const listRef = useRef<HTMLDivElement>(null);
   const aliasDialogRef = useRef<HTMLDialogElement>(null);
@@ -252,11 +269,36 @@ export function ModelsTab({
     }
   };
 
+  const hasActiveDownloads = useMemo(
+    () => inventory.some((inv) => inv.downloads.some((d) => d.status === "downloading")),
+    [inventory]
+  );
+
   useEffect(() => {
-    fetchInventory();
-    const timer = window.setInterval(fetchInventory, 4000);
+    void fetchInventory();
+    const timer = window.setInterval(fetchInventory, hasActiveDownloads ? 1500 : 4000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [hasActiveDownloads]);
+
+  useEffect(() => {
+    const currentActive = new Set<string>();
+    const newlyCompleted: DownloadJob[] = [];
+    for (const inv of inventory) {
+      for (const d of inv.downloads) {
+        if (d.status === "downloading") {
+          currentActive.add(d.id);
+        } else if (d.status === "completed" && prevActiveIdsRef.current.has(d.id)) {
+          newlyCompleted.push(d);
+        }
+      }
+    }
+    prevActiveIdsRef.current = currentActive;
+    if (newlyCompleted.length > 0) {
+      const last = newlyCompleted[newlyCompleted.length - 1];
+      setDownloadNotice(`Download complete: ${last.filename} on ${last.node_id}`);
+      void onStatusRefresh();
+    }
+  }, [inventory, onStatusRefresh]);
 
   const executeHfSearch = async (
     q: string,
@@ -401,6 +443,9 @@ export function ModelsTab({
   };
 
   const pullGguf = async (repoId: string, filename: string, nodeId: string) => {
+    const pullKey = `${nodeId}:${filename}`;
+    setStartingPulls((prev) => ({ ...prev, [pullKey]: true }));
+    setDownloadsOpen(true);
     try {
       const res = await fetch("/api/models/pull", {
         method: "POST",
@@ -411,10 +456,38 @@ export function ModelsTab({
         const body = await res.json().catch(() => ({}));
         throw new Error(body.detail || `HTTP ${res.status}`);
       }
+      const job: DownloadJob = await res.json();
+      setDismissedDownloads((prev) => {
+        if (!prev[job.id]) return prev;
+        const next = { ...prev };
+        delete next[job.id];
+        return next;
+      });
+      setInventory((prev) => {
+        const hasNode = prev.some((inv) => inv.node_id === nodeId);
+        if (!hasNode) {
+          return [...prev, { node_id: nodeId, storage_path: "", files: [], downloads: [job] }];
+        }
+        return prev.map((inv) =>
+          inv.node_id === nodeId
+            ? {
+                ...inv,
+                downloads: [job, ...inv.downloads.filter((d) => d.id !== job.id)]
+              }
+            : inv
+        );
+      });
+      setDownloadNotice(`Started downloading ${filename} to ${nodeNameById[nodeId] ?? nodeId}`);
       onError(null);
-      await fetchInventory();
+      void fetchInventory();
     } catch (err) {
       onError(err instanceof Error ? err.message : "Download failed");
+    } finally {
+      setStartingPulls((prev) => {
+        const next = { ...prev };
+        delete next[pullKey];
+        return next;
+      });
     }
   };
 
@@ -494,11 +567,71 @@ export function ModelsTab({
     });
   };
 
-  const allDownloads = inventory.flatMap((inv) => inv.downloads);
+  const allDownloads = useMemo(
+    () =>
+      inventory
+        .flatMap((inv) => inv.downloads)
+        .sort((a, b) => {
+          const rank = (s: DownloadJob["status"]) =>
+            s === "downloading" ? 0 : s === "failed" ? 1 : 2;
+          return rank(a.status) - rank(b.status);
+        }),
+    [inventory]
+  );
+  const visibleDownloads = useMemo(
+    () =>
+      allDownloads.filter((d) => d.status === "downloading" || !dismissedDownloads[d.id]),
+    [allDownloads, dismissedDownloads]
+  );
+  const activeDownloads = useMemo(
+    () => visibleDownloads.filter((d) => d.status === "downloading"),
+    [visibleDownloads]
+  );
+  const finishedDownloadCount = visibleDownloads.length - activeDownloads.length;
+  const clearFinishedDownloads = () => {
+    setDismissedDownloads((prev) => {
+      const next = { ...prev };
+      for (const d of visibleDownloads) {
+        if (d.status !== "downloading") {
+          next[d.id] = true;
+        }
+      }
+      return next;
+    });
+  };
+
   const nodeNameById = useMemo(
     () => Object.fromEntries(nodes.map((n) => [n.node_id, n.display_name])),
     [nodes]
   );
+
+  const nodeById = useMemo(
+    () => Object.fromEntries(nodes.map((n) => [n.node_id, n])),
+    [nodes]
+  );
+
+  const onDiskByNode = useMemo(() => {
+    const map: Record<string, Set<string>> = {};
+    for (const inv of inventory) {
+      map[inv.node_id] = new Set(inv.files.map((f) => f.filename.toLowerCase()));
+    }
+    return map;
+  }, [inventory]);
+
+  const findEngineModel = (nodeId: string, filename: string): EngineModel | null => {
+    const node = nodeById[nodeId];
+    const models = node?.telemetry?.models ?? [];
+    if (models.length === 0) return null;
+    const base = filename.split("/").pop() ?? filename;
+    const stem = base.replace(/\.gguf$/i, "").toLowerCase();
+    const baseLower = base.toLowerCase();
+    return (
+      models.find((m) => {
+        const id = m.id.toLowerCase();
+        return id === stem || id === baseLower || id.endsWith(`/${stem}`);
+      }) ?? null
+    );
+  };
 
   const filterGgufList = (files: HfGgufFile[]): HfGgufFile[] => {
     if (fitFilter === "all") return files;
@@ -617,7 +750,7 @@ export function ModelsTab({
         </form>
 
         <p role="status" className="visually-hidden">
-          {sortStatusText}
+          {downloadNotice || sortStatusText}
         </p>
 
         {sortedRepos.length > 0 && (
@@ -943,14 +1076,113 @@ export function ModelsTab({
                                                 </span>
                                               )}
                                             </div>
-                                            <button
-                                              type="button"
-                                              className="btn btn--sm btn--accent"
-                                              onClick={() => pullGguf(r.repo_id, f.filename, targetNode)}
-                                            >
-                                              <Download size={12} aria-hidden="true" /> Pull →{" "}
-                                              {targetNode}
-                                            </button>
+                                            {(() => {
+                                              const baseName = f.filename.split("/").pop() ?? f.filename;
+                                              const pullKey = `${targetNode}:${f.filename}`;
+                                              const isStarting = Boolean(startingPulls[pullKey]);
+                                              const activeJob = allDownloads.find(
+                                                (d) =>
+                                                  d.node_id === targetNode &&
+                                                  (d.filename === f.filename ||
+                                                    (d.filename.split("/").pop() ?? d.filename) === baseName) &&
+                                                  d.status === "downloading"
+                                              );
+                                              const isOnDisk = Boolean(
+                                                onDiskByNode[targetNode]?.has(baseName.toLowerCase())
+                                              );
+                                              const engineModel = isOnDisk
+                                                ? findEngineModel(targetNode, baseName)
+                                                : null;
+                                              const isLoaded = engineModel?.status === "loaded";
+                                              const actionKey = engineModel
+                                                ? `${targetNode}:${engineModel.id}:${isLoaded ? "unload" : "load"}`
+                                                : null;
+                                              const isActionBusy = Boolean(
+                                                actionKey && busyAction === actionKey
+                                              );
+
+                                              if (isStarting) {
+                                                return (
+                                                  <button
+                                                    type="button"
+                                                    className="btn btn--sm btn--accent"
+                                                    disabled
+                                                  >
+                                                    <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
+                                                    Starting…
+                                                  </button>
+                                                );
+                                              }
+                                              if (activeJob) {
+                                                return (
+                                                  <button
+                                                    type="button"
+                                                    className="btn btn--sm btn--downloading"
+                                                    onClick={() => setDownloadsOpen(true)}
+                                                    title="View active download in Downloads dock"
+                                                  >
+                                                    <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
+                                                    {activeJob.total_bytes > 0
+                                                      ? `${Math.round(activeJob.percent)}%`
+                                                      : "Downloading…"}
+                                                  </button>
+                                                );
+                                              }
+                                              if (isOnDisk && engineModel) {
+                                                return (
+                                                  <button
+                                                    type="button"
+                                                    className={`btn btn--sm ${isLoaded ? "" : "btn--accent"}`}
+                                                    disabled={isActionBusy}
+                                                    onClick={() =>
+                                                      void onModelAction(
+                                                        targetNode,
+                                                        engineModel.id,
+                                                        isLoaded ? "unload" : "load"
+                                                      )
+                                                    }
+                                                  >
+                                                    {isActionBusy ? (
+                                                      <>
+                                                        <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
+                                                        {isLoaded ? "Unloading…" : "Loading…"}
+                                                      </>
+                                                    ) : isLoaded ? (
+                                                      <>
+                                                        <Square size={11} aria-hidden="true" /> Unload
+                                                      </>
+                                                    ) : (
+                                                      <>
+                                                        <Play size={11} aria-hidden="true" /> Load → {targetNode}
+                                                      </>
+                                                    )}
+                                                  </button>
+                                                );
+                                              }
+                                              if (isOnDisk) {
+                                                return (
+                                                  <span
+                                                    className="pill pill--ok"
+                                                    title={`Already downloaded on ${targetNode}`}
+                                                  >
+                                                    <Check size={11} aria-hidden="true" /> On {targetNode}
+                                                  </span>
+                                                );
+                                              }
+                                              return (
+                                                <button
+                                                  type="button"
+                                                  className="btn btn--sm btn--accent"
+                                                  disabled={!targetNode}
+                                                  onClick={() =>
+                                                    void pullGguf(r.repo_id, f.filename, targetNode)
+                                                  }
+                                                >
+                                                  <Download size={12} aria-hidden="true" /> Pull →{" "}
+                                                  {targetNode}
+                                                </button>
+                                              );
+                                            })()}
                                           </div>
                                         </li>
                                       );
@@ -970,31 +1202,6 @@ export function ModelsTab({
           </div>
         )}
 
-        {allDownloads.length > 0 && (
-          <div className="downloads-box">
-            <h3>Downloads</h3>
-            {allDownloads.map((d) => (
-              <div key={d.id} className="download-row">
-                <div className="meter__row">
-                  <span>
-                    <span className="node-tag">{d.node_id}</span> <code>{d.filename}</code>
-                  </span>
-                  <strong>
-                    {d.status === "downloading"
-                      ? `${d.percent}% (${(d.downloaded_bytes / 1024 ** 3).toFixed(2)} GB)`
-                      : d.status.toUpperCase()}
-                  </strong>
-                </div>
-                <progress
-                  max={100}
-                  value={d.percent}
-                  aria-label={`Download progress for ${d.filename}`}
-                />
-                {d.error && <small className="text-err">{d.error}</small>}
-              </div>
-            ))}
-          </div>
-        )}
       </section>
 
       <section className="panel" aria-labelledby={invCaptionId}>
@@ -1002,7 +1209,14 @@ export function ModelsTab({
           <h2 id={invCaptionId}>
             <HardDrive size={14} aria-hidden="true" /> Node Models
           </h2>
-          <button type="button" className="btn btn--sm" onClick={fetchInventory}>
+          <button
+            type="button"
+            className="btn btn--sm"
+            onClick={() => {
+              void fetchInventory();
+              void onStatusRefresh();
+            }}
+          >
             <RefreshCw size={12} aria-hidden="true" /> Refresh
           </button>
         </div>
@@ -1014,43 +1228,105 @@ export function ModelsTab({
                 <th scope="col">Node</th>
                 <th scope="col">Filename</th>
                 <th scope="col">Size</th>
+                <th scope="col">Status</th>
                 <th scope="col">Location</th>
                 <th scope="col">Action</th>
               </tr>
             </thead>
             <tbody>
               {inventory.flatMap((inv) =>
-                inv.files.map((f) => (
-                  <tr key={`${inv.node_id}:${f.path}`}>
-                    <th scope="row">
-                      <span className="node-tag">{inv.node_id}</span>
-                    </th>
-                    <td>
-                      <code>{f.filename}</code>
-                    </td>
-                    <td>{f.size_gb} GB</td>
-                    <td className="muted">
-                      {f.managed ? inv.storage_path : "HF Cache (read-only)"}
-                    </td>
-                    <td>
-                      {f.managed ? (
-                        <button
-                          type="button"
-                          className="btn btn--sm btn--danger"
-                          onClick={() => deleteGguf(inv.node_id, f.filename)}
-                        >
-                          <Trash2 size={12} aria-hidden="true" /> Delete
-                        </button>
-                      ) : (
-                        <span className="muted">external</span>
-                      )}
-                    </td>
-                  </tr>
-                ))
+                inv.files.map((f) => {
+                  const engineModel = findEngineModel(inv.node_id, f.filename);
+                  const isLoaded = engineModel?.status === "loaded";
+                  const isLoading =
+                    engineModel?.status === "loading" ||
+                    (engineModel != null &&
+                      busyAction === `${inv.node_id}:${engineModel.id}:load`);
+                  const isUnloading =
+                    engineModel != null &&
+                    busyAction === `${inv.node_id}:${engineModel.id}:unload`;
+
+                  return (
+                    <tr key={`${inv.node_id}:${f.path}`}>
+                      <th scope="row">
+                        <span className="node-tag">{inv.node_id}</span>
+                      </th>
+                      <td>
+                        <code>{f.filename}</code>
+                      </td>
+                      <td>{f.size_gb} GB</td>
+                      <td>
+                        {engineModel ? (
+                          <span
+                            className={`pill ${
+                              isLoaded ? "pill--ok" : isLoading ? "pill--accent" : ""
+                            }`}
+                          >
+                            {isLoading ? "Loading…" : isLoaded ? "Loaded" : "Unloaded"}
+                          </span>
+                        ) : (
+                          <span
+                            className="pill"
+                            title="File is on disk; llama-server indexes .gguf models in its models-dir"
+                          >
+                            On disk
+                          </span>
+                        )}
+                      </td>
+                      <td className="muted">
+                        {f.managed ? inv.storage_path : "HF Cache (read-only)"}
+                      </td>
+                      <td>
+                        <div className="row-actions">
+                          {engineModel && (
+                            <button
+                              type="button"
+                              className={`btn btn--sm ${isLoaded ? "" : "btn--accent"}`}
+                              disabled={isLoading || isUnloading}
+                              onClick={() =>
+                                void onModelAction(
+                                  inv.node_id,
+                                  engineModel.id,
+                                  isLoaded ? "unload" : "load"
+                                )
+                              }
+                            >
+                              {isLoading || isUnloading ? (
+                                <>
+                                  <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
+                                  {isUnloading ? "Unloading…" : "Loading…"}
+                                </>
+                              ) : isLoaded ? (
+                                <>
+                                  <Square size={11} aria-hidden="true" /> Unload
+                                </>
+                              ) : (
+                                <>
+                                  <Play size={11} aria-hidden="true" /> Load
+                                </>
+                              )}
+                            </button>
+                          )}
+                          {f.managed ? (
+                            <button
+                              type="button"
+                              className="btn btn--sm btn--danger"
+                              onClick={() => deleteGguf(inv.node_id, f.filename)}
+                            >
+                              <Trash2 size={12} aria-hidden="true" /> Delete
+                            </button>
+                          ) : (
+                            !engineModel && <span className="muted">external</span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
               {inventory.every((inv) => inv.files.length === 0) && (
                 <tr>
-                  <td colSpan={5} className="muted empty-cell">
+                  <td colSpan={6} className="muted empty-cell">
                     No models on disk.
                   </td>
                 </tr>
@@ -1220,6 +1496,142 @@ export function ModelsTab({
           </div>
         </form>
       </dialog>
+      {visibleDownloads.length > 0 && (
+        <aside
+          className={`downloads-dock ${downloadsOpen ? "downloads-dock--open" : "downloads-dock--collapsed"}`}
+          aria-label="Model downloads"
+        >
+          <div className="downloads-dock__header">
+            <button
+              type="button"
+              className="downloads-dock__toggle"
+              aria-expanded={downloadsOpen}
+              onClick={() => setDownloadsOpen((v) => !v)}
+            >
+              {activeDownloads.length > 0 ? (
+                <Loader2 size={14} className="spin" aria-hidden="true" />
+              ) : (
+                <Download size={14} aria-hidden="true" />
+              )}
+              <span className="downloads-dock__title">
+                {activeDownloads.length > 0
+                  ? `Downloading ${activeDownloads.length} model${activeDownloads.length > 1 ? "s" : ""}`
+                  : `Downloads (${visibleDownloads.length})`}
+              </span>
+              {activeDownloads.length > 0 && !downloadsOpen && (
+                <span className="pill pill--accent">
+                  {Math.round(
+                    activeDownloads.reduce((sum, d) => sum + d.percent, 0) / activeDownloads.length
+                  )}
+                  %
+                </span>
+              )}
+              {downloadsOpen ? (
+                <ChevronDown size={14} aria-hidden="true" />
+              ) : (
+                <ChevronUp size={14} aria-hidden="true" />
+              )}
+            </button>
+            {finishedDownloadCount > 0 && downloadsOpen && (
+              <button
+                type="button"
+                className="btn btn--sm btn--ghost"
+                onClick={clearFinishedDownloads}
+              >
+                Clear done
+              </button>
+            )}
+          </div>
+
+          {downloadsOpen && (
+            <div className="downloads-dock__list">
+              {visibleDownloads.map((d) => {
+                const isRunning = d.status === "downloading";
+                const isIndeterminate = isRunning && d.total_bytes <= 0;
+                const engineModel =
+                  d.status === "completed" ? findEngineModel(d.node_id, d.filename) : null;
+                const isLoaded = engineModel?.status === "loaded";
+                const isBusy =
+                  engineModel != null &&
+                  busyAction === `${d.node_id}:${engineModel.id}:${isLoaded ? "unload" : "load"}`;
+
+                return (
+                  <div key={d.id} className="downloads-dock__row">
+                    <div className="downloads-dock__row-top">
+                      <span className="downloads-dock__file" title={d.filename}>
+                        <span className="node-tag">{d.node_id}</span>
+                        <code>{d.filename.split("/").pop() ?? d.filename}</code>
+                      </span>
+                      <span className="downloads-dock__status">
+                        {isRunning ? (
+                          d.total_bytes > 0 ? (
+                            <>
+                              <strong>{d.percent.toFixed(1)}%</strong>{" "}
+                              <span className="muted">
+                                ({(d.downloaded_bytes / 1024 ** 3).toFixed(2)} /{" "}
+                                {(d.total_bytes / 1024 ** 3).toFixed(2)} GB)
+                              </span>
+                            </>
+                          ) : (
+                            <span className="muted">Starting…</span>
+                          )
+                        ) : d.status === "completed" ? (
+                          <span className="pill pill--ok">
+                            <Check size={10} aria-hidden="true" /> Ready
+                          </span>
+                        ) : (
+                          <span className="pill pill--warn">Failed</span>
+                        )}
+                      </span>
+                    </div>
+
+                    <progress
+                      className="downloads-dock__progress"
+                      max={100}
+                      value={isIndeterminate ? undefined : d.percent}
+                      aria-label={`Download progress for ${d.filename}`}
+                    />
+
+                    {d.error && <small className="text-err">{d.error}</small>}
+
+                    {d.status === "completed" && engineModel && (
+                      <div className="downloads-dock__actions">
+                        <button
+                          type="button"
+                          className={`btn btn--sm ${isLoaded ? "" : "btn--accent"}`}
+                          disabled={isBusy}
+                          onClick={() =>
+                            void onModelAction(
+                              d.node_id,
+                              engineModel.id,
+                              isLoaded ? "unload" : "load"
+                            )
+                          }
+                        >
+                          {isBusy ? (
+                            <>
+                              <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
+                              {isLoaded ? "Unloading…" : "Loading…"}
+                            </>
+                          ) : isLoaded ? (
+                            <>
+                              <Square size={11} aria-hidden="true" /> Unload
+                            </>
+                          ) : (
+                            <>
+                              <Play size={11} aria-hidden="true" /> Load on {d.node_id}
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </aside>
+      )}
     </div>
   );
 }

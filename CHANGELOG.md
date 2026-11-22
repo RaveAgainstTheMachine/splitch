@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.9.2] - 2026-11-22
+
+### Models & Downloads UX
+- **Instant Pull Feedback:** Clicking `Pull → <node>` on any Hugging Face GGUF immediately shows a `Starting…` spinner, transitions to live `Downloading XX%` progress, and switches to `On <node>` / `Load` / `Unload` once on disk.
+- **Pinned Floating Downloads Dock:** Replaced the buried bottom-of-results downloads box with a fixed bottom-right collapsible Downloads Activity Dock (`downloads-dock`) featuring custom-styled `<progress>` bars (with indeterminate state), live GB/%, `Clear done`, and 1-click `Load` buttons.
+- **Auto-Refresh `llama-server` Model Index & 1-Click Load in Node Models:** `splitch-agent` now automatically refreshes `llama-server` (`--models-dir`) when a `.gguf` finishes downloading or is deleted (`SPLITCH_ENGINE_RELOAD_CMD` or `splitch-llama.service` / `launchctl`), and the **Node Models** table now shows live `Loaded` / `Unloaded` status with 1-click `Load` / `Unload` controls.
+
 ## [0.9.1] - 2026-11-22
 
 ### UX

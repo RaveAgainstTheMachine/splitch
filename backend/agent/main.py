@@ -14,6 +14,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -590,6 +591,81 @@ async def list_model_files() -> NodeModelInventory:
     )
 
 
+async def _refresh_engine_model_index(expected_stem: str | None = None) -> None:
+    """Refresh llama-server --models-dir index after a GGUF is added or removed."""
+    await state.poll_once()
+    if state.snapshot.engine != "llama-server":
+        return
+    if expected_stem:
+        known = {m.id.lower() for m in state.snapshot.models}
+        if expected_stem.lower() in known:
+            return
+
+    cmd: list[str] | None = None
+    custom_cmd = os.getenv("SPLITCH_ENGINE_RELOAD_CMD", "").strip()
+    if custom_cmd:
+        cmd = shlex.split(custom_cmd)
+    elif sys.platform == "linux" and shutil.which("systemctl"):
+        for unit in ("splitch-llama.service", "llama-server.service"):
+            try:
+                chk = await asyncio.create_subprocess_exec(
+                    "systemctl",
+                    "--user",
+                    "is-active",
+                    "--quiet",
+                    unit,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                rc = await asyncio.wait_for(chk.wait(), timeout=3.0)
+                if rc == 0:
+                    cmd = ["systemctl", "--user", "restart", unit]
+                    break
+            except (OSError, TimeoutError):
+                continue
+    elif sys.platform == "darwin" and shutil.which("launchctl"):
+        uid = os.getuid()
+        for label in ("com.splitch.llama", "ai.splitch.llama"):
+            try:
+                chk = await asyncio.create_subprocess_exec(
+                    "launchctl",
+                    "print",
+                    f"gui/{uid}/{label}",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                rc = await asyncio.wait_for(chk.wait(), timeout=3.0)
+                if rc == 0:
+                    cmd = ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"]
+                    break
+            except (OSError, TimeoutError):
+                continue
+
+    if not cmd:
+        return
+
+    try:
+        logger.info("Refreshing llama-server model index via: %s", " ".join(cmd))
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=15.0)
+    except (OSError, TimeoutError) as exc:
+        logger.warning("Engine index refresh command failed: %s", exc)
+        return
+
+    for _ in range(6):
+        await asyncio.sleep(1.0)
+        await state.poll_once()
+        if state.snapshot.engine_healthy and (
+            not expected_stem
+            or any(m.id.lower() == expected_stem.lower() for m in state.snapshot.models)
+        ):
+            break
+
+
 async def _run_hf_download(job: DownloadJob) -> None:
     root = Path(STORAGE_PATH)
     root.mkdir(parents=True, exist_ok=True)
@@ -623,7 +699,10 @@ async def _run_hf_download(job: DownloadJob) -> None:
         part.replace(dest)
         job.percent = 100.0
         job.status = "completed"
-        asyncio.create_task(state.poll_once())
+        if safe_name.lower().endswith(".gguf"):
+            asyncio.create_task(_refresh_engine_model_index(expected_stem=dest.stem))
+        else:
+            asyncio.create_task(state.poll_once())
     except (httpx.HTTPError, OSError) as exc:
         job.status = "failed"
         job.error = str(exc)
@@ -900,7 +979,7 @@ async def delete_model_file(filename: str) -> dict:
     if not target.exists():
         raise HTTPException(status_code=404, detail="Model file not found")
     await asyncio.to_thread(target.unlink)
-    asyncio.create_task(state.poll_once())
+    asyncio.create_task(_refresh_engine_model_index())
     return {"ok": True, "deleted": filename}
 
 
