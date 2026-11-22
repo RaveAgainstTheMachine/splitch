@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hmac
 import json
 import os
 import re
@@ -40,6 +39,7 @@ from backend.shared.models import (
     NodeSshTestRequest,
     NodeSshTestResponse,
 )
+from backend.shared.secrets import hash_secret_sha256, verify_secret_hash
 
 SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._:\[\]-]+$")
 NODE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,31}$")
@@ -50,16 +50,29 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @dataclass
 class _StoredJoinToken:
+    """In-memory join token entry storing ONLY a salted SHA-256 verifier (never plaintext)."""
+
     id: str
-    secret: str
+    secret_hash: str
     node_hint: str
     created_at: float
     expires_at: float
     used: bool = False
 
 
+@dataclass(frozen=True)
+class MintedJoinToken:
+    """Ephemeral return value from `JoinTokenManager.create()` exposing plaintext once at mint time."""
+
+    id: str
+    secret: str
+    node_hint: str
+    created_at: float
+    expires_at: float
+
+
 class JoinTokenManager:
-    """In-memory single-use short-lived join token registry."""
+    """In-memory single-use short-lived join token registry (salted SHA-256 hashed at rest)."""
 
     def __init__(self) -> None:
         self._tokens: dict[str, _StoredJoinToken] = {}
@@ -70,20 +83,26 @@ class JoinTokenManager:
         for k in expired:
             self._tokens.pop(k, None)
 
-    def create(self, *, ttl_seconds: int = 900, node_hint: str = "") -> _StoredJoinToken:
+    def create(self, *, ttl_seconds: int = 900, node_hint: str = "") -> MintedJoinToken:
         self._prune()
         now = time.time()
         secret = f"spj_{secrets.token_urlsafe(24)}"
         tid = secrets.token_hex(6)
         tok = _StoredJoinToken(
             id=tid,
-            secret=secret,
+            secret_hash=hash_secret_sha256(secret),
             node_hint=node_hint,
             created_at=now,
             expires_at=now + ttl_seconds,
         )
         self._tokens[tid] = tok
-        return tok
+        return MintedJoinToken(
+            id=tid,
+            secret=secret,
+            node_hint=node_hint,
+            created_at=now,
+            expires_at=tok.expires_at,
+        )
 
     def list_active(self) -> list[JoinTokenInfo]:
         self._prune()
@@ -102,7 +121,7 @@ class JoinTokenManager:
         return self._tokens.pop(token_id, None) is not None
 
     def validate_and_consume(self, candidate: str) -> bool:
-        """Atomically validate and consume a single-use join token (constant-time compare)."""
+        """Atomically validate and consume a single-use join token (constant-time salted hash compare)."""
         cleaned = (candidate or "").strip()
         if not cleaned:
             return False
@@ -110,7 +129,7 @@ class JoinTokenManager:
         now = time.time()
         matched: _StoredJoinToken | None = None
         for tok in self._tokens.values():
-            if not tok.used and tok.expires_at > now and hmac.compare_digest(tok.secret, cleaned):
+            if not tok.used and tok.expires_at > now and verify_secret_hash(cleaned, tok.secret_hash):
                 matched = tok
         if matched is None:
             return False
@@ -125,7 +144,7 @@ class JoinTokenManager:
         self._prune()
         now = time.time()
         return any(
-            not tok.used and tok.expires_at > now and hmac.compare_digest(tok.secret, cleaned)
+            not tok.used and tok.expires_at > now and verify_secret_hash(cleaned, tok.secret_hash)
             for tok in self._tokens.values()
         )
 
@@ -432,9 +451,14 @@ def build_provision_router(
             sh_flags.append("--install-service")
 
         quoted_flags = " ".join(shlex.quote(f) for f in sh_flags)
-        env_prefix = ""
-        if cluster.agent_token:
-            env_prefix = f"SPLITCH_AGENT_TOKEN={shlex.quote(cluster.agent_token)} "
+        env_parts: list[str] = []
+        if cluster.router_public_key_compact:
+            env_parts.append(
+                f"SPLITCH_ROUTER_PUBLIC_KEY={shlex.quote(cluster.router_public_key_compact)}"
+            )
+        elif cluster.agent_token:
+            env_parts.append(f"SPLITCH_AGENT_TOKEN={shlex.quote(cluster.agent_token)}")
+        env_prefix = (" ".join(env_parts) + " ") if env_parts else ""
         remote_cmd = (
             f"set -eu; {env_prefix}"
             f"curl -fsSL {shlex.quote(router_url + '/install.sh')} | sh -s -- {quoted_flags}"

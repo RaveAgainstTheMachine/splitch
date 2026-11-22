@@ -785,7 +785,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
     async def get_node_media_engine(node_id: str) -> NodeMediaEngineStatus:
         node = _require_online_node(node_id)
         try:
-            async with httpx.AsyncClient(timeout=8.0, headers=cluster.agent_headers()) as client:
+            async with httpx.AsyncClient(
+                timeout=8.0, headers=cluster.agent_headers("GET", "/media/engine/status")
+            ) as client:
                 r = await client.get(f"{node.agent_url}/media/engine/status")
                 if r.status_code >= 400:
                     raise HTTPException(status_code=r.status_code, detail=r.text[:300])
@@ -801,7 +803,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
     ) -> NodeMediaEngineStatus:
         node = _require_online_node(node_id)
         try:
-            async with httpx.AsyncClient(timeout=20.0, headers=cluster.agent_headers()) as client:
+            async with httpx.AsyncClient(
+                timeout=20.0, headers=cluster.agent_headers("POST", "/media/engine/install")
+            ) as client:
                 r = await client.post(
                     f"{node.agent_url}/media/engine/install", json=req.model_dump()
                 )
@@ -819,7 +823,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
     ) -> NodeMediaEngineStatus:
         node = _require_online_node(node_id)
         try:
-            async with httpx.AsyncClient(timeout=30.0, headers=cluster.agent_headers()) as client:
+            async with httpx.AsyncClient(
+                timeout=30.0, headers=cluster.agent_headers("POST", "/media/engine/start")
+            ) as client:
                 r = await client.post(
                     f"{node.agent_url}/media/engine/start", json=req.model_dump()
                 )
@@ -839,7 +845,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
     async def stop_node_media_engine(node_id: str) -> NodeMediaEngineStatus:
         node = _require_online_node(node_id)
         try:
-            async with httpx.AsyncClient(timeout=15.0, headers=cluster.agent_headers()) as client:
+            async with httpx.AsyncClient(
+                timeout=15.0, headers=cluster.agent_headers("POST", "/media/engine/stop")
+            ) as client:
                 r = await client.post(f"{node.agent_url}/media/engine/stop")
                 if r.status_code >= 400:
                     raise HTTPException(status_code=r.status_code, detail=r.text[:300])
@@ -856,7 +864,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         payload = req.model_dump()
         payload["node_id"] = node_id
         try:
-            async with httpx.AsyncClient(timeout=15.0, headers=cluster.agent_headers()) as client:
+            async with httpx.AsyncClient(
+                timeout=15.0, headers=cluster.agent_headers("POST", "/files/models/pull")
+            ) as client:
                 r = await client.post(f"{node.agent_url}/files/models/pull", json=payload)
                 if r.status_code >= 400:
                     detail = r.text[:400]

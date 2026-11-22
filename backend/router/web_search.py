@@ -17,11 +17,14 @@ import os
 import re
 import socket
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any, ClassVar
 from urllib.parse import quote, urlparse
 
 import httpx
 
+from backend.router.config import default_data_root
+from backend.shared.secrets import SecretVault, resolve_secret_value
 from backend.version import __version__ as VERSION
 
 USER_AGENT = f"Splitch/{VERSION} (+https://github.com/RaveAgainstTheMachine/splitch)"
@@ -323,9 +326,21 @@ async def execute_web_search(query: str, max_results: int = 6) -> tuple[bool, st
         return False, "Missing 'query' argument"
     limit = max(1, min(int(max_results or 6), 10))
 
+    data_dir = Path(os.getenv("SPLITCH_DATA_DIR", str(default_data_root() / "data")))
+    vault = SecretVault(data_dir)
     searxng_url = os.getenv("SPLITCH_SEARXNG_URL", "").strip()
-    brave_key = os.getenv("BRAVE_API_KEY", "").strip()
-    tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
+    try:
+        brave_key = resolve_secret_value(os.getenv("BRAVE_API_KEY", ""), vault=vault) or (
+            vault.get("brave_api_key") or ""
+        )
+    except (OSError, PermissionError, ValueError):
+        brave_key = ""
+    try:
+        tavily_key = resolve_secret_value(os.getenv("TAVILY_API_KEY", ""), vault=vault) or (
+            vault.get("tavily_api_key") or ""
+        )
+    except (OSError, PermissionError, ValueError):
+        tavily_key = ""
 
     async with httpx.AsyncClient(
         timeout=10.0, follow_redirects=True, headers={"User-Agent": USER_AGENT}

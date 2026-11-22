@@ -553,7 +553,7 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
     @router.get("/models/inventory", response_model=list[NodeModelInventory])
     async def get_inventory() -> list[NodeModelInventory]:
         inventories: list[NodeModelInventory] = []
-        headers = cluster.agent_headers()
+        headers = cluster.agent_headers("GET", "/files/models")
 
         async def _fetch(agent_url: str) -> None:
             try:
@@ -574,7 +574,9 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         if not node or not node.online:
             raise HTTPException(status_code=503, detail=f"Node '{req.node_id}' is offline")
         try:
-            async with httpx.AsyncClient(timeout=15.0, headers=cluster.agent_headers()) as client:
+            async with httpx.AsyncClient(
+                timeout=15.0, headers=cluster.agent_headers("POST", "/files/models/pull")
+            ) as client:
                 r = await client.post(
                     f"{node.agent_url}/files/models/pull",
                     json=req.model_dump(),
@@ -593,7 +595,9 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         if not node or not node.online:
             raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
         try:
-            async with httpx.AsyncClient(timeout=10.0, headers=cluster.agent_headers()) as client:
+            async with httpx.AsyncClient(
+                timeout=10.0, headers=cluster.agent_headers("DELETE", f"/files/models/{filename}")
+            ) as client:
                 r = await client.delete(f"{node.agent_url}/files/models/{filename}")
                 if r.status_code >= 400:
                     raise HTTPException(status_code=r.status_code, detail=r.text[:300])

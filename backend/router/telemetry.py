@@ -15,7 +15,12 @@ import httpx
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from backend.router.config import SplitchConfig, load_control_state, save_control_state
+from backend.router.config import (
+    SplitchConfig,
+    default_data_root,
+    load_control_state,
+    save_control_state,
+)
 from backend.router.policy import check_node_eligibility, watched_gpu_metrics
 from backend.shared.models import (
     AliasConfig,
@@ -25,6 +30,13 @@ from backend.shared.models import (
     NodeStatus,
     NodeTelemetry,
     TraceEntry,
+)
+from backend.shared.secrets import (
+    SecretVault,
+    load_ed25519_private_key,
+    public_key_to_compact,
+    resolve_secret_value,
+    sign_agent_request_ed25519,
 )
 from backend.version import __version__ as VERSION
 
@@ -36,7 +48,26 @@ class ClusterState:
         self.started_at = time.time()
         self.state_path = Path(config.router.state_file)
         self.control: ControlState = load_control_state(self.state_path)
-        self.agent_token: str = os.getenv("SPLITCH_AGENT_TOKEN", "").strip()
+        self.vault = SecretVault(data_dir or (default_data_root() / "data"))
+        try:
+            self.agent_token: str = resolve_secret_value(
+                os.getenv("SPLITCH_AGENT_TOKEN", ""), vault=self.vault
+            )
+        except (OSError, PermissionError, ValueError):
+            self.agent_token = ""
+        self.router_private_key = None
+        self.router_public_key_compact: str = ""
+        raw_priv = os.getenv("SPLITCH_ROUTER_PRIVATE_KEY", "").strip()
+        if not raw_priv and data_dir is not None:
+            default_priv = data_dir / "router_ed25519.pem"
+            if default_priv.is_file():
+                raw_priv = str(default_priv)
+        if raw_priv:
+            with contextlib.suppress(OSError, PermissionError, ValueError, TypeError):
+                self.router_private_key = load_ed25519_private_key(raw_priv)
+                self.router_public_key_compact = public_key_to_compact(
+                    self.router_private_key.public_key()
+                )
         self.nodes: dict[str, NodeStatus] = {
             n.id: NodeStatus(
                 node_id=n.id,
@@ -58,10 +89,13 @@ class ClusterState:
         self._proxy_client: httpx.AsyncClient | None = None
         self._poll_task: asyncio.Task | None = None
 
-    def agent_headers(self) -> dict[str, str]:
-        if not self.agent_token:
-            return {}
-        return {"Authorization": f"Bearer {self.agent_token}"}
+    def agent_headers(self, method: str = "ANY", path: str = "*") -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if self.agent_token:
+            headers["Authorization"] = f"Bearer {self.agent_token}"
+        if self.router_private_key is not None:
+            headers.update(sign_agent_request_ed25519(self.router_private_key, method, path))
+        return headers
 
     def _dynamic_nodes_path(self) -> Path | None:
         if self.data_dir is None:
@@ -159,7 +193,6 @@ class ClusterState:
         verify: bool | str = ca_bundle if ca_bundle else True
         self._poll_client = httpx.AsyncClient(
             timeout=httpx.Timeout(3.0, connect=1.5),
-            headers=self.agent_headers(),
             verify=verify,
         )
         self._proxy_client = httpx.AsyncClient(
@@ -191,7 +224,7 @@ class ClusterState:
                 resp = await self._poll_client.post(
                     f"{node.agent_url}/models/unload",
                     json={"model": m.id},
-                    headers=self.agent_headers(),
+                    headers=self.agent_headers("POST", "/models/unload"),
                     timeout=10.0,
                 )
                 if resp.status_code < 400:
@@ -202,7 +235,8 @@ class ClusterState:
         t0 = time.perf_counter()
         try:
             resp = await self._poll_client.get(
-                f"{node.agent_url}/metrics", headers=self.agent_headers()
+                f"{node.agent_url}/metrics",
+                headers=self.agent_headers("GET", "/metrics"),
             )
             resp.raise_for_status()
             telemetry = NodeTelemetry.model_validate(resp.json())
@@ -300,7 +334,7 @@ class ClusterState:
             resp = await self._poll_client.post(
                 f"{node.agent_url}/models/{action}",
                 json={"model": model},
-                headers=self.agent_headers(),
+                headers=self.agent_headers("POST", f"/models/{action}"),
                 timeout=60.0 if action == "load" else 15.0,
             )
             await self._poll_single(node)

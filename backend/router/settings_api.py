@@ -159,6 +159,8 @@ def build_settings_router(
     data_dir: Path,
     *,
     api_key_getter,
+    auth_enabled_getter=None,
+    internal_auth_headers_getter=None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["settings"])
     settings_file = data_dir / "settings.json"
@@ -168,6 +170,7 @@ def build_settings_router(
 
     def _current_settings() -> RuntimeSettings:
         api_key = str(api_key_getter() or "")
+        auth_on = bool(auth_enabled_getter()) if auth_enabled_getter is not None else bool(api_key)
         tls = cluster.config.tls
         tls_active = bool(
             tls.enabled
@@ -178,7 +181,7 @@ def build_settings_router(
             or os.getenv("SPLITCH_LETSENCRYPT_DOMAIN", "").strip()
             or os.getenv("SPLITCH_TLS_SELF_SIGNED", "").strip().lower() in ("1", "true", "yes")
         )
-        remote_prov = bool(api_key) or (
+        remote_prov = auth_on or (
             os.getenv("SPLITCH_ENABLE_REMOTE_PROVISION", "").strip().lower()
             in ("1", "true", "yes")
         )
@@ -193,10 +196,14 @@ def build_settings_router(
             max_traces=cluster.config.router.max_traces,
             public_url=cluster.config.router.public_url,
             searxng_url=os.getenv("SPLITCH_SEARXNG_URL", "").strip(),
-            brave_api_key_set=bool(os.getenv("BRAVE_API_KEY", "").strip()),
-            tavily_api_key_set=bool(os.getenv("TAVILY_API_KEY", "").strip()),
-            auth_enabled=bool(api_key),
-            agent_token_enabled=bool(cluster.agent_token),
+            brave_api_key_set=bool(
+                os.getenv("BRAVE_API_KEY", "").strip() or cluster.vault.has("brave_api_key")
+            ),
+            tavily_api_key_set=bool(
+                os.getenv("TAVILY_API_KEY", "").strip() or cluster.vault.has("tavily_api_key")
+            ),
+            auth_enabled=auth_on,
+            agent_token_enabled=bool(cluster.agent_token or cluster.router_private_key),
             tls_enabled=tls_active,
             hsts_enabled=cluster.config.security.hsts_enabled,
             trusted_proxies=cluster.config.security.trusted_proxies,
@@ -303,9 +310,12 @@ def build_settings_router(
         """Live end-to-end verification of OpenAI Chat, Responses, Anthropic Messages, or /v1/models."""
         t0 = time.perf_counter()
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        api_key = str(api_key_getter() or "")
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+        if internal_auth_headers_getter is not None:
+            headers.update(internal_auth_headers_getter())
+        else:
+            api_key = str(api_key_getter() or "")
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
 
         endpoint_map = {
             "models": "/v1/models",
@@ -442,7 +452,9 @@ def build_settings_router(
         cfg_dict, raw_text = _build_client_payload(req.client, base_url, req.model, cluster, mcps)
 
         try:
-            async with httpx.AsyncClient(timeout=10.0, headers=cluster.agent_headers()) as client:
+            async with httpx.AsyncClient(
+                timeout=10.0, headers=cluster.agent_headers("POST", "/sync/client-config")
+            ) as client:
                 r = await client.post(
                     f"{node.agent_url}/sync/client-config",
                     json={"client": req.client, "config": cfg_dict, "raw_text": raw_text},

@@ -59,6 +59,11 @@ from backend.shared.models import (
     NodeStatus,
     WorkspaceDirListing,
 )
+from backend.shared.secrets import (
+    load_or_create_session_secret,
+    resolve_secret_value,
+    verify_secret_hash,
+)
 from backend.shared.security import is_loopback_host, is_trusted_proxy
 from backend.shared.updater import DoctorReport, UpdateStatus, check_update, run_doctor
 
@@ -66,7 +71,21 @@ _ROOT = default_data_root()
 DATA_DIR = Path(os.getenv("SPLITCH_DATA_DIR", str(_ROOT / "data")))
 SKILLS_DIR = Path(os.getenv("SPLITCH_SKILLS_DIR", str(_ROOT / "skills")))
 MCP_SCRIPTS_DIR = Path(os.getenv("SPLITCH_MCP_SCRIPTS_DIR", str(_ROOT / "mcp_servers")))
-API_KEY = os.getenv("SPLITCH_API_KEY", "").strip()
+
+
+def _safe_resolve_env_secret(name: str) -> str:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ""
+    try:
+        return resolve_secret_value(raw, check_permissions=True)
+    except (OSError, PermissionError, ValueError):
+        return ""
+
+
+API_KEY = _safe_resolve_env_secret("SPLITCH_API_KEY")
+API_KEY_HASH = _safe_resolve_env_secret("SPLITCH_API_KEY_HASH")
+SESSION_SECRET = load_or_create_session_secret(DATA_DIR)
 
 config = load_config()
 cluster = ClusterState(config, data_dir=DATA_DIR)
@@ -217,12 +236,36 @@ async def _validate_node_url(raw: str, field_name: str, *, allow_empty: bool = F
     return cleaned
 
 
-def _session_cookie_token(api_key: str) -> str:
-    return hmac.new(api_key.encode("utf-8"), b"splitch-ui-session-v1", hashlib.sha256).hexdigest()
+def _auth_enabled() -> bool:
+    return bool(API_KEY or API_KEY_HASH)
+
+
+def _verify_api_key(candidate: str) -> bool:
+    cleaned = candidate.strip()
+    if not cleaned:
+        return False
+    if API_KEY_HASH and verify_secret_hash(cleaned, API_KEY_HASH):
+        return True
+    return bool(API_KEY and hmac.compare_digest(cleaned, API_KEY))
+
+
+def _session_cookie_token(secret: str | None = None) -> str:
+    signing_key = (secret if secret is not None else SESSION_SECRET) or API_KEY
+    return hmac.new(
+        signing_key.encode("utf-8"), b"splitch-ui-session-v1", hashlib.sha256
+    ).hexdigest()
+
+
+def _internal_loopback_auth_headers() -> dict[str, str]:
+    if not _auth_enabled():
+        return {}
+    if API_KEY:
+        return {"Authorization": f"Bearer {API_KEY}"}
+    return {"Cookie": f"{SESSION_COOKIE_NAME}={_session_cookie_token()}"}
 
 
 def _auth_method(request: Request) -> Literal["open", "header", "cookie", "none"]:
-    if not API_KEY:
+    if not _auth_enabled():
         return "open"
     auth = request.headers.get("authorization", "")
     header_tok = (
@@ -230,10 +273,10 @@ def _auth_method(request: Request) -> Literal["open", "header", "cookie", "none"
         if auth.lower().startswith("bearer ")
         else request.headers.get("x-api-key", "").strip()
     )
-    if header_tok and hmac.compare_digest(header_tok, API_KEY):
+    if header_tok and _verify_api_key(header_tok):
         return "header"
     cookie_tok = request.cookies.get(SESSION_COOKIE_NAME, "").strip()
-    if cookie_tok and hmac.compare_digest(cookie_tok, _session_cookie_token(API_KEY)):
+    if cookie_tok and hmac.compare_digest(cookie_tok, _session_cookie_token()):
         return "cookie"
     return "none"
 
@@ -270,7 +313,7 @@ async def _security_and_auth_middleware(request: Request, call_next):
         and join_tokens.is_valid_unconsumed(request.headers.get("x-splitch-join-token", ""))
     )
     if (
-        API_KEY
+        _auth_enabled()
         and path not in _AUTH_EXEMPT_PATHS
         and (path.startswith(("/v1/", "/api/")) or path == "/infill")
         and auth_kind == "none"
@@ -319,8 +362,22 @@ app.include_router(build_chat_router(cluster, DATA_DIR, SKILLS_DIR, media_servic
 app.include_router(build_models_router(cluster, DATA_DIR))
 app.include_router(build_skills_router(cluster, SKILLS_DIR))
 app.include_router(build_mcp_router(cluster, DATA_DIR, MCP_SCRIPTS_DIR))
-app.include_router(build_settings_router(cluster, DATA_DIR, api_key_getter=lambda: API_KEY))
-app.include_router(build_provision_router(cluster, join_tokens, api_key_getter=lambda: API_KEY))
+app.include_router(
+    build_settings_router(
+        cluster,
+        DATA_DIR,
+        api_key_getter=lambda: API_KEY,
+        auth_enabled_getter=_auth_enabled,
+        internal_auth_headers_getter=_internal_loopback_auth_headers,
+    )
+)
+app.include_router(
+    build_provision_router(
+        cluster,
+        join_tokens,
+        api_key_getter=lambda: ("1" if _auth_enabled() else ""),
+    )
+)
 
 
 # ── OpenAI-compatible + FIM Inference API ────────────────────────────────────
@@ -384,7 +441,7 @@ async def health() -> dict:
 @app.get("/api/auth/status", response_model=AuthStatusResponse)
 async def get_auth_status(request: Request) -> AuthStatusResponse:
     return AuthStatusResponse(
-        auth_required=bool(API_KEY),
+        auth_required=_auth_enabled(),
         authenticated=_is_request_authenticated(request),
     )
 
@@ -393,7 +450,7 @@ async def get_auth_status(request: Request) -> AuthStatusResponse:
 async def login_session(
     req: AuthLoginRequest, request: Request, response: Response
 ) -> AuthStatusResponse:
-    if not API_KEY:
+    if not _auth_enabled():
         return AuthStatusResponse(auth_required=False, authenticated=True)
     ip = _client_ip(request)
     now = time.monotonic()
@@ -411,14 +468,14 @@ async def login_session(
         )
 
     candidate = req.api_key.strip()
-    if not candidate or not hmac.compare_digest(candidate, API_KEY):
+    if not _verify_api_key(candidate):
         bucket.append(now)
         raise HTTPException(status_code=401, detail="Invalid SPLITCH_API_KEY")
 
     _LOGIN_FAILURES.pop(ip, None)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
-        value=_session_cookie_token(API_KEY),
+        value=_session_cookie_token(),
         httponly=True,
         secure=_is_https_request(request),
         samesite="strict",
@@ -431,7 +488,7 @@ async def login_session(
 @app.post("/api/auth/logout", response_model=AuthStatusResponse)
 async def logout_session(response: Response) -> AuthStatusResponse:
     response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
-    return AuthStatusResponse(auth_required=bool(API_KEY), authenticated=not bool(API_KEY))
+    return AuthStatusResponse(auth_required=_auth_enabled(), authenticated=not _auth_enabled())
 
 
 @app.get("/api/status", response_model=DashboardSnapshot)
@@ -465,6 +522,7 @@ async def run_cluster_benchmark(req: BenchRunRequest) -> BenchReport:
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://splitch.internal",
+        headers=_internal_loopback_auth_headers(),
         timeout=httpx.Timeout(90.0, connect=5.0),
     ) as client:
         report = await run_benchmark_suite(
@@ -487,7 +545,7 @@ async def update_control(update: ControlUpdate) -> ControlState:
 
 @app.post("/api/nodes", response_model=NodeStatus)
 async def register_node(req: NodeRegisterRequest, request: Request) -> NodeStatus:
-    if API_KEY and not _is_request_authenticated(request):
+    if _auth_enabled() and not _is_request_authenticated(request):
         jtok = request.headers.get("x-splitch-join-token", "")
         if not join_tokens.validate_and_consume(jtok):
             raise HTTPException(status_code=401, detail="Invalid or expired join token")
@@ -534,7 +592,9 @@ async def browse_node_workspace(node_id: str, subpath: str = "") -> WorkspaceDir
     if not node or not node.online:
         raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
     try:
-        async with httpx.AsyncClient(timeout=8.0, headers=cluster.agent_headers()) as client:
+        async with httpx.AsyncClient(
+            timeout=8.0, headers=cluster.agent_headers("GET", "/workspace/dirs")
+        ) as client:
             r = await client.get(f"{node.agent_url}/workspace/dirs", params={"subpath": subpath})
             if r.status_code >= 400:
                 detail = r.text[:300]
@@ -552,12 +612,12 @@ async def browse_node_workspace(node_id: str, subpath: str = "") -> WorkspaceDir
 
 @app.websocket("/ws/status")
 async def ws_status(websocket: WebSocket) -> None:
-    if API_KEY:
+    if _auth_enabled():
         tok = websocket.query_params.get("token", "").strip()
         cookie_tok = websocket.cookies.get(SESSION_COOKIE_NAME, "").strip()
-        ok_query = bool(tok and hmac.compare_digest(tok, API_KEY))
+        ok_query = bool(tok and _verify_api_key(tok))
         ok_cookie = bool(
-            cookie_tok and hmac.compare_digest(cookie_tok, _session_cookie_token(API_KEY))
+            cookie_tok and hmac.compare_digest(cookie_tok, _session_cookie_token())
         )
         if not (ok_query or ok_cookie):
             await websocket.close(code=1008)

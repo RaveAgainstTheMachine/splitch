@@ -47,6 +47,7 @@ from backend.shared.models import (
     TraceEntry,
     WorkspaceScopeUpdate,
 )
+from backend.shared.secrets import resolve_env_map, sign_tool_approval_ed25519
 from backend.shared.security import sign_tool_approval
 from backend.version import __version__ as VERSION
 
@@ -598,6 +599,8 @@ async def _call_mcp_tool(
     tool_name: str,
     arguments: dict[str, Any],
     workspace_subpath: str = "",
+    *,
+    vault=None,
 ) -> str:
     if srv.transport in ("http", "sse") and srv.url:
         call_msg = {
@@ -632,7 +635,7 @@ async def _call_mcp_tool(
         resolved_ws = (Path(base_ws).resolve() / workspace_subpath.lstrip("/")).resolve()
         if resolved_ws.is_relative_to(Path(base_ws).resolve()):
             env["GRAPHIFY_WORKSPACE"] = str(resolved_ws)
-    env.update(srv.env)
+    env.update(resolve_env_map(srv.env, vault=vault))
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -706,7 +709,7 @@ async def _call_mcp_tool(
 
 
 async def _fetch_mcp_tools(
-    srv: McpServerConfig, workspace_subpath: str = ""
+    srv: McpServerConfig, workspace_subpath: str = "", *, vault=None
 ) -> list[dict[str, Any]]:
     if srv.transport in ("http", "sse") and srv.url:
         try:
@@ -750,7 +753,7 @@ async def _fetch_mcp_tools(
         resolved_ws = (Path(base_ws).resolve() / workspace_subpath.lstrip("/")).resolve()
         if resolved_ws.is_relative_to(Path(base_ws).resolve()):
             env["GRAPHIFY_WORKSPACE"] = str(resolved_ws)
-    env.update(srv.env)
+    env.update(resolve_env_map(srv.env, vault=vault))
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -1288,7 +1291,9 @@ def build_chat_router(
                 tools_payload.extend(WORKSPACE_TOOLS_SCHEMA)
                 for srv in mcp_map.values():
                     tools_payload.extend(
-                        await _fetch_mcp_tools(srv, active_conv.workspace_subpath)
+                        await _fetch_mcp_tools(
+                            srv, active_conv.workspace_subpath, vault=cluster.vault
+                        )
                     )
             if active_conv.web_search_enabled:
                 tools_payload.extend(WEB_TOOLS_SCHEMA)
@@ -1659,6 +1664,7 @@ def build_chat_router(
                                 real_tool,
                                 parsed_args,
                                 active_conv.workspace_subpath,
+                                vault=cluster.vault,
                             )
                             tool_ok = not tool_output.startswith("MCP error:")
                     else:
@@ -1678,10 +1684,19 @@ def build_chat_router(
                         else:
                             try:
                                 tool_headers: dict[str, str] = {
-                                    **cluster.agent_headers(),
+                                    **cluster.agent_headers("POST", "/tools/execute"),
                                     "X-Splitch-Router-Approved": "1",
                                 }
-                                if cluster.agent_token:
+                                if cluster.router_private_key is not None:
+                                    ts_hdr, sig_hdr = sign_tool_approval_ed25519(
+                                        cluster.router_private_key,
+                                        t_name,
+                                        parsed_args,
+                                        conv.workspace_subpath,
+                                    )
+                                    tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
+                                    tool_headers["X-Splitch-Approval-Sig"] = sig_hdr
+                                elif cluster.agent_token:
                                     ts_hdr, sig_hdr = sign_tool_approval(
                                         cluster.agent_token,
                                         t_name,

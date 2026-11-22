@@ -61,6 +61,12 @@ from backend.shared.models import (
     ToolExecResponse,
     WorkspaceDirListing,
 )
+from backend.shared.secrets import (
+    load_ed25519_public_key,
+    resolve_secret_value,
+    verify_agent_request_ed25519,
+    verify_tool_approval_ed25519,
+)
 from backend.shared.security import is_loopback_host, verify_tool_approval
 from backend.version import __version__ as VERSION
 
@@ -90,7 +96,15 @@ EXTRA_MODEL_DIRS = [
 ]
 POLL_INTERVAL_S = float(os.getenv("SPLITCH_AGENT_POLL_S", "3.0"))
 ENABLE_TOOLS = os.getenv("SPLITCH_ENABLE_TOOLS", "0").strip().lower() in ("1", "true", "yes")
-AGENT_TOKEN = os.getenv("SPLITCH_AGENT_TOKEN", "").strip()
+try:
+    AGENT_TOKEN = resolve_secret_value(os.getenv("SPLITCH_AGENT_TOKEN", ""), check_permissions=True)
+except (OSError, PermissionError, ValueError):
+    AGENT_TOKEN = ""
+ROUTER_PUBLIC_KEY = None
+_RAW_ROUTER_PUB = os.getenv("SPLITCH_ROUTER_PUBLIC_KEY", "").strip()
+if _RAW_ROUTER_PUB:
+    with contextlib.suppress(OSError, ValueError, TypeError):
+        ROUTER_PUBLIC_KEY = load_ed25519_public_key(_RAW_ROUTER_PUB)
 ALLOW_UNAUTH_TOOLS = os.getenv("SPLITCH_ALLOW_UNAUTH_TOOLS", "0").strip().lower() in (
     "1",
     "true",
@@ -457,11 +471,24 @@ app = FastAPI(title="Splitch Node Agent", version=VERSION, lifespan=lifespan)
 
 @app.middleware("http")
 async def _agent_auth_middleware(request: Request, call_next):
-    if AGENT_TOKEN and request.url.path != "/health":
+    if (AGENT_TOKEN or ROUTER_PUBLIC_KEY is not None) and request.url.path != "/health":
         auth = request.headers.get("authorization", "")
         token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-        if not token or not hmac.compare_digest(token, AGENT_TOKEN):
-            response = JSONResponse(status_code=401, content={"detail": "Invalid agent bearer token"})
+        ok_bearer = bool(AGENT_TOKEN and token and hmac.compare_digest(token, AGENT_TOKEN))
+        ok_ed25519 = bool(
+            ROUTER_PUBLIC_KEY is not None
+            and verify_agent_request_ed25519(
+                ROUTER_PUBLIC_KEY,
+                request.headers.get("x-splitch-auth-ts", ""),
+                request.headers.get("x-splitch-auth-sig", ""),
+                request.method,
+                request.url.path,
+            )
+        )
+        if not (ok_bearer or ok_ed25519):
+            response = JSONResponse(
+                status_code=401, content={"detail": "Invalid agent bearer token or Ed25519 signature"}
+            )
         else:
             response = await call_next(request)
     else:
@@ -1352,22 +1379,37 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
             detail="Workspace tools are disabled on this node (start with --enable-tools or SPLITCH_ENABLE_TOOLS=1)",
         )
     if req.tool in _MUTATING_WORKSPACE_TOOLS:
-        if AGENT_TOKEN:
+        if AGENT_TOKEN or ROUTER_PUBLIC_KEY is not None:
             ts_hdr = request.headers.get("x-splitch-approval-ts", "")
             sig_hdr = request.headers.get("x-splitch-approval-sig", "")
-            if not verify_tool_approval(
-                AGENT_TOKEN,
-                ts_hdr,
-                sig_hdr,
-                req.tool,
-                req.arguments,
-                req.workspace_subpath,
-            ):
+            ok_ed25519 = bool(
+                ROUTER_PUBLIC_KEY is not None
+                and verify_tool_approval_ed25519(
+                    ROUTER_PUBLIC_KEY,
+                    ts_hdr,
+                    sig_hdr,
+                    req.tool,
+                    req.arguments,
+                    req.workspace_subpath,
+                )
+            )
+            ok_hmac = bool(
+                AGENT_TOKEN
+                and verify_tool_approval(
+                    AGENT_TOKEN,
+                    ts_hdr,
+                    sig_hdr,
+                    req.tool,
+                    req.arguments,
+                    req.workspace_subpath,
+                )
+            )
+            if not (ok_ed25519 or ok_hmac):
                 raise HTTPException(
                     status_code=403,
                     detail=(
                         f"Execution of mutating tool '{req.tool}' requires a valid "
-                        "router-signed HMAC approval assertion "
+                        "router-signed Ed25519 or HMAC approval assertion "
                         "(X-Splitch-Approval-Ts / X-Splitch-Approval-Sig)."
                     ),
                 )

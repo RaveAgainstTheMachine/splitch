@@ -477,8 +477,15 @@ def run_doctor(
         )
 
     # 7. Security & TLS posture summary
-    api_key_set = bool(os.getenv("SPLITCH_API_KEY", "").strip())
-    agent_tok_set = bool(os.getenv("SPLITCH_AGENT_TOKEN", "").strip())
+    api_key_set = bool(
+        os.getenv("SPLITCH_API_KEY", "").strip() or os.getenv("SPLITCH_API_KEY_HASH", "").strip()
+    )
+    agent_tok_set = bool(
+        os.getenv("SPLITCH_AGENT_TOKEN", "").strip()
+        or os.getenv("SPLITCH_ROUTER_PUBLIC_KEY", "").strip()
+        or os.getenv("SPLITCH_ROUTER_PRIVATE_KEY", "").strip()
+        or (data_dir / "router_ed25519.pem").is_file()
+    )
     tools_on = os.getenv("SPLITCH_ENABLE_TOOLS", "0").strip().lower() in ("1", "true", "yes")
     tls_configured = bool(
         os.getenv("SPLITCH_TLS_CERT", "").strip()

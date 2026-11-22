@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import platform
@@ -38,11 +39,17 @@ from backend.desktop.shortcuts import (
     uninstall_desktop_integration,
 )
 from backend.desktop.tray import run_tray
-from backend.router.config import load_config
+from backend.router.config import default_data_root, load_config
 from backend.router.telemetry import VERSION
 from backend.shared.bench import BenchRunRequest, format_bench_table, run_benchmark_suite
 from backend.shared.engines import get_engine_status, install_or_update_engine
 from backend.shared.progress import TerminalProgress
+from backend.shared.secrets import (
+    SecretVault,
+    generate_ed25519_keypair,
+    hash_secret_scrypt,
+    hash_secret_sha256,
+)
 from backend.shared.security import is_loopback_host
 from backend.shared.tls import (
     default_certs_dir,
@@ -171,16 +178,21 @@ def _warn_if_exposed_without_auth(
 ) -> None:
     if is_loopback_host(host):
         return
-    if require_api_key and not os.getenv("SPLITCH_API_KEY", "").strip():
+    if require_api_key and not (
+        os.getenv("SPLITCH_API_KEY", "").strip() or os.getenv("SPLITCH_API_KEY_HASH", "").strip()
+    ):
         print(
-            f"[splitch] SECURITY WARNING: {component} is binding to {host} without SPLITCH_API_KEY set.\n"
-            "[splitch] Set SPLITCH_API_KEY before exposing the router beyond localhost.",
+            f"[splitch] SECURITY WARNING: {component} is binding to {host} without SPLITCH_API_KEY or SPLITCH_API_KEY_HASH set.\n"
+            "[splitch] Generate a salted hash with `splitch secret hash` before exposing the router beyond localhost.",
             file=sys.stderr,
         )
-    if require_agent_token and not os.getenv("SPLITCH_AGENT_TOKEN", "").strip():
+    if require_agent_token and not (
+        os.getenv("SPLITCH_AGENT_TOKEN", "").strip()
+        or os.getenv("SPLITCH_ROUTER_PUBLIC_KEY", "").strip()
+    ):
         print(
-            f"[splitch] SECURITY WARNING: {component} is binding to {host} without SPLITCH_AGENT_TOKEN set.\n"
-            "[splitch] Set SPLITCH_AGENT_TOKEN on router and agent; unauthenticated remote mutating tools are blocked.",
+            f"[splitch] SECURITY WARNING: {component} is binding to {host} without SPLITCH_AGENT_TOKEN or SPLITCH_ROUTER_PUBLIC_KEY set.\n"
+            "[splitch] Configure Ed25519 keys (`splitch secret init-agent-keys`) or SPLITCH_AGENT_TOKEN; unauthenticated remote mutating tools are blocked.",
             file=sys.stderr,
         )
 
@@ -643,6 +655,77 @@ def _cmd_update(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_secret(args: argparse.Namespace) -> int:
+    data_dir = Path(os.getenv("SPLITCH_DATA_DIR", str(default_data_root() / "data")))
+
+    if args.secret_cmd == "hash":
+        val = args.value
+        if val is None:
+            if sys.stdin.isatty():
+                val = getpass.getpass("Enter secret to hash: ")
+            else:
+                val = sys.stdin.read().strip()
+        if not val:
+            print("[splitch] Secret value must not be empty.", file=sys.stderr)
+            return 1
+        hashed = hash_secret_sha256(val) if args.algo == "sha256" else hash_secret_scrypt(val)
+        print(hashed)
+        return 0
+
+    if args.secret_cmd == "set":
+        val = args.value
+        if val is None:
+            if sys.stdin.isatty():
+                val = getpass.getpass(f"Enter secret value for '{args.name}': ")
+            else:
+                val = sys.stdin.read().strip()
+        if not val:
+            print("[splitch] Secret value must not be empty.", file=sys.stderr)
+            return 1
+        vault = SecretVault(data_dir)
+        try:
+            ref = vault.set(args.name, val)
+        except ValueError as exc:
+            print(f"[splitch] {exc}", file=sys.stderr)
+            return 1
+        print(f"  ✓ Stored encrypted in {vault.vault_path} (AES-256-GCM)")
+        print(f"  ✓ Reference: {ref}")
+        return 0
+
+    if args.secret_cmd == "list":
+        vault = SecretVault(data_dir)
+        names = vault.list_names()
+        if not names:
+            print("  (no secrets stored in vault)")
+            return 0
+        for name in names:
+            print(f"  vault:{name}")
+        return 0
+
+    if args.secret_cmd == "delete":
+        vault = SecretVault(data_dir)
+        if vault.delete(args.name):
+            print(f"  ✓ Deleted vault:{args.name}")
+            return 0
+        print(f"[splitch] Secret '{args.name}' not found in vault.", file=sys.stderr)
+        return 1
+
+    # init-agent-keys
+    out_dir = Path(args.out_dir).expanduser() if args.out_dir else data_dir
+    priv_path, pub_compact = generate_ed25519_keypair(
+        out_dir / "router_ed25519.pem",
+        out_dir / "router_ed25519.pub",
+        force=bool(args.force),
+    )
+    print(f"  ✓ Router Private Key (0600): {priv_path}")
+    print(f"  ✓ Agent Public Key:          {pub_compact}")
+    print("\nConfigure router (auto-loaded if placed in SPLITCH_DATA_DIR/router_ed25519.pem):")
+    print(f"  export SPLITCH_ROUTER_PRIVATE_KEY={priv_path}")
+    print("\nConfigure each worker agent (safe non-secret public key):")
+    print(f"  export SPLITCH_ROUTER_PUBLIC_KEY={pub_compact}")
+    return 0
+
+
 def _cmd_rollback(args: argparse.Namespace) -> int:
     progress = TerminalProgress()
     res = perform_rollback(
@@ -759,6 +842,37 @@ def main() -> None:
     p_tls_st.add_argument("--cert", default=None, help="Certificate path to inspect")
     p_tls_st.add_argument("--json", action="store_true")
     p_tls_st.set_defaults(func=_cmd_tls)
+
+    p_sec = sub.add_parser(
+        "secret",
+        help="Salt/hash API keys, manage AES-256-GCM vault secrets, and generate Ed25519 agent keys",
+    )
+    sec_sub = p_sec.add_subparsers(dest="secret_cmd", required=True)
+
+    p_sec_hash = sec_sub.add_parser("hash", help="Generate a salted hash for SPLITCH_API_KEY_HASH")
+    p_sec_hash.add_argument("--algo", choices=["scrypt", "sha256"], default="scrypt")
+    p_sec_hash.add_argument("--value", default=None, help="Optional value (prompts securely if omitted)")
+    p_sec_hash.set_defaults(func=_cmd_secret)
+
+    p_sec_set = sec_sub.add_parser("set", help="Store an encrypted secret in the local AES-256-GCM vault")
+    p_sec_set.add_argument("name", help="Secret identifier (referenced as vault:<name>)")
+    p_sec_set.add_argument("--value", default=None, help="Optional value (prompts securely if omitted)")
+    p_sec_set.set_defaults(func=_cmd_secret)
+
+    p_sec_list = sec_sub.add_parser("list", help="List secret names stored in the encrypted vault")
+    p_sec_list.set_defaults(func=_cmd_secret)
+
+    p_sec_del = sec_sub.add_parser("delete", help="Delete a secret from the encrypted vault")
+    p_sec_del.add_argument("name", help="Secret identifier to delete")
+    p_sec_del.set_defaults(func=_cmd_secret)
+
+    p_sec_keys = sec_sub.add_parser(
+        "init-agent-keys",
+        help="Generate Ed25519 keypair so router signs requests/tool approvals and agents verify with public key only",
+    )
+    p_sec_keys.add_argument("--out-dir", default=None, help="Output directory (defaults to SPLITCH_DATA_DIR)")
+    p_sec_keys.add_argument("--force", action="store_true", help="Regenerate and overwrite existing keypair")
+    p_sec_keys.set_defaults(func=_cmd_secret)
 
     p_init = sub.add_parser("init", help="Generate a starter splitch.toml for this machine")
     p_init.add_argument("--output", default="splitch.toml")

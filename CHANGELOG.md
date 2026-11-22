@@ -3,6 +3,16 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.5.0] - 2026-11-22
+
+### Security (Cryptographic Secrets, Vault & Asymmetric Ed25519)
+- **Salted Secret Hashing (`SPLITCH_API_KEY_HASH`) & Independent Session Secret:** Added `scrypt` (with random 16-byte salt + non-plaintext HMAC-keyed 60 s verification cache) and salted `sha256` verification in `backend/shared/secrets.py`. Session cookies are now signed with an independent auto-generated `0600` secret (`data_dir/.session_secret` / `SPLITCH_SESSION_SECRET`), decoupling sessions from admin credentials.
+- **Hashed Join Tokens in RAM:** `JoinTokenManager` (`backend/router/provision_api.py`) now stores only salted SHA-256 hashes of `spj_*` join tokens in memory, exposing plaintext only once at mint time.
+- **Config Secret Indirection (`env:`, `${VAR}`, `file:`, `vault:`):** Added `resolve_secret_value()` with strict POSIX `0600` permission checks on `file:` targets (compatible with Docker Secrets and systemd `LoadCredential=`).
+- **AES-256-GCM Local Secret Vault & MCP Auto-Vaulting:** Added `SecretVault` (`data_dir/secrets.enc`, AAD-bound per secret name, `0600` master key or `SPLITCH_MASTER_KEY` / `SPLITCH_MASTER_KEY_FILE` / optional OS keyring). Secret-looking MCP server `env` keys are automatically encrypted into the vault on save, masked (`••••••••`) in API responses, preserved across UI edits, redacted (`${KEY}`) on client export, and purged on delete.
+- **Asymmetric Ed25519 Router ↔ Agent Signing:** Added Ed25519 request authentication (`X-Splitch-Auth-Ts` / `X-Splitch-Auth-Sig` bound to HTTP method + path) and Ed25519 HITL tool-approval assertions (`SPLITCH_ROUTER_PRIVATE_KEY` on router, public-only `SPLITCH_ROUTER_PUBLIC_KEY` on worker agents — zero shared secrets on worker nodes).
+- **CLI Secret Manager (`splitch secret`):** Added `splitch secret hash`, `set`, `list`, `delete`, and `init-agent-keys`.
+
 ## [0.4.0] - 2026-11-22
 
 ### Security (Sprint A Hardening)

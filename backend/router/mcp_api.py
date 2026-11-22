@@ -30,6 +30,13 @@ from backend.shared.models import (
     McpTestResult,
     McpToolSpec,
 )
+from backend.shared.secrets import (
+    MASKED_SECRET_SENTINEL,
+    SecretVault,
+    is_secret_env_key,
+    is_secret_reference,
+    resolve_env_map,
+)
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{0,63}$")
 
@@ -115,7 +122,9 @@ MCP_INITIALIZED_NOTIF = {"jsonrpc": "2.0", "method": "notifications/initialized"
 MCP_LIST_TOOLS_MSG = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
 
 
-async def probe_mcp_server(srv: McpServerConfig) -> McpTestResult:
+async def probe_mcp_server(
+    srv: McpServerConfig, *, vault: SecretVault | None = None
+) -> McpTestResult:
     """Execute a real MCP JSON-RPC initialize + tools/list handshake."""
     t0 = time.perf_counter()
 
@@ -163,7 +172,7 @@ async def probe_mcp_server(srv: McpServerConfig) -> McpTestResult:
         return McpTestResult(id=srv.id, ok=False, error="Missing command")
 
     env = os.environ.copy()
-    env.update(srv.env)
+    env.update(resolve_env_map(srv.env, vault=vault))
     proc: asyncio.subprocess.Process | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -241,6 +250,49 @@ async def probe_mcp_server(srv: McpServerConfig) -> McpTestResult:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
 
 
+def _redact_env_for_export(env: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k, v in env.items():
+        if v.startswith("vault:") or (is_secret_env_key(k) and v and not is_secret_reference(v)):
+            out[k] = f"${{{k}}}"
+        else:
+            out[k] = v
+    return out
+
+
+def _mask_mcp_for_api(srv: McpServerConfig) -> McpServerConfig:
+    if not srv.env:
+        return srv
+    masked_env: dict[str, str] = {}
+    for k, v in srv.env.items():
+        if v.startswith("vault:") or (is_secret_env_key(k) and v and not is_secret_reference(v)):
+            masked_env[k] = MASKED_SECRET_SENTINEL
+        else:
+            masked_env[k] = v
+    return srv.model_copy(update={"env": masked_env})
+
+
+def _vault_mcp_env(
+    srv: McpServerConfig,
+    existing: McpServerConfig | None,
+    vault: SecretVault,
+) -> McpServerConfig:
+    if not srv.env:
+        return srv
+    stored_env: dict[str, str] = {}
+    prev_env = existing.env if existing else {}
+    for k, raw_val in srv.env.items():
+        val = str(raw_val)
+        if val == MASKED_SECRET_SENTINEL and k in prev_env:
+            stored_env[k] = prev_env[k]
+        elif is_secret_env_key(k) and val.strip() and not is_secret_reference(val):
+            stored_env[k] = vault.set(f"mcp.{srv.id}.{k}", val)
+        else:
+            stored_env[k] = val
+    srv.env = stored_env
+    return srv
+
+
 def generate_client_config(
     client: Literal["opencode", "zed"],
     router_base_url: str,
@@ -265,7 +317,7 @@ def generate_client_config(
                     "enabled": True,
                 }
                 if s.env:
-                    entry["environment"] = s.env
+                    entry["environment"] = _redact_env_for_export(s.env)
                 mcp_map[s.id] = entry
             elif s.url:
                 mcp_map[s.id] = {"type": "remote", "url": s.url, "enabled": True}
@@ -324,7 +376,7 @@ def generate_client_config(
         if s.transport == "stdio" and s.command:
             context_servers[s.id] = {
                 "source": "custom",
-                "command": {"path": s.command, "args": s.args, "env": s.env},
+                "command": {"path": s.command, "args": s.args, "env": _redact_env_for_export(s.env)},
             }
         elif s.url:
             context_servers[s.id] = {"source": "custom", "url": s.url}
@@ -653,6 +705,7 @@ def build_mcp_router(
     router = APIRouter(prefix="/api/mcp", tags=["mcp"])
     registry_file = data_dir / "mcp_servers.json"
     mcp_scripts_dir = scripts_dir or (data_dir.parent / "mcp_servers")
+    vault = SecretVault(data_dir)
 
     def _load() -> dict[str, McpServerConfig]:
         if not registry_file.exists():
@@ -725,7 +778,7 @@ def build_mcp_router(
     @router.get("", response_model=list[McpServerConfig])
     async def list_mcp_servers() -> list[McpServerConfig]:
         items = await asyncio.to_thread(_load)
-        return sorted(items.values(), key=lambda s: s.id)
+        return [_mask_mcp_for_api(s) for s in sorted(items.values(), key=lambda s: s.id)]
 
     @router.post("", response_model=McpServerConfig)
     async def upsert_mcp_server(srv: McpServerConfig) -> McpServerConfig:
@@ -738,13 +791,15 @@ def build_mcp_router(
         if srv.transport in ("http", "sse") and not srv.url:
             raise HTTPException(status_code=400, detail="http/sse transport requires url")
 
-        def _write() -> None:
+        def _write() -> McpServerConfig:
             items = _load()
+            _vault_mcp_env(srv, items.get(srv_id), vault)
+            annotate_mcp_egress(srv)
             items[srv_id] = srv
             _save(items)
+            return _mask_mcp_for_api(srv)
 
-        await asyncio.to_thread(_write)
-        return annotate_mcp_egress(srv)
+        return await asyncio.to_thread(_write)
 
     @router.post("/{server_id}/toggle", response_model=McpServerConfig)
     async def toggle_mcp_server(server_id: str, enabled: bool) -> McpServerConfig:
@@ -754,7 +809,7 @@ def build_mcp_router(
                 raise HTTPException(status_code=404, detail="MCP server not found")
             items[server_id].enabled = enabled
             _save(items)
-            return items[server_id]
+            return _mask_mcp_for_api(items[server_id])
 
         return await asyncio.to_thread(_toggle)
 
@@ -766,6 +821,7 @@ def build_mcp_router(
                 raise HTTPException(status_code=404, detail="MCP server not found")
             del items[server_id]
             _save(items)
+            vault.delete_prefix(f"mcp.{server_id}.")
 
         await asyncio.to_thread(_delete)
         return {"ok": True, "deleted": server_id}
@@ -775,7 +831,7 @@ def build_mcp_router(
         items = await asyncio.to_thread(_load)
         if server_id not in items:
             raise HTTPException(status_code=404, detail="MCP server not found")
-        return await probe_mcp_server(items[server_id])
+        return await probe_mcp_server(items[server_id], vault=vault)
 
     @router.get("/export/{client}")
     async def export_config(
@@ -792,14 +848,18 @@ def build_mcp_router(
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        def _merge() -> None:
+        def _merge() -> list[McpServerConfig]:
             items = _load()
+            out: list[McpServerConfig] = []
             for srv in parsed:
+                _vault_mcp_env(srv, items.get(srv.id), vault)
+                annotate_mcp_egress(srv)
                 items[srv.id] = srv
+                out.append(_mask_mcp_for_api(srv))
             _save(items)
+            return out
 
-        await asyncio.to_thread(_merge)
-        return parsed
+        return await asyncio.to_thread(_merge)
 
     @router.post("/build", response_model=McpServerConfig)
     async def build_custom_mcp(req: McpBuildRequest) -> McpServerConfig:
@@ -828,7 +888,9 @@ def build_mcp_router(
         target_node = cluster.nodes.get(req.scope)
         if target_node and target_node.online:
             try:
-                async with httpx.AsyncClient(timeout=8.0, headers=cluster.agent_headers()) as http:
+                async with httpx.AsyncClient(
+                    timeout=8.0, headers=cluster.agent_headers("POST", "/sync/mcp-script")
+                ) as http:
                     r = await http.post(
                         f"{target_node.agent_url}/sync/mcp-script",
                         json={"id": srv_id, "code": code},
@@ -880,7 +942,9 @@ def build_mcp_router(
         items = await asyncio.to_thread(_load)
         cfg = generate_client_config(client, router_url, cluster, list(items.values()))
         try:
-            async with httpx.AsyncClient(timeout=10.0, headers=cluster.agent_headers()) as http:
+            async with httpx.AsyncClient(
+                timeout=10.0, headers=cluster.agent_headers("POST", "/sync/client-config")
+            ) as http:
                 r = await http.post(
                     f"{node.agent_url}/sync/client-config",
                     json={"client": client, "config": cfg},
