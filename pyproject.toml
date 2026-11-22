@@ -23,6 +23,11 @@ desktop = [
 [project.scripts]
 splitch = "backend.cli:main"
 
+[project.urls]
+Homepage = "https://github.com/RaveAgainstTheMachine/splitch"
+Repository = "https://github.com/RaveAgainstTheMachine/splitch.git"
+Issues = "https://github.com/RaveAgainstTheMachine/splitch/issues"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",

@@ -22,7 +22,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-USER_AGENT = "Splitch/0.3.0 (+https://github.com/splitch)"
+USER_AGENT = "Splitch/0.3.0 (+https://github.com/RaveAgainstTheMachine/splitch)"
 TAG_STRIP_RE = re.compile(r"<[^>]+>")
 WS_COLLAPSE_RE = re.compile(r"\s+")
 

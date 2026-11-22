@@ -12,16 +12,16 @@ Splitch ships cross-platform installers ([install.sh](../../install.sh) and [ins
 
 ```bash
 # Install or update full router + dashboard + agent + hardware-matched llama.cpp
-curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | sh
 
 # Include local Image & Video engine (stable-diffusion.cpp `sd-server`) automatically
-curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | SPLITCH_WITH_MEDIA=1 sh
+curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | SPLITCH_WITH_MEDIA=1 sh
 
 # Headless GPU/worker install (skips Node.js & UI build; keeps CUDA/ROCm llama.cpp install)
-curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | SPLITCH_AGENT_ONLY=1 sh
+curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | SPLITCH_AGENT_ONLY=1 sh
 
 # Use Ollama instead of llama.cpp, or skip engine management (--engine none)
-curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | SPLITCH_ENGINE=ollama sh
+curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | SPLITCH_ENGINE=ollama sh
 
 # Install/update from an existing local git checkout (optionally with media engine)
 ./install.sh --local --with-media
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | S
 
 ```powershell
 # Install or update full stack + hardware-matched llama.cpp (CUDA / Vulkan / CPU)
-irm https://raw.githubusercontent.com/<owner>/splitch/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.ps1 | iex
 
 # Local checkout, headless GPU worker, media engine, or explicit engine choice
 .\install.ps1 -Local -WithMedia
@@ -127,7 +127,7 @@ Any server implementing `/v1/models` and `/v1/chat/completions` works out of the
 ## 4. Single-Machine Manual Quickstart (Zero Config)
 
 ```bash
-git clone <your-repo-url> splitch
+git clone https://github.com/RaveAgainstTheMachine/splitch.git splitch
 cd splitch
 
 # 1. Build the static React dashboard
@@ -163,7 +163,7 @@ A classic two-node setup pairs an **always-on host** (Apple Silicon Mac Mini, Li
 
 ```bash
 # On the always-on machine (e.g. 192.168.1.10)
-git clone <your-repo-url> splitch && cd splitch
+git clone https://github.com/RaveAgainstTheMachine/splitch.git splitch && cd splitch
 (cd dashboard && npm install && npm run build)
 uv sync
 
@@ -180,7 +180,7 @@ uv run splitch router --host 0.0.0.0 --port 8080
 On your GPU desktop (e.g. `192.168.1.50` or a Tailscale `100.x.y.z` IP):
 
 ```bash
-git clone <your-repo-url> splitch && cd splitch
+git clone https://github.com/RaveAgainstTheMachine/splitch.git splitch && cd splitch
 uv sync   # no Node.js needed on agent-only machines!
 
 uv run splitch agent \

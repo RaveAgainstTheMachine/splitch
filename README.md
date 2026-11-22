@@ -157,22 +157,22 @@ Just like Unsloth Studio, one command installs **and updates** Splitch — autom
 
 **macOS, Linux, and WSL:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/<owner>/splitch/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.ps1 | iex
 ```
 
 **Include local Image & Video engine (`sd.cpp`) during install:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | SPLITCH_WITH_MEDIA=1 sh
+curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | SPLITCH_WITH_MEDIA=1 sh
 ```
 
 **Headless GPU/compute worker node (skips Node.js & UI build):**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | SPLITCH_AGENT_ONLY=1 sh
+curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | SPLITCH_AGENT_ONLY=1 sh
 ```
 
 Once installed, run from anywhere (or manage engines directly in the Web UI):
@@ -195,7 +195,7 @@ splitch up --enable-tools --workspace ~/projects
 ### Option 2: Install or Update from a Local Git Clone
 
 ```bash
-git clone <your-repo-url> splitch && cd splitch
+git clone https://github.com/RaveAgainstTheMachine/splitch.git splitch && cd splitch
 ./install.sh --local     # or .\install.ps1 -Local on Windows
 splitch up
 ```

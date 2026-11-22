@@ -17,7 +17,12 @@ from backend.shared.engines import (
     parse_llama_build_tag,
     select_llama_assets,
 )
-from backend.shared.updater import check_update, perform_update, run_doctor
+from backend.shared.updater import (
+    DEFAULT_REPO_URL,
+    check_update,
+    perform_update,
+    run_doctor,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -303,6 +308,9 @@ def test_install_sh_syntax_and_local_install_uninstall(tmp_path: Path) -> None:
     assert meta_path.exists()
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["mode"] == "local"
+    assert meta["repo_url"] == DEFAULT_REPO_URL
+    assert DEFAULT_REPO_URL == "https://github.com/RaveAgainstTheMachine/splitch.git"
+    assert DEFAULT_REPO_URL in (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
     assert Path(meta["install_dir"]).resolve() == REPO_ROOT.resolve()
 
     # Verify installed global shim actually executes `splitch version`

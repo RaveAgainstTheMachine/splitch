@@ -37,6 +37,14 @@ from backend.shared.progress import TerminalProgress, null_step
 
 CheckStatus = Literal["ok", "warn", "error", "info"]
 
+DEFAULT_REPO_URL = "https://github.com/RaveAgainstTheMachine/splitch.git"
+LEGACY_PLACEHOLDER_REPO_URLS = frozenset(
+    {
+        "https://github.com/splitch-ai/splitch.git",
+        "https://github.com/splitch/splitch.git",
+    }
+)
+
 
 class DoctorCheck(BaseModel):
     name: str
@@ -509,6 +517,39 @@ def run_doctor(
     )
 
 
+def _resolve_update_remote(resolved: Path, git_bin: str, meta: dict) -> tuple[str | None, str | None]:
+    """Return (remote_name, error) wired to the GitHub repository (or configured upstream)."""
+    override = os.getenv("SPLITCH_UPDATE_REMOTE", "").strip()
+    if override:
+        rc, _, _ = _run([git_bin, "remote", "get-url", override], cwd=resolved)
+        if rc == 0:
+            return override, None
+        return None, f"Configured SPLITCH_UPDATE_REMOTE='{override}' does not exist"
+
+    # If a dedicated 'github' remote exists (e.g., dual-remote dev workspace), prefer it
+    rc_gh, gh_url, _ = _run([git_bin, "remote", "get-url", "github"], cwd=resolved)
+    if rc_gh == 0 and gh_url:
+        return "github", None
+
+    rc_rem, origin_url, _ = _run([git_bin, "remote", "get-url", "origin"], cwd=resolved)
+    if rc_rem != 0:
+        target_url = str(meta.get("repo_url") or "").strip()
+        if not target_url or target_url in LEGACY_PLACEHOLDER_REPO_URLS:
+            target_url = DEFAULT_REPO_URL
+        rc_add, _, err_add = _run([git_bin, "remote", "add", "origin", target_url], cwd=resolved)
+        if rc_add != 0:
+            return None, f"No 'origin' git remote configured ({err_add})"
+        return "origin", None
+
+    if origin_url in LEGACY_PLACEHOLDER_REPO_URLS:
+        _run([git_bin, "remote", "set-url", "origin", DEFAULT_REPO_URL], cwd=resolved)
+        if meta and meta.get("repo_url") in LEGACY_PLACEHOLDER_REPO_URLS:
+            meta["repo_url"] = DEFAULT_REPO_URL
+            write_install_meta(meta)
+
+    return "origin", None
+
+
 def check_update(
     app_dir: Path | None = None,
     branch: str | None = None,
@@ -538,15 +579,14 @@ def check_update(
     status.local_sha = local_sha
     status.dirty = bool(dirty_out)
 
-    # Check if origin remote exists
-    rc_rem, _, _ = _run([git_bin, "remote", "get-url", "origin"], cwd=resolved)
-    if rc_rem != 0:
-        status.error = "No 'origin' git remote configured"
+    remote_name, rem_err = _resolve_update_remote(resolved, git_bin, meta)
+    if not remote_name:
+        status.error = rem_err or "No 'origin' git remote configured"
         return status
 
     if fetch_remote:
         rc_fetch, _, err_fetch = _run(
-            [git_bin, "fetch", "--quiet", "origin", target_branch],
+            [git_bin, "fetch", "--quiet", remote_name, target_branch],
             cwd=resolved,
             timeout=15.0,
         )
@@ -554,7 +594,7 @@ def check_update(
             status.error = f"git fetch failed: {err_fetch}"
             return status
 
-    ref = f"origin/{target_branch}"
+    ref = f"{remote_name}/{target_branch}"
     rc_rev, remote_sha, _ = _run([git_bin, "rev-parse", "--short", ref], cwd=resolved)
     if rc_rev != 0:
         status.error = f"Remote ref '{ref}' not found (run with fetch enabled)"
@@ -663,20 +703,22 @@ def perform_update(
         return result
 
     git_bin = shutil.which("git") or "git"
+    remote_name, _ = _resolve_update_remote(resolved, git_bin, meta)
+    remote_name = remote_name or "origin"
     old_sha = status.local_sha
     dashboard_changed = False
 
     if status.update_available:
         rc_diff, diff_out, _ = _run(
-            [git_bin, "diff", "--name-only", f"HEAD..origin/{status.branch}"],
+            [git_bin, "diff", "--name-only", f"HEAD..{remote_name}/{status.branch}"],
             cwd=resolved,
         )
         if rc_diff == 0 and any(line.startswith("dashboard/") for line in diff_out.splitlines()):
             dashboard_changed = True
 
-        with step_ctx(f"Pulling {status.behind_count} commit(s) from origin/{status.branch}"):
+        with step_ctx(f"Pulling {status.behind_count} commit(s) from {remote_name}/{status.branch}"):
             rc_pull, _, err_pull = _run(
-                [git_bin, "pull", "--ff-only", "origin", status.branch],
+                [git_bin, "pull", "--ff-only", remote_name, status.branch],
                 cwd=resolved,
                 timeout=30.0,
             )

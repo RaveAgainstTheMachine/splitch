@@ -2,17 +2,17 @@
 # Splitch Universal Installer & Updater (macOS, Linux, WSL)
 #
 # Install or update in one command:
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | sh
 #
 # Local checkout install / update:
 #   ./install.sh --local
 #
 # Headless GPU/compute worker install (skips Node.js & dashboard build):
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/splitch/main/install.sh | SPLITCH_AGENT_ONLY=1 sh
+#   curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | SPLITCH_AGENT_ONLY=1 sh
 
 set -eu
 
-SPLITCH_REPO="${SPLITCH_REPO:-https://github.com/splitch-ai/splitch.git}"
+SPLITCH_REPO="${SPLITCH_REPO:-https://github.com/RaveAgainstTheMachine/splitch.git}"
 SPLITCH_BRANCH="${SPLITCH_BRANCH:-main}"
 SPLITCH_DATA_ROOT="${SPLITCH_DATA_ROOT:-$HOME/.local/share/splitch}"
 SPLITCH_HOME="${SPLITCH_HOME:-$SPLITCH_DATA_ROOT/app}"
@@ -294,6 +294,12 @@ else
   mkdir -p "$(dirname "$SPLITCH_HOME")"
   if [ -d "$SPLITCH_HOME/.git" ]; then
     command -v git >/dev/null 2>&1 || die "git is required to update $SPLITCH_HOME"
+    CUR_ORIGIN="$(git -C "$SPLITCH_HOME" remote get-url origin 2>/dev/null || echo "")"
+    if [ -z "$CUR_ORIGIN" ]; then
+      git -C "$SPLITCH_HOME" remote add origin "$SPLITCH_REPO"
+    elif [ "$CUR_ORIGIN" = "https://github.com/splitch-ai/splitch.git" ] || [ "$CUR_ORIGIN" = "https://github.com/splitch/splitch.git" ]; then
+      git -C "$SPLITCH_HOME" remote set-url origin "$SPLITCH_REPO"
+    fi
     OLD_SHA="$(git -C "$SPLITCH_HOME" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     run_spin "Fetching origin/$SPLITCH_BRANCH" git -C "$SPLITCH_HOME" fetch --quiet origin "$SPLITCH_BRANCH"
     run_spin "Pulling origin/$SPLITCH_BRANCH" git -C "$SPLITCH_HOME" pull --ff-only origin "$SPLITCH_BRANCH"

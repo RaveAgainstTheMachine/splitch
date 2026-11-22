@@ -1,7 +1,7 @@
-# Splitch Universal Installer & Updater for Windows (PowerShell)
+﻿# Splitch Universal Installer & Updater for Windows (PowerShell)
 #
 # Install or update in one command:
-#   irm https://raw.githubusercontent.com/<owner>/splitch/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.ps1 | iex
 #
 # Local checkout install:
 #   .\install.ps1 -Local
@@ -39,7 +39,7 @@ $ErrorActionPreference = "Stop"
 $DataRoot = if ($env:SPLITCH_DATA_ROOT) { $env:SPLITCH_DATA_ROOT } else { Join-Path $env:LOCALAPPDATA "splitch" }
 $AppDir = if ($Dir) { $Dir } elseif ($env:SPLITCH_HOME) { $env:SPLITCH_HOME } else { Join-Path $DataRoot "app" }
 $BinDir = Join-Path $DataRoot "bin"
-$RepoUrl = if ($Repo) { $Repo } elseif ($env:SPLITCH_REPO) { $env:SPLITCH_REPO } else { "https://github.com/splitch-ai/splitch.git" }
+$RepoUrl = if ($Repo) { $Repo } elseif ($env:SPLITCH_REPO) { $env:SPLITCH_REPO } else { "https://github.com/RaveAgainstTheMachine/splitch.git" }
 $TargetBranch = if ($Branch) { $Branch } elseif ($env:SPLITCH_BRANCH) { $env:SPLITCH_BRANCH } else { "main" }
 $TargetEngine = if ($Engine) { $Engine } elseif ($env:SPLITCH_ENGINE) { $env:SPLITCH_ENGINE } else { "auto" }
 $TargetBackend = if ($Backend) { $Backend } elseif ($env:SPLITCH_ENGINE_BACKEND) { $env:SPLITCH_ENGINE_BACKEND } else { "auto" }
@@ -195,6 +195,12 @@ if ($Local) {
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $AppDir) | Out-Null
     if (Test-Path (Join-Path $AppDir ".git")) {
         Write-Step "Existing installation found — updating ($TargetBranch)..."
+        $CurOrigin = (& git -C $AppDir remote get-url origin 2>$null)
+        if (-not $CurOrigin) {
+            & git -C $AppDir remote add origin $RepoUrl
+        } elseif ($CurOrigin -in @("https://github.com/splitch-ai/splitch.git", "https://github.com/splitch/splitch.git") -or $Repo) {
+            & git -C $AppDir remote set-url origin $RepoUrl
+        }
         $OldSha = (& git -C $AppDir rev-parse --short HEAD)
         & git -C $AppDir fetch --quiet origin $TargetBranch
         & git -C $AppDir pull --ff-only origin $TargetBranch
