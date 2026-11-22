@@ -378,3 +378,27 @@ def test_multi_protocol_routes_registered_on_router_app() -> None:
     assert "/v1/images/generations" in paths
     assert "/v1/videos/generations" in paths
     assert "/infill" in paths
+
+
+def test_post_splitch_work_gpu_util_grace_prevents_false_cooldown() -> None:
+    """Cached 95% GPU util right after a Splitch media/LLM job must not trigger gpu_busy."""
+    import time
+
+    from backend.router.policy import check_node_eligibility
+
+    nodes = _make_nodes(gpu_util=98.0, gpu_non_llm_vram=900.0)
+    gpu = nodes["gpu-rig"]
+    guards = GuardConfig()
+    control = ControlState()
+
+    # Without recent Splitch work, 98% GPU util flags gpu_busy
+    assert check_node_eligibility(gpu, "coder-heavy", control, guards) == "gpu-rig_gpu_busy"
+
+    # Immediately after a Splitch job finishes (in_flight == 0), grace window prevents false yield
+    gpu.last_splitch_work_ts = time.time()
+    assert check_node_eligibility(gpu, "coder-heavy", control, guards) is None
+
+    # A real non-LLM game (high non_llm_vram_mb) STILL yields immediately despite grace window
+    assert gpu.telemetry is not None
+    gpu.telemetry.non_llm_vram_mb = 6144.0
+    assert check_node_eligibility(gpu, "coder-heavy", control, guards) == "gpu-rig_gpu_busy_app"

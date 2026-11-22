@@ -22,7 +22,11 @@ from backend.router.config import (
     load_control_state,
     save_control_state,
 )
-from backend.router.policy import check_node_eligibility, watched_gpu_metrics
+from backend.router.policy import (
+    check_node_eligibility,
+    is_splitch_recently_active,
+    watched_gpu_metrics,
+)
 from backend.shared.models import (
     AliasConfig,
     ControlState,
@@ -276,12 +280,14 @@ class ClusterState:
             node.online = True
             node.telemetry = telemetry
             node.latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            if node.in_flight > 0:
+                node.last_splitch_work_ts = time.time()
             non_llm_mb, gpu_util, _, _ = watched_gpu_metrics(node)
             is_ext_gpu_busy = node.role == "gpu" and (
                 non_llm_mb >= self.config.guards.non_llm_vram_threshold_mb
                 or (
                     gpu_util >= self.config.guards.max_external_gpu_util_percent
-                    and node.in_flight == 0
+                    and not is_splitch_recently_active(node)
                 )
             )
             if is_ext_gpu_busy and node.yield_on_gaming:

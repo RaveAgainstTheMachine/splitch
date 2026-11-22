@@ -112,6 +112,18 @@ def watched_gpu_metrics(node: NodeStatus) -> tuple[float, float, float, float]:
     return t.non_llm_vram_mb, t.gpu_util_percent, t.vram_total_mb, t.vram_free_mb
 
 
+SPLITCH_POST_WORK_GRACE_S = 6.0
+
+
+def is_splitch_recently_active(
+    node: NodeStatus, grace_s: float = SPLITCH_POST_WORK_GRACE_S
+) -> bool:
+    """True while Splitch has in-flight work or within the post-job telemetry settle window."""
+    if node.in_flight > 0:
+        return True
+    return node.last_splitch_work_ts > 0.0 and (time.time() - node.last_splitch_work_ts) < grace_s
+
+
 def check_node_eligibility(
     node: NodeStatus | None,
     target_model: str,
@@ -141,7 +153,7 @@ def check_node_eligibility(
         non_llm_mb, gpu_util, vram_total, vram_free = watched_gpu_metrics(node)
         if non_llm_mb >= guards.non_llm_vram_threshold_mb:
             return f"{node.node_id}_gpu_busy_app"
-        if gpu_util >= guards.max_external_gpu_util_percent and node.in_flight == 0:
+        if gpu_util >= guards.max_external_gpu_util_percent and not is_splitch_recently_active(node):
             return f"{node.node_id}_gpu_busy"
         if node.yield_on_gaming and node.yield_until_ts > time.time():
             return f"{node.node_id}_gpu_cooldown"

@@ -674,6 +674,7 @@ class MediaService:
             job.completed_at = time.time()
             job.duration_ms = round((time.perf_counter() - started) * 1000.0, 1)
         finally:
+            node.last_splitch_work_ts = time.time()
             node.in_flight = max(0, node.in_flight - 1)
             await self._save_jobs()
         return job

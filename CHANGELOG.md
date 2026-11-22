@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.9.4] - 2026-11-22
+
+### Bug Fixes
+- **Eliminated False `gpu_cooldown` After Media / LLM Jobs:** Added a 6-second post-job telemetry settle window (`last_splitch_work_ts` / `is_splitch_recently_active`) so cached `nvidia-smi` GPU utilization spikes immediately after a Splitch image/video or LLM generation completes no longer trigger a false 60-second `pc_gpu_cooldown` (real non-LLM games with high `non_llm_vram_mb` still yield immediately).
+
 ## [0.9.3] - 2026-11-22
 
 ### Bug Fixes

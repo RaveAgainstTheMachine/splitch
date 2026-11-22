@@ -98,6 +98,7 @@ class NodeStatus(BaseModel):
     online: bool = False
     latency_ms: float = 0.0
     in_flight: int = 0
+    last_splitch_work_ts: float = Field(default=0.0, exclude=True)
     yield_until_ts: float = 0.0
     busy_reason: str | None = None
     telemetry: NodeTelemetry | None = None
