@@ -450,6 +450,22 @@ export interface NodeMediaEngineStatus {
   active_downloads: DownloadJob[];
 }
 
+export interface MediaHfFile {
+  filename: string;
+  size_gb: number;
+  format: "gguf" | "safetensors";
+}
+
+export interface MediaHfRepoResult {
+  repo_id: string;
+  downloads: number;
+  likes: number;
+  pipeline_tag: string;
+  last_modified: string | null;
+  gated: boolean;
+  file_count: number;
+}
+
 export interface PendingApproval {
   approval_id: string;
   tool_call_id: string;

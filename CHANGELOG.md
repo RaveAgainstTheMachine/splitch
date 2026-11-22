@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.10.0] - 2026-11-22
+
+### Media Studio: Multi-File DiT Bundles, Native Video Gen & HF Model Browser
+- **Multi-File DiT Bundle Auto-Wiring (`backend/agent/main.py`):** `POST /media/engine/start` now auto-wires companion files (`--diffusion-model`, `--vae`, `--t5xxl`, `--clip_l`, `--llm`, `--flash-attn`) for **Z-Image-Turbo**, **FLUX.1-schnell**, and **Wan 2.1** alongside single-file SDXL/SD1.5 checkpoints.
+- **Native `sd-cli -M vid_gen` Video Generation (`POST /media/video/generate`):** Media Studio video generation now runs natively via `sd-cli -M vid_gen` (Wan 2.1 T2V 1.3B / 14B) without requiring ComfyUI, temporarily yielding `sd-server` VRAM during render and returning WebM video.
+- **Upgraded Starter Bundles & Built-In Hugging Face Media Browser (`MediaTab.tsx`, `/api/media/hf/search`, `/api/media/hf/files`):** Added 1-click multi-file starter bundles (**Z-Image-Turbo**, **FLUX.1-schnell**, **SDXL Turbo**, **Wan 2.1 T2V 1.3B**, **Wan 2.1 T2V 14B**) plus an inline Hugging Face Image/Video search browser with quick-pick chips (`Z-Image`, `FLUX`, `SDXL`, `Wan 2.1`, `LTX-Video`) and 1-click `.gguf`/`.safetensors` Pull directly inside Media Studio.
+
 ## [0.9.5] - 2026-11-22
 
 ### UI Polish

@@ -40,12 +40,15 @@ from backend.shared.models import (
     MediaBackendNode,
     MediaEngineKind,
     MediaGenerateRequest,
+    MediaHfFile,
+    MediaHfRepoResult,
     MediaJob,
     NodeMediaEngineStatus,
     NodeStatus,
     OpenAIImageRequest,
     OpenAIVideoRequest,
     PullModelRequest,
+    SdCliVideoRequest,
     StartMediaEngineRequest,
 )
 
@@ -629,6 +632,46 @@ class MediaService:
             ext, mime = _guess_ext_and_mime(raw, req.kind)
             return raw, ext, mime
 
+    async def _run_sd_cli_video(
+        self,
+        node: NodeStatus,
+        req: MediaGenerateRequest,
+        seed: int,
+        job: MediaJob,
+    ) -> tuple[bytes, str, str]:
+        job.stage = (
+            f"Generating video via sd-cli on {node.display_name} "
+            f"({req.width}x{req.height}, {req.frames}f @ {req.fps}fps)"
+        )
+        job.progress = 25
+        ca = self.cluster.config.tls.ca_bundle.strip()
+        payload = SdCliVideoRequest(
+            prompt=req.prompt,
+            negative_prompt=req.negative_prompt,
+            model_file=req.model,
+            width=req.width,
+            height=req.height,
+            steps=req.steps,
+            cfg_scale=req.cfg_scale,
+            seed=seed,
+            frames=req.frames,
+            fps=req.fps,
+        ).model_dump()
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(660.0, connect=10.0),
+            headers=self.cluster.agent_headers("POST", "/media/video/generate"),
+            verify=ca if ca else True,
+        ) as client:
+            resp = await client.post(f"{node.agent_url}/media/video/generate", json=payload)
+            if resp.status_code >= 400:
+                detail = resp.text[:400]
+                with contextlib.suppress(ValueError):
+                    detail = str(resp.json().get("detail", detail))
+                raise RuntimeError(detail or f"Video generation failed (HTTP {resp.status_code})")
+            raw = resp.content
+            ext, mime = _guess_ext_and_mime(raw, "video")
+            return raw, ext, mime
+
     async def _execute_job(
         self,
         job: MediaJob,
@@ -648,6 +691,8 @@ class MediaService:
             job.status = "running"
             if engine == "comfyui":
                 raw, ext, mime = await self._run_comfyui(base_url, node, req, seed, job)
+            elif req.kind == "video":
+                raw, ext, mime = await self._run_sd_cli_video(node, req, seed, job)
             else:
                 raw, ext, mime = await self._run_sd_server(base_url, req, seed, job)
 
@@ -879,6 +924,104 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
             raise
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.get("/api/media/hf/search", response_model=list[MediaHfRepoResult])
+    async def search_hf_media_models(
+        q: str = "",
+        kind: str = "image",
+        sort: str = "downloads",
+        limit: int = 16,
+    ) -> list[MediaHfRepoResult]:
+        """Search Hugging Face for diffusion image/video models (.gguf & .safetensors)."""
+        clean_q = q.strip()[:120]
+        eff_sort = sort if sort in ("downloads", "likes", "lastModified") else "downloads"
+        eff_limit = max(1, min(30, limit))
+        pipeline = "text-to-video" if kind == "video" else "text-to-image"
+        params: dict[str, str | int] = {
+            "sort": eff_sort,
+            "direction": -1,
+            "limit": eff_limit,
+            "full": "true",
+        }
+        if clean_q:
+            params["search"] = clean_q
+            if kind == "video" and not any(
+                tok in clean_q.lower() for tok in ("wan", "ltx", "video", "hunyuan", "mochi", "cogvideo")
+            ):
+                params["pipeline_tag"] = pipeline
+        else:
+            params["pipeline_tag"] = pipeline
+
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                r = await client.get("https://huggingface.co/api/models", params=params)
+                r.raise_for_status()
+                raw_items = r.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=f"Hugging Face search failed: {exc}") from exc
+
+        results: list[MediaHfRepoResult] = []
+        for item in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            repo_id = str(item.get("id") or "")
+            if not repo_id:
+                continue
+            siblings = item.get("siblings") or []
+            media_files = [
+                s
+                for s in siblings
+                if isinstance(s, dict)
+                and str(s.get("rfilename") or "").lower().endswith((".gguf", ".safetensors"))
+            ]
+            if not media_files:
+                continue
+            results.append(
+                MediaHfRepoResult(
+                    repo_id=repo_id,
+                    downloads=int(item.get("downloads") or 0),
+                    likes=int(item.get("likes") or 0),
+                    pipeline_tag=str(item.get("pipeline_tag") or ""),
+                    last_modified=item.get("lastModified"),
+                    gated=bool(item.get("gated")),
+                    file_count=len(media_files),
+                )
+            )
+        return results
+
+    @router.get("/api/media/hf/files", response_model=list[MediaHfFile])
+    async def list_hf_media_files(repo_id: str) -> list[MediaHfFile]:
+        if not re.fullmatch(r"[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+", repo_id):
+            raise HTTPException(status_code=400, detail="Invalid Hugging Face repo_id")
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                r = await client.get(
+                    f"https://huggingface.co/api/models/{repo_id}",
+                    params={"blobs": "true"},
+                )
+                r.raise_for_status()
+                body = r.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=f"Failed to list repo files: {exc}") from exc
+
+        files: list[MediaHfFile] = []
+        for s in body.get("siblings") or []:
+            if not isinstance(s, dict):
+                continue
+            fname = str(s.get("rfilename") or "")
+            low = fname.lower()
+            if not low.endswith((".gguf", ".safetensors")):
+                continue
+            size_b = int(s.get("size") or (s.get("lfs") or {}).get("size") or 0)
+            files.append(
+                MediaHfFile(
+                    filename=fname,
+                    size_gb=round(size_b / (1024**3), 2) if size_b > 0 else 0.0,
+                    format="gguf" if low.endswith(".gguf") else "safetensors",
+                )
+            )
+        files.sort(key=lambda f: (0 if f.format == "gguf" else 1, f.size_gb, f.filename))
+        return files
 
     @router.get("/api/media/jobs", response_model=list[MediaJob])
     async def list_media_jobs() -> list[MediaJob]:

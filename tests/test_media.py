@@ -254,3 +254,38 @@ def test_agent_managed_media_engine_status_and_validation(
         json={"repo_id": "stabilityai/sdxl-turbo", "filename": "malware.exe"},
     )
     assert bad_pull.status_code == 400
+
+
+def test_sd_bundle_auto_wiring_and_media_hf_routes(tmp_path):
+    """Multi-file Z-Image, FLUX, and Wan 2.1 bundles auto-wire companions; HF routes registered."""
+    import backend.agent.main as agent_mod
+    from backend.router.app import app as router_app
+
+    z_img = tmp_path / "z-image-turbo-Q4_K_M.gguf"
+    z_img.write_bytes(b"z")
+    # Missing companions returns helpful error
+    args, err = agent_mod._build_sd_model_args(tmp_path, z_img)
+    assert args == [] and err and "Qwen3-4B" in err and "ae.safetensors" in err
+
+    # With companions present, auto-wires --diffusion-model, --llm, --vae, --flash-attn
+    (tmp_path / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"q")
+    (tmp_path / "ae.safetensors").write_bytes(b"a")
+    args, err = agent_mod._build_sd_model_args(tmp_path, z_img)
+    assert err is None
+    assert "--diffusion-model" in args and "--llm" in args and "--vae" in args and "--flash-attn" in args
+
+    # Wan 2.1 video bundle auto-wiring
+    wan = tmp_path / "wan2.1_t2v_1.3B_bf16.safetensors"
+    wan.write_bytes(b"w")
+    (tmp_path / "umt5_xxl_fp8_e4m3fn_scaled.safetensors").write_bytes(b"t")
+    (tmp_path / "wan_2.1_vae.safetensors").write_bytes(b"v")
+    w_args, w_err = agent_mod._build_sd_model_args(tmp_path, wan)
+    assert w_err is None
+    assert "--diffusion-model" in w_args and "--t5xxl" in w_args and "--flow-shift" in w_args
+
+    # Router HF media search/files + agent video generation routes registered
+    router_paths = set(router_app.openapi()["paths"].keys())
+    assert "/api/media/hf/search" in router_paths
+    assert "/api/media/hf/files" in router_paths
+    agent_paths = set(agent_mod.app.openapi()["paths"].keys())
+    assert "/media/video/generate" in agent_paths

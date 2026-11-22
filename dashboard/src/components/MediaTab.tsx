@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
+  Check,
+  ChevronDown,
+  ChevronRight,
   Dices,
   Download,
+  ExternalLink,
   Film,
   Image as ImageIcon,
+  Loader2,
+  Lock,
   Maximize2,
   Play,
   RefreshCw,
   RotateCcw,
+  Search,
   Settings,
   Sparkles,
   Square,
@@ -17,7 +24,14 @@ import {
 } from "lucide-react";
 import type { ConfirmState } from "./ConfirmDialog";
 import { useDialogLightDismiss } from "./ModelsTab";
-import type { MediaBackendNode, MediaJob, MediaKind, NodeMediaEngineStatus } from "../types";
+import type {
+  MediaBackendNode,
+  MediaHfFile,
+  MediaHfRepoResult,
+  MediaJob,
+  MediaKind,
+  NodeMediaEngineStatus
+} from "../types";
 
 interface Props {
   onError: (msg: string | null) => void;
@@ -40,29 +54,89 @@ const VIDEO_PRESETS = [
   { label: "9:16", width: 480, height: 832 }
 ] as const;
 
-const STARTER_IMAGE_MODELS = [
+interface StarterMediaBundle {
+  id: string;
+  kind: MediaKind;
+  label: string;
+  hint: string;
+  files: Array<{ repo_id: string; filename: string }>;
+}
+
+const STARTER_MEDIA_BUNDLES: readonly StarterMediaBundle[] = [
+  {
+    id: "z-image-turbo",
+    kind: "image",
+    label: "Z-Image-Turbo (Q4)",
+    hint: "~7.5 GB · 4–8 steps · Apache-2.0",
+    files: [
+      { repo_id: "unsloth/Z-Image-Turbo-GGUF", filename: "z-image-turbo-Q4_K_M.gguf" },
+      { repo_id: "unsloth/Qwen3-4B-GGUF", filename: "Qwen3-4B-Q4_K_M.gguf" },
+      { repo_id: "Comfy-Org/z_image_turbo", filename: "split_files/vae/ae.safetensors" }
+    ]
+  },
+  {
+    id: "flux-schnell",
+    kind: "image",
+    label: "FLUX.1-schnell (Q4)",
+    hint: "~10 GB · 4 steps · Apache-2.0",
+    files: [
+      { repo_id: "city96/FLUX.1-schnell-gguf", filename: "flux1-schnell-Q4_K_S.gguf" },
+      { repo_id: "city96/t5-v1_1-xxl-encoder-gguf", filename: "t5-v1_1-xxl-encoder-Q4_K_M.gguf" },
+      { repo_id: "comfyanonymous/flux_text_encoders", filename: "clip_l.safetensors" },
+      { repo_id: "Comfy-Org/z_image_turbo", filename: "split_files/vae/ae.safetensors" }
+    ]
+  },
   {
     id: "sdxl-turbo",
+    kind: "image",
     label: "SDXL Turbo FP16",
-    hint: "6.9 GB",
-    repo_id: "stabilityai/sdxl-turbo",
-    filename: "sd_xl_turbo_1.0_fp16.safetensors"
+    hint: "6.9 GB · single file · 4 steps",
+    files: [
+      { repo_id: "stabilityai/sdxl-turbo", filename: "sd_xl_turbo_1.0_fp16.safetensors" }
+    ]
   },
   {
-    id: "sdxl-base",
-    label: "SDXL 1.0 Base",
-    hint: "6.9 GB",
-    repo_id: "stabilityai/stable-diffusion-xl-base-1.0",
-    filename: "sd_xl_base_1.0.safetensors"
+    id: "wan21-1.3b",
+    kind: "video",
+    label: "Wan 2.1 T2V 1.3B",
+    hint: "~9.8 GB · fast 480p video",
+    files: [
+      {
+        repo_id: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        filename: "split_files/diffusion_models/wan2.1_t2v_1.3B_bf16.safetensors"
+      },
+      {
+        repo_id: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        filename: "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+      },
+      {
+        repo_id: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        filename: "split_files/vae/wan_2.1_vae.safetensors"
+      }
+    ]
   },
   {
-    id: "sd15",
-    label: "SD 1.5 Pruned",
-    hint: "4.3 GB",
-    repo_id: "stable-diffusion-v1-5/stable-diffusion-v1-5",
-    filename: "v1-5-pruned-emaonly.safetensors"
+    id: "wan21-14b",
+    kind: "video",
+    label: "Wan 2.1 T2V 14B (Q4)",
+    hint: "~16.5 GB · 24 GB VRAM",
+    files: [
+      { repo_id: "city96/Wan2.1-T2V-14B-gguf", filename: "wan2.1-t2v-14b-Q4_K_M.gguf" },
+      {
+        repo_id: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        filename: "split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+      },
+      {
+        repo_id: "Comfy-Org/Wan_2.1_ComfyUI_repackaged",
+        filename: "split_files/vae/wan_2.1_vae.safetensors"
+      }
+    ]
   }
-] as const;
+];
+
+function fileBasename(path: string): string {
+  return path.split("/").pop() ?? path;
+}
 
 function fmtDuration(ms: number | null): string {
   if (ms === null) return "—";
@@ -79,6 +153,14 @@ export function MediaTab({ onError, onConfirm }: Props) {
   const [engineStatus, setEngineStatus] = useState<NodeMediaEngineStatus | null>(null);
   const [selectedStartModel, setSelectedStartModel] = useState("");
   const [engineBusy, setEngineBusy] = useState<string | null>(null);
+
+  const [hfQuery, setHfQuery] = useState("");
+  const [hfKind, setHfKind] = useState<MediaKind>("image");
+  const [hfSearching, setHfSearching] = useState(false);
+  const [hfRepos, setHfRepos] = useState<MediaHfRepoResult[]>([]);
+  const [hfExpandedRepo, setHfExpandedRepo] = useState<string | null>(null);
+  const [hfFilesMap, setHfFilesMap] = useState<Record<string, MediaHfFile[]>>({});
+  const [hfLoadingFiles, setHfLoadingFiles] = useState(false);
 
   const [kind, setKind] = useState<MediaKind>("image");
   const [nodeId, setNodeId] = useState("auto");
@@ -225,7 +307,7 @@ export function MediaTab({ onError, onConfirm }: Props) {
     }
   };
 
-  const handlePullStarterModel = async (repoId: string, filename: string) => {
+  const handlePullMediaFile = async (repoId: string, filename: string) => {
     if (!setupNodeId) return;
     setEngineBusy(`pull:${filename}`);
     onError(null);
@@ -244,6 +326,89 @@ export function MediaTab({ onError, onConfirm }: Props) {
       onError(err instanceof Error ? err.message : "Model pull failed");
     } finally {
       setEngineBusy(null);
+    }
+  };
+
+  const handlePullBundle = async (bundle: StarterMediaBundle) => {
+    if (!setupNodeId) return;
+    setEngineBusy(`bundle:${bundle.id}`);
+    onError(null);
+    try {
+      const present = new Set(
+        (engineStatus?.local_media_models ?? []).map((f) => f.filename.toLowerCase())
+      );
+      const pulling = new Set(
+        (engineStatus?.active_downloads ?? [])
+          .filter((d) => d.status === "downloading")
+          .map((d) => fileBasename(d.filename).toLowerCase())
+      );
+      for (const file of bundle.files) {
+        const base = fileBasename(file.filename).toLowerCase();
+        if (present.has(base) || pulling.has(base)) continue;
+        const res = await fetch(`/api/media/nodes/${encodeURIComponent(setupNodeId)}/pull`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            node_id: setupNodeId,
+            repo_id: file.repo_id,
+            filename: file.filename
+          })
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `HTTP ${res.status}`);
+        }
+      }
+      await refreshEngineStatus(setupNodeId);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Bundle pull failed");
+    } finally {
+      setEngineBusy(null);
+    }
+  };
+
+  const searchHfMedia = async (qOverride?: string, kindOverride?: MediaKind) => {
+    const q = qOverride ?? hfQuery;
+    const k = kindOverride ?? hfKind;
+    setHfSearching(true);
+    setHfExpandedRepo(null);
+    onError(null);
+    try {
+      const res = await fetch(
+        `/api/media/hf/search?q=${encodeURIComponent(q)}&kind=${encodeURIComponent(k)}&limit=14`
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      setHfRepos((await res.json()) as MediaHfRepoResult[]);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Hugging Face media search failed");
+    } finally {
+      setHfSearching(false);
+    }
+  };
+
+  const toggleHfRepoFiles = async (repoId: string) => {
+    if (hfExpandedRepo === repoId) {
+      setHfExpandedRepo(null);
+      return;
+    }
+    setHfExpandedRepo(repoId);
+    if (hfFilesMap[repoId]) return;
+    setHfLoadingFiles(true);
+    try {
+      const res = await fetch(`/api/media/hf/files?repo_id=${encodeURIComponent(repoId)}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      const files = (await res.json()) as MediaHfFile[];
+      setHfFilesMap((prev) => ({ ...prev, [repoId]: files }));
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to load repo files");
+    } finally {
+      setHfLoadingFiles(false);
     }
   };
 
@@ -567,41 +732,261 @@ export function MediaTab({ onError, onConfirm }: Props) {
 
             <div className="media-starter-row">
               <span className="muted" style={{ fontSize: "0.76rem" }}>
-                Checkpoints
+                Starter Bundles (Image &amp; Video — auto-wires VAE &amp; encoders)
               </span>
               <div className="media-starter-grid">
-                {STARTER_IMAGE_MODELS.map((m) => {
-                  const present = Boolean(
-                    engineStatus?.local_media_models.some((f) => f.filename === m.filename)
+                {STARTER_MEDIA_BUNDLES.map((b) => {
+                  const localSet = new Set(
+                    (engineStatus?.local_media_models ?? []).map((f) => f.filename.toLowerCase())
                   );
-                  const pulling = Boolean(
-                    activeDownloads.some((d) => d.filename === m.filename)
+                  const presentCount = b.files.filter((f) =>
+                    localSet.has(fileBasename(f.filename).toLowerCase())
+                  ).length;
+                  const allPresent = presentCount === b.files.length;
+                  const pulling = b.files.some((f) =>
+                    activeDownloads.some(
+                      (d) =>
+                        fileBasename(d.filename).toLowerCase() ===
+                        fileBasename(f.filename).toLowerCase()
+                    )
                   );
                   return (
-                    <div key={m.id} className="media-starter-card">
+                    <div key={b.id} className="media-starter-card">
                       <div>
-                        <strong>{m.label}</strong>
+                        <div className="row-actions" style={{ gap: "0.35rem" }}>
+                          <span className={`pill ${b.kind === "video" ? "pill--accent" : ""}`}>
+                            {b.kind.toUpperCase()}
+                          </span>
+                          <strong>{b.label}</strong>
+                        </div>
                         <div className="muted" style={{ fontSize: "0.73rem" }}>
-                          {m.hint}
+                          {b.hint}
+                          {b.files.length > 1 && !allPresent
+                            ? ` · ${presentCount}/${b.files.length} files`
+                            : ""}
                         </div>
                       </div>
-                      {present ? (
-                        <span className="pill pill--ok">DOWNLOADED</span>
+                      {allPresent ? (
+                        <span className="pill pill--ok">
+                          <Check size={11} aria-hidden="true" /> READY
+                        </span>
                       ) : (
                         <button
                           type="button"
                           className="btn btn--sm"
-                          disabled={!setupNodeId || pulling || engineBusy === `pull:${m.filename}`}
-                          onClick={() => void handlePullStarterModel(m.repo_id, m.filename)}
+                          disabled={!setupNodeId || pulling || engineBusy === `bundle:${b.id}`}
+                          onClick={() => void handlePullBundle(b)}
                         >
-                          <Download size={12} aria-hidden="true" />
-                          {pulling ? "Pulling…" : "Pull"}
+                          {pulling || engineBusy === `bundle:${b.id}` ? (
+                            <>
+                              <Loader2 size={12} className="spin" aria-hidden="true" /> Pulling…
+                            </>
+                          ) : (
+                            <>
+                              <Download size={12} aria-hidden="true" /> Pull
+                              {b.files.length > 1 ? " Bundle" : ""}
+                            </>
+                          )}
                         </button>
                       )}
                     </div>
                   );
                 })}
               </div>
+            </div>
+
+            <div className="media-hf-browser">
+              <div className="media-hf-browser__head">
+                <span className="muted" style={{ fontSize: "0.76rem" }}>
+                  Browse Hugging Face Image &amp; Video Models (.gguf / .safetensors)
+                </span>
+                <div className="row-actions" style={{ gap: "0.3rem" }}>
+                  {(
+                    [
+                      { label: "Z-Image", q: "Z-Image-Turbo", k: "image" },
+                      { label: "FLUX", q: "FLUX.1 gguf", k: "image" },
+                      { label: "SDXL", q: "sdxl", k: "image" },
+                      { label: "Wan 2.1", q: "Wan2.1 gguf", k: "video" },
+                      { label: "LTX-Video", q: "LTX-Video", k: "video" }
+                    ] as const
+                  ).map((chip) => (
+                    <button
+                      key={chip.label}
+                      type="button"
+                      className="btn btn--sm btn--ghost"
+                      onClick={() => {
+                        setHfQuery(chip.q);
+                        setHfKind(chip.k);
+                        void searchHfMedia(chip.q, chip.k);
+                      }}
+                    >
+                      {chip.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="media-hf-browser__bar">
+                <div className="dialog-modes" role="group" aria-label="Hugging Face media kind">
+                  <button
+                    type="button"
+                    className={`btn btn--sm ${hfKind === "image" ? "btn--accent" : ""}`}
+                    aria-pressed={hfKind === "image"}
+                    onClick={() => setHfKind("image")}
+                  >
+                    Image
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn btn--sm ${hfKind === "video" ? "btn--accent" : ""}`}
+                    aria-pressed={hfKind === "video"}
+                    onClick={() => setHfKind("video")}
+                  >
+                    Video
+                  </button>
+                </div>
+                <input
+                  type="search"
+                  value={hfQuery}
+                  onChange={(e) => setHfQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void searchHfMedia();
+                    }
+                  }}
+                  placeholder={
+                    hfKind === "video"
+                      ? "Search Wan 2.1, LTX-Video, HunyuanVideo…"
+                      : "Search FLUX, Z-Image, SDXL, Pony, Illustrious…"
+                  }
+                  aria-label="Search Hugging Face media models"
+                />
+                <button
+                  type="button"
+                  className="btn btn--sm btn--accent"
+                  disabled={hfSearching}
+                  onClick={() => void searchHfMedia()}
+                >
+                  {hfSearching ? (
+                    <Loader2 size={12} className="spin" aria-hidden="true" />
+                  ) : (
+                    <Search size={12} aria-hidden="true" />
+                  )}{" "}
+                  {hfSearching ? "Searching…" : "Search HF"}
+                </button>
+              </div>
+
+              {hfRepos.length > 0 && (
+                <div className="media-hf-results">
+                  {hfRepos.map((repo) => {
+                    const expanded = hfExpandedRepo === repo.repo_id;
+                    const files = hfFilesMap[repo.repo_id] ?? [];
+                    return (
+                      <div key={repo.repo_id} className="media-hf-repo">
+                        <button
+                          type="button"
+                          className="media-hf-repo__row"
+                          aria-expanded={expanded}
+                          onClick={() => void toggleHfRepoFiles(repo.repo_id)}
+                        >
+                          <span className="row-actions" style={{ gap: "0.35rem", minWidth: 0 }}>
+                            {expanded ? (
+                              <ChevronDown size={13} aria-hidden="true" />
+                            ) : (
+                              <ChevronRight size={13} aria-hidden="true" />
+                            )}
+                            <code style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {repo.repo_id}
+                            </code>
+                            {repo.gated && (
+                              <span className="pill pill--warn" title="Gated repo (HF_TOKEN required)">
+                                <Lock size={10} aria-hidden="true" /> gated
+                              </span>
+                            )}
+                          </span>
+                          <span className="muted" style={{ fontSize: "0.73rem", whiteSpace: "nowrap" }}>
+                            {repo.file_count} files · {repo.downloads.toLocaleString()} dl
+                          </span>
+                        </button>
+
+                        {expanded && (
+                          <div className="media-hf-repo__files">
+                            <div className="row-actions" style={{ justifyContent: "space-between" }}>
+                              <span className="muted" style={{ fontSize: "0.72rem" }}>
+                                Select a .gguf or .safetensors file to pull to {setupNodeId || "node"}
+                              </span>
+                              <a
+                                href={`https://huggingface.co/${repo.repo_id}`}
+                                target="_blank"
+                                rel="noreferrer noopener"
+                                className="btn btn--sm btn--ghost"
+                              >
+                                <ExternalLink size={11} aria-hidden="true" /> HF Card
+                              </a>
+                            </div>
+                            {hfLoadingFiles && files.length === 0 ? (
+                              <span className="muted" style={{ fontSize: "0.75rem" }}>
+                                Loading files…
+                              </span>
+                            ) : (
+                              files.slice(0, 20).map((f) => {
+                                const base = fileBasename(f.filename);
+                                const onDisk = Boolean(
+                                  engineStatus?.local_media_models.some(
+                                    (m) => m.filename.toLowerCase() === base.toLowerCase()
+                                  )
+                                );
+                                const job = activeDownloads.find(
+                                  (d) =>
+                                    fileBasename(d.filename).toLowerCase() === base.toLowerCase()
+                                );
+                                return (
+                                  <div key={f.filename} className="media-hf-file-row">
+                                    <span className="media-hf-file-row__name" title={f.filename}>
+                                      <span className="pill">{f.format.toUpperCase()}</span>
+                                      <code>{f.filename}</code>
+                                    </span>
+                                    <span className="row-actions" style={{ flexShrink: 0 }}>
+                                      {f.size_gb > 0 && (
+                                        <span className="muted" style={{ fontSize: "0.73rem" }}>
+                                          {f.size_gb.toFixed(2)} GB
+                                        </span>
+                                      )}
+                                      {onDisk ? (
+                                        <span className="pill pill--ok">
+                                          <Check size={10} aria-hidden="true" /> On disk
+                                        </span>
+                                      ) : job ? (
+                                        <span className="pill pill--accent">
+                                          <Loader2 size={10} className="spin" aria-hidden="true" />{" "}
+                                          {Math.round(job.percent)}%
+                                        </span>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          className="btn btn--sm btn--accent"
+                                          disabled={!setupNodeId || engineBusy === `pull:${f.filename}`}
+                                          onClick={() =>
+                                            void handlePullMediaFile(repo.repo_id, f.filename)
+                                          }
+                                        >
+                                          <Download size={11} aria-hidden="true" /> Pull →{" "}
+                                          {setupNodeId}
+                                        </button>
+                                      )}
+                                    </span>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {activeDownloads.length > 0 && (

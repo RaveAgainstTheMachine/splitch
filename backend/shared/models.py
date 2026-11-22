@@ -636,6 +636,39 @@ class NodeMediaEngineStatus(BaseModel):
 class StartMediaEngineRequest(BaseModel):
     model_file: str = Field(..., min_length=1, max_length=256)
     port: int = Field(default=8082, ge=1024, le=65535)
+    vae: str = Field(default="", max_length=256)
+    t5xxl: str = Field(default="", max_length=256)
+    clip_l: str = Field(default="", max_length=256)
+    llm: str = Field(default="", max_length=256)
+
+
+class SdCliVideoRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=8000)
+    negative_prompt: str = ""
+    model_file: str = Field(default="", max_length=256)
+    width: int = Field(default=832, ge=128, le=1920)
+    height: int = Field(default=480, ge=128, le=1920)
+    steps: int = Field(default=20, ge=1, le=100)
+    cfg_scale: float = Field(default=6.0, ge=0.0, le=30.0)
+    seed: int = 42
+    frames: int = Field(default=17, ge=5, le=241)
+    fps: int = Field(default=16, ge=1, le=60)
+
+
+class MediaHfFile(BaseModel):
+    filename: str
+    size_gb: float = 0.0
+    format: Literal["gguf", "safetensors"] = "safetensors"
+
+
+class MediaHfRepoResult(BaseModel):
+    repo_id: str
+    downloads: int = 0
+    likes: int = 0
+    pipeline_tag: str = ""
+    last_modified: str | None = None
+    gated: bool = False
+    file_count: int = 0
 
 
 class InstallMediaEngineRequest(BaseModel):

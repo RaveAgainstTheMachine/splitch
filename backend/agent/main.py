@@ -73,6 +73,7 @@ from backend.shared.models import (
     NodeRole,
     NodeTelemetry,
     PullModelRequest,
+    SdCliVideoRequest,
     SkillSyncPayload,
     StartMediaEngineRequest,
     ToolExecRequest,
@@ -830,23 +831,154 @@ async def install_media_engine(req: InstallMediaEngineRequest) -> NodeMediaEngin
     return await asyncio.to_thread(_build_media_engine_status)
 
 
+def _resolve_media_file(storage_root: Path, filename: str) -> Path | None:
+    if not filename or ".." in filename or "/" in filename or "\\" in filename:
+        return None
+    for candidate in (storage_root / filename, storage_root / "media" / filename):
+        resolved = candidate.resolve()
+        if resolved.is_file() and resolved.is_relative_to(storage_root):
+            return resolved
+    return None
+
+
+def _find_first_media_match(storage_root: Path, patterns: tuple[str, ...]) -> Path | None:
+    for root in (storage_root, storage_root / "media"):
+        if not root.exists():
+            continue
+        for entry in sorted(root.iterdir()):
+            if not entry.is_file():
+                continue
+            low = entry.name.lower()
+            if any(pat in low for pat in patterns):
+                resolved = entry.resolve()
+                if resolved.is_relative_to(storage_root):
+                    return resolved
+    return None
+
+
+def _build_sd_model_args(
+    storage_root: Path,
+    model_path: Path,
+    *,
+    vae: str = "",
+    t5xxl: str = "",
+    clip_l: str = "",
+    llm: str = "",
+) -> tuple[list[str], str | None]:
+    """Build sd-server / sd-cli model flags, auto-wiring multi-file DiT bundles."""
+    low = model_path.name.lower()
+
+    vae_path = _resolve_media_file(storage_root, vae) if vae else None
+    t5_path = _resolve_media_file(storage_root, t5xxl) if t5xxl else None
+    clip_l_path = _resolve_media_file(storage_root, clip_l) if clip_l else None
+    llm_path = _resolve_media_file(storage_root, llm) if llm else None
+
+    if "z-image" in low or "z_image" in low:
+        llm_path = llm_path or _find_first_media_match(storage_root, ("qwen3-4b", "qwen_3_4b"))
+        vae_path = vae_path or _find_first_media_match(storage_root, ("ae.safetensors",))
+        missing = []
+        if not llm_path:
+            missing.append("Qwen3-4B text encoder (Qwen3-4B-Q4_K_M.gguf)")
+        if not vae_path:
+            missing.append("FLUX VAE (ae.safetensors)")
+        if missing:
+            return [], f"Z-Image-Turbo requires companion file(s): {', '.join(missing)}. Click Pull on the Z-Image-Turbo bundle."
+        return [
+            "--diffusion-model",
+            str(model_path),
+            "--llm",
+            str(llm_path),
+            "--vae",
+            str(vae_path),
+            "--flash-attn",
+        ], None
+
+    if "flux" in low:
+        t5_path = t5_path or _find_first_media_match(storage_root, ("t5-v1_1-xxl", "t5xxl"))
+        clip_l_path = clip_l_path or _find_first_media_match(storage_root, ("clip_l",))
+        vae_path = vae_path or _find_first_media_match(storage_root, ("ae.safetensors",))
+        missing = []
+        if not t5_path:
+            missing.append("T5-XXL encoder (t5-v1_1-xxl-encoder-Q4_K_M.gguf)")
+        if not clip_l_path:
+            missing.append("CLIP-L encoder (clip_l.safetensors)")
+        if not vae_path:
+            missing.append("FLUX VAE (ae.safetensors)")
+        if missing:
+            return [], f"FLUX requires companion file(s): {', '.join(missing)}. Click Pull on the FLUX.1-schnell bundle."
+        return [
+            "--diffusion-model",
+            str(model_path),
+            "--t5xxl",
+            str(t5_path),
+            "--clip_l",
+            str(clip_l_path),
+            "--vae",
+            str(vae_path),
+            "--flash-attn",
+        ], None
+
+    if "wan2." in low or "wan_" in low:
+        t5_path = t5_path or _find_first_media_match(storage_root, ("umt5_xxl", "umt5-xxl", "umt5"))
+        vae_path = vae_path or _find_first_media_match(storage_root, ("wan_2.1_vae", "wan2.1_vae", "wan_vae"))
+        missing = []
+        if not t5_path:
+            missing.append("UMT5-XXL encoder (umt5_xxl_fp8_e4m3fn_scaled.safetensors)")
+        if not vae_path:
+            missing.append("Wan 2.1 VAE (wan_2.1_vae.safetensors)")
+        if missing:
+            return [], f"Wan 2.1 requires companion file(s): {', '.join(missing)}. Click Pull on a Wan 2.1 video bundle."
+        return [
+            "--diffusion-model",
+            str(model_path),
+            "--t5xxl",
+            str(t5_path),
+            "--vae",
+            str(vae_path),
+            "--flow-shift",
+            "3.0",
+            "--flash-attn",
+        ], None
+
+    # Explicit companion flags or standard single-file checkpoint (SDXL / SD 1.5)
+    if any((vae_path, t5_path, clip_l_path, llm_path)):
+        args = ["--diffusion-model", str(model_path)]
+        if vae_path:
+            args.extend(["--vae", str(vae_path)])
+        if t5_path:
+            args.extend(["--t5xxl", str(t5_path)])
+        if clip_l_path:
+            args.extend(["--clip_l", str(clip_l_path)])
+        if llm_path:
+            args.extend(["--llm", str(llm_path)])
+        args.append("--flash-attn")
+        return args, None
+
+    return ["-m", str(model_path)], None
+
+
 @app.post("/media/engine/start", response_model=NodeMediaEngineStatus)
 async def start_media_engine(req: StartMediaEngineRequest) -> NodeMediaEngineStatus:
     if ".." in req.model_file or "/" in req.model_file or "\\" in req.model_file:
         raise HTTPException(status_code=400, detail="Invalid model_file name")
-
-    # Resolve model file strictly inside STORAGE_PATH or STORAGE_PATH/media
     storage_root = Path(STORAGE_PATH).resolve()
-    candidates = [storage_root / req.model_file, storage_root / "media" / req.model_file]
-    model_path = next(
-        (p.resolve() for p in candidates if p.is_file() and p.resolve().is_relative_to(storage_root)),
-        None,
-    )
+    model_path = _resolve_media_file(storage_root, req.model_file)
     if model_path is None:
         raise HTTPException(
             status_code=404,
             detail=f"Model '{req.model_file}' not found in {STORAGE_PATH}",
         )
+
+    model_args, bundle_err = _build_sd_model_args(
+        storage_root,
+        model_path,
+        vae=req.vae,
+        t5xxl=req.t5xxl,
+        clip_l=req.clip_l,
+        llm=req.llm,
+    )
+    if bundle_err:
+        raise HTTPException(status_code=400, detail=bundle_err)
 
     installed = await asyncio.to_thread(detect_installed_engines)
     sd_info = next((e for e in installed if e.engine == "sd.cpp"), None)
@@ -881,8 +1013,7 @@ async def start_media_engine(req: StartMediaEngineRequest) -> NodeMediaEngineSta
         "127.0.0.1",
         "--listen-port",
         str(req.port),
-        "-m",
-        str(model_path),
+        *model_args,
     ]
     state.sd_last_error = None
     state.sd_running_model = req.model_file
@@ -929,6 +1060,128 @@ async def stop_media_engine() -> NodeMediaEngineStatus:
     state.sd_last_error = None
     await state.poll_once()
     return await asyncio.to_thread(_build_media_engine_status)
+
+
+@app.post("/media/video/generate")
+async def generate_video_via_sd_cli(req: SdCliVideoRequest) -> Response:
+    """Run native stable-diffusion.cpp `sd-cli -M vid_gen` for Wan 2.1/2.2 video generation."""
+    import tempfile
+
+    storage_root = Path(STORAGE_PATH).resolve()
+    model_path: Path | None = None
+    if req.model_file and req.model_file not in ("auto", "sd-cpp-local"):
+        model_path = _resolve_media_file(storage_root, req.model_file)
+    if model_path is None:
+        model_path = _find_first_media_match(
+            storage_root, ("wan2.1_t2v", "wan2.1-t2v", "wan2.2", "ltx-video")
+        )
+    if model_path is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No video model found on this node. Pull a Wan 2.1 video bundle in "
+                "Media Studio → Engine & Models (or connect ComfyUI)."
+            ),
+        )
+
+    model_args, bundle_err = _build_sd_model_args(storage_root, model_path)
+    if bundle_err:
+        raise HTTPException(status_code=400, detail=bundle_err)
+
+    installed = await asyncio.to_thread(detect_installed_engines)
+    sd_info = next((e for e in installed if e.engine == "sd.cpp"), None)
+    if not sd_info:
+        raise HTTPException(
+            status_code=400,
+            detail="stable-diffusion.cpp (sd-cli) is not installed on this node.",
+        )
+
+    sd_cli = Path(sd_info.path)
+    if sd_cli.name.startswith("sd-server"):
+        sibling = sd_cli.parent / ("sd-cli.exe" if sys.platform == "win32" else "sd-cli")
+        if sibling.is_file():
+            sd_cli = sibling
+    if not sd_cli.is_file():
+        found = shutil.which("sd-cli")
+        if not found:
+            raise HTTPException(status_code=400, detail="sd-cli binary not found alongside sd-server")
+        sd_cli = Path(found)
+
+    # Free GPU VRAM held by managed sd-server before running vid_gen
+    was_running_model = state.sd_running_model if (
+        state.sd_proc is not None and state.sd_proc.returncode is None
+    ) else ""
+    if state.sd_proc is not None and state.sd_proc.returncode is None:
+        state.sd_proc.terminate()
+        with contextlib.suppress(TimeoutError, ProcessLookupError):
+            await asyncio.wait_for(state.sd_proc.wait(), timeout=4.0)
+        state.sd_proc = None
+        state.sd_running_model = ""
+
+    env = os.environ.copy()
+    lib_dir = str(sd_cli.parent)
+    if sys.platform == "darwin":
+        env["DYLD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('DYLD_LIBRARY_PATH', '')}"
+    elif sys.platform.startswith("linux"):
+        env["LD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('LD_LIBRARY_PATH', '')}"
+
+    with tempfile.TemporaryDirectory(prefix="splitch-vid-") as tmpdir:
+        out_path = Path(tmpdir) / "out.webm"
+        cmd = [
+            str(sd_cli),
+            "-M",
+            "vid_gen",
+            *model_args,
+            "-W",
+            str(req.width),
+            "-H",
+            str(req.height),
+            "--video-frames",
+            str(req.frames),
+            "--fps",
+            str(req.fps),
+            "--steps",
+            str(req.steps),
+            "--cfg-scale",
+            str(req.cfg_scale),
+            "-s",
+            str(req.seed),
+            "-p",
+            req.prompt,
+            "-o",
+            str(out_path),
+        ]
+        if req.negative_prompt.strip():
+            cmd.extend(["-n", req.negative_prompt.strip()])
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=600.0)
+        except TimeoutError as exc:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            raise HTTPException(status_code=504, detail="sd-cli video generation timed out") from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to launch sd-cli: {exc}") from exc
+
+        if proc.returncode != 0 or not out_path.is_file():
+            err_tail = stderr_b.decode("utf-8", errors="replace").strip()[-500:]
+            raise HTTPException(
+                status_code=500,
+                detail=err_tail or f"sd-cli exited with code {proc.returncode}",
+            )
+        raw = await asyncio.to_thread(out_path.read_bytes)
+
+    if was_running_model:
+        with contextlib.suppress(HTTPException, OSError):
+            await start_media_engine(StartMediaEngineRequest(model_file=was_running_model))
+
+    return Response(content=raw, media_type="video/webm")
 
 
 @app.api_route("/media/proxy/{path:path}", methods=["GET", "POST"])

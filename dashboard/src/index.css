@@ -3889,6 +3889,94 @@ progress.progress-ring--err {
   padding-inline: 0.45rem;
 }
 
+.media-hf-browser {
+  display: grid;
+  gap: 0.5rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--border);
+}
+
+.media-hf-browser__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.media-hf-browser__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.media-hf-browser__bar input[type="search"] {
+  flex: 1 1 220px;
+  min-inline-size: 0;
+}
+
+.media-hf-results {
+  display: grid;
+  gap: 0.35rem;
+  max-block-size: 280px;
+  overflow-y: auto;
+}
+
+.media-hf-repo {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.media-hf-repo__row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.65rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.media-hf-repo__files {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.5rem 0.65rem 0.65rem;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.media-hf-file-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  min-inline-size: 0;
+}
+
+.media-hf-file-row__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-inline-size: 0;
+  overflow: hidden;
+}
+
+.media-hf-file-row__name code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.74rem;
+}
+
 .media-form__foot {
   display: flex;
   flex-wrap: wrap;
