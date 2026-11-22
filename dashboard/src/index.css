@@ -3917,13 +3917,16 @@ progress.progress-ring--err {
 }
 
 .media-hf-results {
-  display: grid;
-  gap: 0.35rem;
-  max-block-size: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-block-size: 340px;
   overflow-y: auto;
+  padding-inline-end: 0.15rem;
 }
 
 .media-hf-repo {
+  flex-shrink: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-2);

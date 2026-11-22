@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.10.1] - 2026-11-22
+
+### Bug Fixes
+- **Media Studio HF Search Results Squishing:** Switched `.media-hf-results` from `display: grid` to `display: flex; flex-direction: column` with `flex-shrink: 0` on `.media-hf-repo` so repo rows keep their full height and scroll cleanly inside the results container instead of compressing into 15px strips.
+
 ## [0.10.0] - 2026-11-22
 
 ### Media Studio: Multi-File DiT Bundles, Native Video Gen & HF Model Browser
