@@ -329,7 +329,9 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
   const [inspectedArtifact, setInspectedArtifact] = useState<InspectedArtifact | null>(null);
   const [lastArtifact, setLastArtifact] = useState<InspectedArtifact | null>(null);
   const [paneWidth, setPaneWidth] = useState<number>(470);
+  const [isResizingPane, setIsResizingPane] = useState(false);
 
+  const layoutRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const openArtifactInPane = (art: InspectedArtifact) => {
@@ -340,21 +342,51 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
     }
   };
 
+  const clampPaneWidth = (rawW: number) => {
+    const rect = layoutRef.current?.getBoundingClientRect();
+    const totalWidth = rect ? rect.width : window.innerWidth;
+    const sidebarW = sidebarCollapsed ? 0 : 236;
+    const minChatW = 340;
+    const maxW = Math.max(
+      300,
+      Math.min(Math.floor(totalWidth * 0.68), totalWidth - sidebarW - minChatW)
+    );
+    return Math.max(280, Math.min(maxW, Math.round(rawW)));
+  };
+
   const startPaneResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
     e.preventDefault();
-    const startX = e.clientX;
-    const startWidth = paneWidth;
+    const splitter = e.currentTarget;
+    const pointerId = e.pointerId;
+    try {
+      splitter.setPointerCapture(pointerId);
+    } catch {
+      // Synthetic pointer events in tests may not have an active pointerId
+    }
+    setIsResizingPane(true);
+
     const onMove = (ev: PointerEvent) => {
-      const delta = startX - ev.clientX;
-      const maxW = Math.floor(window.innerWidth * 0.62);
-      setPaneWidth(Math.max(320, Math.min(maxW, startWidth + delta)));
+      const rect = layoutRef.current?.getBoundingClientRect();
+      const rightEdge = rect ? rect.right : window.innerWidth;
+      setPaneWidth(clampPaneWidth(rightEdge - ev.clientX));
     };
-    const onUp = () => {
+    const onEnd = () => {
+      setIsResizingPane(false);
+      try {
+        if (splitter.hasPointerCapture(pointerId)) {
+          splitter.releasePointerCapture(pointerId);
+        }
+      } catch {
+        // ignore
+      }
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
     };
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
   };
 
   const markdownComponents = useMemo<Components>(
@@ -1500,9 +1532,10 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
 
   return (
     <div
+      ref={layoutRef}
       className={`chat-layout ${sidebarCollapsed ? "chat-layout--sidebar-collapsed" : ""} ${
         inspectedArtifact ? "chat-layout--with-artifact" : ""
-      }`}
+      } ${isResizingPane ? "chat-layout--resizing" : ""}`}
       style={
         inspectedArtifact
           ? ({ "--artifact-pane-width": `${paneWidth}px` } as React.CSSProperties)
@@ -2464,9 +2497,23 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           <div
             className="chat-splitter"
             role="separator"
+            tabIndex={0}
             aria-orientation="vertical"
             aria-label="Resize artifact inspector pane"
+            aria-valuemin={280}
+            aria-valuenow={paneWidth}
+            title="Drag to resize • Double-click to reset width"
             onPointerDown={startPaneResize}
+            onDoubleClick={() => setPaneWidth(470)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowLeft") {
+                e.preventDefault();
+                setPaneWidth((w) => clampPaneWidth(w + 24));
+              } else if (e.key === "ArrowRight") {
+                e.preventDefault();
+                setPaneWidth((w) => clampPaneWidth(w - 24));
+              }
+            }}
           />
           <ArtifactSplitPane
             artifact={inspectedArtifact}

@@ -1974,11 +1974,20 @@ dialog h2 {
 }
 
 .chat-layout--with-artifact {
-  grid-template-columns: 236px minmax(0, 1fr) 5px minmax(320px, var(--artifact-pane-width));
+  grid-template-columns: 236px minmax(0, 1fr) 6px var(--artifact-pane-width);
 }
 
 .chat-layout--sidebar-collapsed.chat-layout--with-artifact {
-  grid-template-columns: 0px minmax(0, 1fr) 5px minmax(320px, var(--artifact-pane-width));
+  grid-template-columns: 0px minmax(0, 1fr) 6px var(--artifact-pane-width);
+}
+
+.chat-layout--resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.chat-layout--resizing iframe {
+  pointer-events: none;
 }
 
 @media (max-width: 900px) {
@@ -2178,6 +2187,7 @@ dialog h2 {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-block-size: 0;
+  min-inline-size: 0;
   overflow: hidden;
 }
 
