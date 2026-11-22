@@ -479,6 +479,7 @@ async def test_collect_all_gpus_skips_vulkaninfo_when_nvidia_already_named(monke
         return []
 
     monkeypatch.setattr(gp.sys, "platform", "linux")
+    monkeypatch.setattr(gp.platform, "system", lambda: "Linux")
     monkeypatch.setattr(gp, "_collect_nvidia_async", _fake_nv)
     monkeypatch.setattr(gp, "_collect_rocm_async", _fake_empty)
     monkeypatch.setattr(gp, "_collect_intel_xpu_async", _fake_empty)

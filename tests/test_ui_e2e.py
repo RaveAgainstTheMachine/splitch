@@ -159,33 +159,54 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
             await asyncio.sleep(0.02)
 
         chrome_profile = tmp_path / "chrome"
+        chrome_log = tmp_path / "chrome.err.log"
+        chrome_log_fh = chrome_log.open("wb")
         chrome = await asyncio.create_subprocess_exec(
             str(CHROMIUM_BIN),
             "--headless=new",
             "--no-sandbox",
             "--disable-gpu",
             "--disable-dev-shm-usage",
+            "--no-first-run",
+            "--disable-extensions",
+            "--remote-allow-origins=*",
             f"--remote-debugging-port={cdp_port}",
             f"--user-data-dir={chrome_profile}",
             "--window-size=1280,900",
             "about:blank",
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=chrome_log_fh,
         )
 
         try:
             ws_url = ""
-            for _ in range(50):
+            cdp_deadline = time.monotonic() + 20.0
+            while time.monotonic() < cdp_deadline:
+                if chrome.returncode is not None:
+                    break
                 try:
                     r = await client.get(f"http://127.0.0.1:{cdp_port}/json")
-                    targets = r.json()
-                    page = next((t for t in targets if t.get("type") == "page"), None)
-                    if page and page.get("webSocketDebuggerUrl"):
-                        ws_url = str(page["webSocketDebuggerUrl"])
-                        break
+                    if r.status_code == 200:
+                        targets = r.json()
+                        page = next((t for t in targets if t.get("type") == "page"), None)
+                        if page and page.get("webSocketDebuggerUrl"):
+                            ws_url = str(page["webSocketDebuggerUrl"])
+                            break
+                        # If CDP is up but no page tab exists yet, try opening about:blank
+                        r_new = await client.put(f"http://127.0.0.1:{cdp_port}/json/new?about:blank")
+                        if r_new.status_code == 200:
+                            created = r_new.json()
+                            if isinstance(created, dict) and created.get("webSocketDebuggerUrl"):
+                                ws_url = str(created["webSocketDebuggerUrl"])
+                                break
                 except (httpx.HTTPError, ValueError):
-                    await asyncio.sleep(0.15)
-            assert ws_url, "Chromium CDP failed to start"
+                    pass
+                await asyncio.sleep(0.2)
+            if not ws_url:
+                err_tail = chrome_log.read_text(encoding="utf-8", errors="replace")[-600:]
+                raise AssertionError(
+                    f"Chromium CDP failed to start (rc={chrome.returncode}): {err_tail}"
+                )
 
             async with websockets.connect(ws_url, max_size=16 * 1024 * 1024) as ws:
                 msg_id = 0
@@ -417,5 +438,6 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
                 await asyncio.wait_for(chrome.wait(), timeout=3.0)
             except TimeoutError:
                 chrome.kill()
+            chrome_log_fh.close()
             server.should_exit = True
             await asyncio.gather(srv_task, return_exceptions=True)
