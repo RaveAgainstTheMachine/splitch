@@ -276,6 +276,9 @@ export function AppearancePanel() {
         <a href="https://huggingface.co" target="_blank" rel="noreferrer">
           Hugging Face
         </a>
+        <div style={{ marginTop: "0.3rem" }}>
+          UI improvements contributed by <strong>𝔍𝔞𝔠𝔨𝔞𝔩𝔬𝔭𝔢 𝔐𝔬𝔬𝔫</strong> (Jackalope Moon)
+        </div>
       </div>
     </div>
   );

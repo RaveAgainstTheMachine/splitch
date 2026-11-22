@@ -427,7 +427,9 @@ Contributions are welcome! Read [CONTRIBUTING.md](CONTRIBUTING.md) for architect
 
 ## Acknowledgments & Upstream Projects
 
-Splitch builds upon and integrates with the open-source local AI ecosystem:
+- **𝔍𝔞𝔠𝔨𝔞𝔩𝔬𝔭𝔢 𝔐𝔬𝔬𝔫 (Jackalope Moon)** — UI/UX architecture and 3-column IDE layout improvements.
+
+Splitch also builds upon and integrates with the open-source local AI ecosystem:
 
 - **[`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp)** (Georgi Gerganov & contributors, MIT) — high-performance C/C++ GGUF inference engine and prebuilt release binaries managed by `splitch engine`.
 - **[`leejet/stable-diffusion.cpp`](https://github.com/leejet/stable-diffusion.cpp)** (MIT) — lightweight C/C++ GGUF diffusion engine (`sd-server`) managed by `splitch engine install sd.cpp`.

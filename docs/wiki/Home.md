@@ -99,7 +99,9 @@ flowchart TB
 
 ## Acknowledgments & Upstream Credits
 
-Splitch thanks the maintainers and contributors of the open-source projects it integrates with:
+- **𝔍𝔞𝔠𝔨𝔞𝔩𝔬𝔭𝔢 𝔐𝔬𝔬𝔫 (Jackalope Moon)** — UI/UX architecture and 3-column IDE layout improvements.
+
+Splitch also thanks the maintainers and contributors of the open-source projects it integrates with:
 
 - **[`ggml-org/llama.cpp`](https://github.com/ggml-org/llama.cpp)** — GGUF inference engine and prebuilt binary releases.
 - **[`leejet/stable-diffusion.cpp`](https://github.com/leejet/stable-diffusion.cpp)** — lightweight C/C++ GGUF/safetensors image & video diffusion engine (`sd-server`) managed by `splitch engine install sd.cpp` and Media Studio.
