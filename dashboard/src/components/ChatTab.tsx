@@ -1,50 +1,26 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Components } from "react-markdown";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
-  AlertTriangle,
-  ArrowDown,
-  Brain,
-  Check,
-  Copy,
   Cpu,
   Download,
   Folder,
-  Globe,
-  ImagePlus,
-  Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
-  Pencil,
-  RotateCcw,
-  ShieldAlert,
-  SlidersHorizontal,
-  Square,
-  Terminal,
-  Thermometer,
-  User,
-  X,
   Zap
 } from "lucide-react";
-import {
-  ArtifactSplitPane,
-  inferArtifactTitle,
-  type InspectedArtifact,
-  isRunnableArtifact
-} from "./ArtifactPreview";
+import { ArtifactSplitPane, type InspectedArtifact } from "./ArtifactPreview";
 import type { ConfirmState } from "./ConfirmDialog";
 import { classifyClientMcpEgress } from "./McpTab";
 import { useDialogLightDismiss } from "./ModelsTab";
-import { SplitchLogo } from "./SplitchLogo";
-import { CodeBlock, DiffViewer } from "./chat/ChatCodeBlocks";
+import { CodeBlock } from "./chat/ChatCodeBlocks";
+import { ChatComposer } from "./chat/ChatComposer";
 import { ContextMemoryDialog, WorkspaceBrowserDialog } from "./chat/ChatDialogs";
+import { ChatMessageList } from "./chat/ChatMessageList";
 import { ChatSidebar } from "./chat/ChatSidebar";
 import {
   DEFAULT_DRAFT,
   type DraftChatConfig,
-  fmtTokenCompact,
   parseSseChunk,
   readFileAsDataUrl
 } from "./chat/chatHelpers";
@@ -1105,7 +1081,8 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
               tool_call_id: String(data.tool_call_id ?? ""),
               name: String(data.name ?? ""),
               arguments: (data.arguments as Record<string, unknown>) ?? {},
-              exec_node: String(data.exec_node ?? "")
+              exec_node: String(data.exec_node ?? ""),
+              sandbox: (data.sandbox as string | null) ?? null
             };
             setPendingApprovals((prev) => ({ ...prev, [appr.tool_call_id]: appr }));
           } else if (event === "tool_result") {
@@ -1495,554 +1472,60 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           </div>
         </header>
 
-        <div
-          key={activeId ?? "empty"}
-          ref={threadRef}
-          tabIndex={-1}
-          className="chat-thread"
-          aria-live="polite"
-          onScroll={handleThreadScroll}
-        >
-          {visibleMessages.length === 0 ? (
-            <div className="chat-empty">
-              <SplitchLogo size={44} />
-            </div>
-          ) : (
-            visibleMessages.map((msg, idx) => {
-              const isLatest = idx === visibleMessages.length - 1;
-              const isAssistant = msg.role === "assistant";
-              const watermark = activeConv?.compacted_through_ts ?? 0;
-              const isCompacted = watermark > 0 && msg.created_at <= watermark;
-              const nextMsg = visibleMessages[idx + 1];
-              const showCompactedDivider =
-                Boolean(activeConv?.compacted_summary) &&
-                isCompacted &&
-                (!nextMsg || nextMsg.created_at > watermark);
+        <ChatMessageList
+          activeId={activeId}
+          activeConv={activeConv}
+          visibleMessages={visibleMessages}
+          messages={messages}
+          nodes={snapshot?.nodes ?? []}
+          streaming={streaming}
+          copiedMsgId={copiedMsgId}
+          toolResultsByCallId={toolResultsByCallId}
+          pendingApprovals={pendingApprovals}
+          inspectedArtifact={inspectedArtifact}
+          markdownComponents={markdownComponents}
+          threadRef={threadRef}
+          latestMsgRef={latestMsgRef}
+          bottomSentinelRef={bottomSentinelRef}
+          handleThreadScroll={handleThreadScroll}
+          jumpToBottom={jumpToBottom}
+          openArtifactInPane={openArtifactInPane}
+          resolveApproval={resolveApproval}
+          editAndBranch={editAndBranch}
+          copyMessage={copyMessage}
+          regenerateFromAssistant={regenerateFromAssistant}
+          clearCompaction={clearCompaction}
+        />
 
-              const metaParts: string[] = [];
-              if (isAssistant) {
-                if (msg.meta.node) {
-                  const nObj = (snapshot?.nodes ?? []).find((n) => n.node_id === msg.meta.node);
-                  metaParts.push(nObj?.display_name ?? msg.meta.node);
-                }
-                if (msg.meta.ttft_ms != null) metaParts.push(`${msg.meta.ttft_ms}ms TTFT`);
-                if (msg.meta.tokens_per_sec != null) metaParts.push(`${msg.meta.tokens_per_sec} t/s`);
-                if (msg.meta.model) metaParts.push(msg.meta.model);
-              }
-
-              return (
-                <div key={msg.id} className="chat-msg-slot">
-                  <article
-                    ref={isLatest ? latestMsgRef : null}
-                    className={`chat-msg chat-msg--${msg.role} ${
-                      isLatest ? "chat-msg--latest" : ""
-                    } ${isCompacted ? "chat-msg--compacted" : ""}`}
-                  >
-                    <div className="chat-msg__avatar" aria-hidden="true">
-                      {isAssistant ? (
-                        <SplitchLogo size={22} />
-                      ) : (
-                        <span className="chat-user-avatar">
-                          <User size={13} />
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="chat-msg__body">
-                      {msg.images && msg.images.length > 0 && (
-                        <div className="chat-msg__images">
-                          {msg.images.map((src, i) => (
-                            <img key={i} src={src} alt={`Attachment ${i + 1}`} />
-                          ))}
-                        </div>
-                      )}
-
-                      {isAssistant && msg.reasoning && (
-                        <details
-                          className="chat-disclosure chat-disclosure--pill"
-                          open={streaming && isLatest && !msg.content}
-                        >
-                          <summary>
-                            <Brain size={12} aria-hidden="true" />
-                            <span>Thinking ({msg.reasoning.length} chars)</span>
-                          </summary>
-                          <div className="chat-disclosure__body">
-                            <pre className="chat-reasoning">{msg.reasoning}</pre>
-                          </div>
-                        </details>
-                      )}
-
-                      {isAssistant && msg.tool_calls && msg.tool_calls.length > 0 && (
-                        <div className="chat-tools-stack">
-                          {msg.tool_calls.map((tc) => {
-                            const result = toolResultsByCallId[tc.id];
-                            const approval = pendingApprovals[tc.id];
-                            return (
-                              <div key={tc.id} className="chat-tool-card">
-                                {approval && (
-                                  <div className="approval-card" role="alert">
-                                    <div className="approval-card__head">
-                                      <ShieldAlert size={15} aria-hidden="true" />
-                                      <strong>
-                                        Approval Required: <code>{approval.name}</code> on{" "}
-                                        <span className="node-tag">{approval.exec_node}</span>
-                                      </strong>
-                                    </div>
-                                    <pre className="code-preview">
-                                      {JSON.stringify(approval.arguments, null, 2)}
-                                    </pre>
-                                    <div className="row-actions">
-                                      <button
-                                        type="button"
-                                        className="btn btn--sm btn--accent"
-                                        onClick={() => void resolveApproval(approval, true)}
-                                      >
-                                        <Check size={12} aria-hidden="true" /> Allow
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="btn btn--sm btn--danger"
-                                        onClick={() => void resolveApproval(approval, false)}
-                                      >
-                                        <X size={12} aria-hidden="true" /> Deny
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-
-                                <details
-                                  className="chat-disclosure"
-                                  open={Boolean(result?.meta?.diff)}
-                                >
-                                  <summary>
-                                    <Terminal size={13} aria-hidden="true" />
-                                    <span>
-                                      Tool: <code>{tc.function.name}</code>
-                                    </span>
-                                    {result ? (
-                                      <>
-                                        <span
-                                          className={`pill ${
-                                            result.meta.ok ? "pill--ok" : "pill--err"
-                                          }`}
-                                        >
-                                          {result.meta.ok ? "OK" : "ERR"}
-                                        </span>
-                                        {result.meta.sandbox && (
-                                          <span
-                                            className={`pill ${
-                                              result.meta.sandbox.startsWith("bwrap") ||
-                                              result.meta.sandbox.startsWith("seatbelt")
-                                                ? "pill--ok"
-                                                : "pill--warn"
-                                            }`}
-                                            title={`Command execution sandbox: ${result.meta.sandbox}`}
-                                          >
-                                            {result.meta.sandbox}
-                                          </span>
-                                        )}
-                                        {result.meta.verification?.checked && (
-                                          <span
-                                            className={`pill ${
-                                              result.meta.verification.ok
-                                                ? "pill--ok"
-                                                : "pill--warn"
-                                            }`}
-                                            title={result.meta.verification.output}
-                                          >
-                                            {result.meta.verification.ok ? "✓" : "✗"}{" "}
-                                            {result.meta.verification.checker}
-                                          </span>
-                                        )}
-                                      </>
-                                    ) : approval ? (
-                                      <span className="pill pill--warn">WAITING APPROVAL</span>
-                                    ) : (
-                                      <span className="pill">RUNNING…</span>
-                                    )}
-                                  </summary>
-                                  <div className="chat-disclosure__body">
-                                    <div className="muted">Arguments</div>
-                                    <pre className="code-preview">{tc.function.arguments}</pre>
-                                    {result?.meta?.diff && (
-                                      <>
-                                        <div className="muted">Unified Diff</div>
-                                        <DiffViewer diff={result.meta.diff} />
-                                      </>
-                                    )}
-                                    {result && (
-                                      <>
-                                        <div className="muted">Output</div>
-                                        <pre className="code-preview">{result.content}</pre>
-                                      </>
-                                    )}
-                                  </div>
-                                </details>
-
-                                {tc.function.name === "write_file" &&
-                                  (() => {
-                                    try {
-                                      const a = JSON.parse(tc.function.arguments || "{}") as {
-                                        path?: string;
-                                        content?: string;
-                                      };
-                                      const p = String(a.path || "");
-                                      const c = String(a.content || "");
-                                      const ext = p.split(".").pop()?.toLowerCase() || "";
-                                      if (c && isRunnableArtifact(ext, c)) {
-                                        const isInsp = inspectedArtifact?.code === c;
-                                        return (
-                                          <button
-                                            type="button"
-                                            className={`artifact-chip ${
-                                              isInsp ? "artifact-chip--active" : ""
-                                            }`}
-                                            onClick={() =>
-                                              openArtifactInPane({
-                                                id: `file-${p}`,
-                                                lang: ext || "html",
-                                                code: c,
-                                                label: p || inferArtifactTitle(ext || "html", c)
-                                              })
-                                            }
-                                          >
-                                            <span className="artifact-chip__badge">
-                                              {(ext || "HTML").toUpperCase()}
-                                            </span>
-                                            <strong className="artifact-chip__name">
-                                              {p || "artifact.html"}
-                                            </strong>
-                                            <span className="artifact-chip__hint">
-                                              •{" "}
-                                              {isInsp
-                                                ? "Inspecting in split pane"
-                                                : "Click to inspect"}
-                                            </span>
-                                          </button>
-                                        );
-                                      }
-                                    } catch {
-                                      // ignore invalid json
-                                    }
-                                    return null;
-                                  })()}
-
-                                {result?.meta?.media_url && (
-                                  <div className="chat-media-embed">
-                                    {result.meta.media_kind === "video" ? (
-                                      <video
-                                        controls
-                                        playsInline
-                                        preload="metadata"
-                                        width={768}
-                                        height={512}
-                                        src={result.meta.media_url}
-                                        className="chat-media-embed__media"
-                                      />
-                                    ) : (
-                                      <a
-                                        href={result.meta.media_url}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                      >
-                                        <img
-                                          src={result.meta.media_url}
-                                          alt="Generated media"
-                                          className="chat-media-embed__media"
-                                        />
-                                      </a>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      {msg.content && (
-                        <div className="chat-prose">
-                          {isAssistant ? (
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={markdownComponents}
-                            >
-                              {msg.content}
-                            </ReactMarkdown>
-                          ) : (
-                            <p className="chat-user-text">{msg.content}</p>
-                          )}
-                        </div>
-                      )}
-
-                      <footer className="chat-msg__foot">
-                        {isAssistant && metaParts.length > 0 && (
-                          <span className="chat-msg__telemetry">{metaParts.join(" • ")}</span>
-                        )}
-                        {isAssistant && msg.meta.fallback_reason && (
-                          <span className="pill pill--warn">{msg.meta.fallback_reason}</span>
-                        )}
-                        {isAssistant && msg.meta.stopped && (
-                          <span className="pill pill--warn">STOPPED</span>
-                        )}
-
-                        <div className="chat-msg__actions">
-                          {msg.role === "user" && !streaming && !msg.id.startsWith("temp-") && (
-                            <button
-                              type="button"
-                              className="btn btn--sm btn--ghost"
-                              onClick={() => void editAndBranch(msg)}
-                              title="Edit and branch from this message"
-                            >
-                              <Pencil size={11} aria-hidden="true" />
-                              Edit
-                            </button>
-                          )}
-                          {isAssistant && !streaming && !msg.id.startsWith("stream-") && (
-                            <>
-                              <button
-                                type="button"
-                                className="btn btn--sm btn--ghost"
-                                onClick={() => void copyMessage(msg)}
-                                title="Copy response"
-                              >
-                                {copiedMsgId === msg.id ? (
-                                  <Check size={11} aria-hidden="true" />
-                                ) : (
-                                  <Copy size={11} aria-hidden="true" />
-                                )}
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn--sm btn--ghost"
-                                onClick={() => {
-                                  const realIdx = messages.findIndex((x) => x.id === msg.id);
-                                  if (realIdx >= 0) void regenerateFromAssistant(realIdx);
-                                }}
-                                title="Regenerate response"
-                              >
-                                <RotateCcw size={11} aria-hidden="true" />
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </footer>
-                    </div>
-                  </article>
-                {showCompactedDivider && activeConv?.compacted_summary && (
-                  <details className="chat-disclosure chat-compacted-divider">
-                    <summary>
-                      <Minimize2 size={13} aria-hidden="true" />
-                      <span>Messages above compacted into active context summary</span>
-                      <button
-                        type="button"
-                        className="btn btn--sm btn--ghost"
-                        style={{ marginInlineStart: "auto" }}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          void clearCompaction();
-                        }}
-                      >
-                        Clear Summary
-                      </button>
-                    </summary>
-                    <div className="chat-disclosure__body chat-prose">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {activeConv.compacted_summary}
-                      </ReactMarkdown>
-                    </div>
-                  </details>
-                )}
-              </div>
-              );
-            })
-          )}
-          <div ref={bottomSentinelRef} className="scroll-sentinel" aria-hidden="true" />
-          {visibleMessages.length > 0 && (
-            <button
-              type="button"
-              className="btn btn--sm jump-to-bottom"
-              onClick={jumpToBottom}
-              onBlur={(e) => {
-                if (!e.relatedTarget && threadRef.current) {
-                  threadRef.current.focus({ preventScroll: true });
-                }
-              }}
-              aria-label="Scroll to latest message"
-            >
-              <ArrowDown size={13} aria-hidden="true" />
-              Latest
-            </button>
-          )}
-        </div>
-
-        <div className="chat-composer-shell">
-          <form
-            ref={formRef}
-            className={`chat-composer ${dragActive ? "chat-composer--drag" : ""}`}
-            onSubmit={handleSubmit}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragActive(true);
-            }}
-            onDragLeave={() => setDragActive(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragActive(false);
-              if (e.dataTransfer.files.length > 0) {
-                void handleFiles(e.dataTransfer.files);
-              }
-            }}
-          >
-            {attachedImages.length > 0 && (
-              <div className="chat-attachments">
-                {attachedImages.map((src, i) => (
-                  <div key={i} className="chat-attachment">
-                    <img src={src} alt={`Upload ${i + 1}`} />
-                    <button
-                      type="button"
-                      className="btn btn--sm btn--ghost"
-                      aria-label="Remove attachment"
-                      onClick={() =>
-                        setAttachedImages((prev) => prev.filter((_, idx) => idx !== i))
-                      }
-                    >
-                      <X size={12} aria-hidden="true" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <label htmlFor={composerId} className="visually-hidden">
-              Message Splitch
-            </label>
-            <textarea
-              ref={textareaRef}
-              id={composerId}
-              className="chat-composer__input"
-              value={composerText}
-              onChange={(e) => setComposerText(e.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              onPaste={handlePaste}
-              placeholder="Message Splitch…"
-              disabled={streaming}
-            />
-
-            <div className="chat-composer__bar">
-              <div className="row-actions">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  hidden
-                  onChange={(e) => {
-                    if (e.target.files) void handleFiles(e.target.files);
-                    e.target.value = "";
-                  }}
-                />
-                <button
-                  type="button"
-                  className="btn btn--sm composer-chip"
-                  disabled={streaming}
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Attach image for vision models"
-                >
-                  <ImagePlus size={13} aria-hidden="true" />
-                  Image
-                </button>
-
-                <button
-                  type="button"
-                  className={`btn btn--sm composer-chip ${
-                    effectiveConfig.web_search_enabled ? "composer-chip--active" : ""
-                  }`}
-                  aria-pressed={effectiveConfig.web_search_enabled}
-                  disabled={streaming}
-                  onClick={() =>
-                    updateConfig({ web_search_enabled: !effectiveConfig.web_search_enabled })
-                  }
-                  title="Enable web_search and web_fetch tools for live web lookups"
-                >
-                  <Globe size={13} aria-hidden="true" />
-                  Web Search
-                </button>
-
-                <button
-                  type="button"
-                  className="btn btn--sm composer-chip"
-                  disabled={streaming}
-                  onClick={openContextDialog}
-                  title="Configure System Prompt, Skills, MCP Servers & Context Compaction"
-                >
-                  <SlidersHorizontal size={13} aria-hidden="true" />
-                  Context
-                  {effectiveSkillIds.length + effectiveMcpIds.length > 0 && (
-                    <span>({effectiveSkillIds.length + effectiveMcpIds.length})</span>
-                  )}
-                </button>
-
-                {activeExternalMcps.length > 0 && (
-                  <span
-                    className="pill pill--warn"
-                    title={`External MCP active (${activeExternalMcps.map((m) => m.name).join(", ")}) — tool calls send data outside your local network and pause for approval`}
-                  >
-                    <ShieldAlert size={11} aria-hidden="true" /> Ext MCP ({activeExternalMcps.length})
-                  </span>
-                )}
-
-                <label className="composer-chip chat-temp-field" title="Sampling temperature">
-                  <Thermometer size={12} aria-hidden="true" className="muted" />
-                  <span>Temp</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={2}
-                    step={0.1}
-                    value={temperature}
-                    onChange={(e) => setTemperature(e.target.value)}
-                    placeholder="auto"
-                  />
-                </label>
-
-                {snapshot?.control.gaming_mode && (
-                  <span className="pill pill--warn">
-                    <AlertTriangle size={11} aria-hidden="true" /> Gaming Yield
-                  </span>
-                )}
-              </div>
-
-              <div className="row-actions">
-                {compactNotice && <span className="pill pill--ok">{compactNotice}</span>}
-                <button
-                  type="button"
-                  className="composer-tokens"
-                  onClick={openContextDialog}
-                  title={`Context window: ${contextStats.used.toLocaleString()} / ${contextStats.max.toLocaleString()} tokens (${
-                    effectiveConfig.auto_compact ? "Auto-Compact ON" : "Auto-Compact OFF"
-                  }) — click to configure or compact`}
-                >
-                  {fmtTokenCompact(contextStats.used)} / {fmtTokenCompact(contextStats.max)}
-                </button>
-                {streaming ? (
-                  <button type="button" className="btn btn--danger" onClick={stopGeneration}>
-                    <Square size={13} aria-hidden="true" />
-                    Stop
-                  </button>
-                ) : (
-                  <button
-                    type="submit"
-                    className="btn btn--accent chat-send-btn"
-                    disabled={!composerText.trim() && attachedImages.length === 0}
-                  >
-                    Send
-                  </button>
-                )}
-              </div>
-            </div>
-          </form>
-        </div>
+        <ChatComposer
+          formRef={formRef}
+          textareaRef={textareaRef}
+          fileInputRef={fileInputRef}
+          composerId={composerId}
+          dragActive={dragActive}
+          setDragActive={setDragActive}
+          attachedImages={attachedImages}
+          setAttachedImages={setAttachedImages}
+          composerText={composerText}
+          setComposerText={setComposerText}
+          streaming={streaming}
+          effectiveConfig={effectiveConfig}
+          updateConfig={updateConfig}
+          effectiveSkillCount={effectiveSkillIds.length}
+          effectiveMcpCount={effectiveMcpIds.length}
+          activeExternalMcps={activeExternalMcps}
+          temperature={temperature}
+          setTemperature={setTemperature}
+          gamingMode={Boolean(snapshot?.control.gaming_mode)}
+          compactNotice={compactNotice}
+          contextStats={contextStats}
+          handleSubmit={handleSubmit}
+          handleFiles={handleFiles}
+          handleComposerKeyDown={handleComposerKeyDown}
+          handlePaste={handlePaste}
+          openContextDialog={openContextDialog}
+          stopGeneration={stopGeneration}
+        />
       </section>
 
       {inspectedArtifact && (

@@ -40,6 +40,7 @@ from backend.agent.tools import (
     MUTATING_WORKSPACE_TOOLS as _MUTATING_WORKSPACE_TOOLS,
 )
 from backend.agent.tools import (
+    detect_effective_sandbox,
     exec_fs_tool,
     list_workspace_dirs,
     resolve_workspace_path,
@@ -126,7 +127,7 @@ ALLOW_UNAUTH_TOOLS = os.getenv("SPLITCH_ALLOW_UNAUTH_TOOLS", "0").strip().lower(
     "true",
     "yes",
 )
-CMD_SANDBOX = os.getenv("SPLITCH_CMD_SANDBOX", "auto").strip().lower()
+CMD_SANDBOX = os.getenv("SPLITCH_CMD_SANDBOX", "required").strip().lower()
 CMD_SANDBOX_ALLOW_NET = os.getenv("SPLITCH_CMD_SANDBOX_ALLOW_NET", "0").strip().lower() in (
     "1",
     "true",
@@ -419,6 +420,14 @@ class AgentState:
             self.client
         )
 
+        effective_sandbox = (
+            await asyncio.to_thread(
+                detect_effective_sandbox, CMD_SANDBOX, allow_net=CMD_SANDBOX_ALLOW_NET
+            )
+            if ENABLE_TOOLS
+            else ""
+        )
+
         self.snapshot = NodeTelemetry(
             node_id=NODE_ID,
             role=effective_role,
@@ -455,6 +464,7 @@ class AgentState:
             context_length=context_length,
             tools_enabled=ENABLE_TOOLS,
             workspace_root=WORKSPACE_ROOT if ENABLE_TOOLS else "",
+            cmd_sandbox=effective_sandbox,
             models=models,
         )
 

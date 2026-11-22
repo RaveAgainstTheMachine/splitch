@@ -291,6 +291,36 @@ verify_sha256() {
   ok "SHA-256 verified: $_label"
 }
 
+pinned_uv_sha256() {
+  # Verified upstream SHA-256 digests pinned in-script for uv 0.13.5 (independent of download origin)
+  if [ "$SPLITCH_UV_VERSION" = "0.13.5" ]; then
+    case "$1" in
+      uv-x86_64-unknown-linux-gnu.tar.gz)  echo "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f" ;;
+      uv-aarch64-unknown-linux-gnu.tar.gz) echo "4bb69cf95ed13f23713bb7bc09f241896ea0c75b7c557e615a20604b82f9c403" ;;
+      uv-x86_64-apple-darwin.tar.gz)       echo "b0f52b0e3945b4107d89024ea38e625683011fbfc05a0d98f9fa2d6dcee28c66" ;;
+      uv-aarch64-apple-darwin.tar.gz)      echo "743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73" ;;
+      *) echo "" ;;
+    esac
+  else
+    echo ""
+  fi
+}
+
+pinned_node_sha256() {
+  # Verified upstream SHA-256 digests pinned in-script for Node.js v22.14.0
+  if [ "$SPLITCH_NODE_VERSION" = "22.14.0" ]; then
+    case "$1" in
+      node-v22.14.0-linux-x64.tar.xz)   echo "69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec" ;;
+      node-v22.14.0-linux-arm64.tar.xz) echo "08bfbf538bad0e8cbb0269f0173cca28d705874a67a22f60b57d99dc99e30050" ;;
+      node-v22.14.0-darwin-x64.tar.gz)  echo "6698587713ab565a94a360e091df9f6d91c8fadda6d00f0cf6526e9b40bed250" ;;
+      node-v22.14.0-darwin-arm64.tar.gz) echo "e9404633bc02a5162c5c573b1e2490f5fb44648345d64a958b17e325729a5e42" ;;
+      *) echo "" ;;
+    esac
+  else
+    echo ""
+  fi
+}
+
 install_pinned_uv() {
   command -v curl >/dev/null 2>&1 || die "curl is required to install uv"
   case "${OS}/${ARCH}" in
@@ -303,7 +333,10 @@ install_pinned_uv() {
   _uv_archive="uv-${_uv_triple}.tar.gz"
   _uv_base="https://github.com/astral-sh/uv/releases/download/${SPLITCH_UV_VERSION}"
   _uv_tmp="$(mktemp -t splitch-uv.XXXXXX)"
-  _uv_sha="$(curl -fsSL "${_uv_base}/${_uv_archive}.sha256" | awk '{print $1}' | head -n 1)"
+  _uv_sha="$(pinned_uv_sha256 "$_uv_archive")"
+  if [ -z "$_uv_sha" ]; then
+    _uv_sha="$(curl -fsSL "${_uv_base}/${_uv_archive}.sha256" | awk '{print $1}' | head -n 1)"
+  fi
   curl -fsSL "${_uv_base}/${_uv_archive}" -o "$_uv_tmp"
   verify_sha256 "$_uv_tmp" "$_uv_sha" "$_uv_archive"
   _uv_dir="$(mktemp -d -t splitch-uv-extract.XXXXXX)"
@@ -419,8 +452,11 @@ ensure_node() {
   NODE_BASENAME="node-v${SPLITCH_NODE_VERSION}-${OS}-${ARCH}"
   NODE_FILE="${NODE_BASENAME}.${NODE_EXT}"
   NODE_URL="https://nodejs.org/dist/v${SPLITCH_NODE_VERSION}/${NODE_FILE}"
-  NODE_SHA_URL="https://nodejs.org/dist/v${SPLITCH_NODE_VERSION}/SHASUMS256.txt"
-  NODE_EXPECTED_SHA="$(curl -fsSL "$NODE_SHA_URL" | awk -v f="$NODE_FILE" '$2 == f {print $1}' | head -n 1)"
+  NODE_EXPECTED_SHA="$(pinned_node_sha256 "$NODE_FILE")"
+  if [ -z "$NODE_EXPECTED_SHA" ]; then
+    NODE_SHA_URL="https://nodejs.org/dist/v${SPLITCH_NODE_VERSION}/SHASUMS256.txt"
+    NODE_EXPECTED_SHA="$(curl -fsSL "$NODE_SHA_URL" | awk -v f="$NODE_FILE" '$2 == f {print $1}' | head -n 1)"
+  fi
   TMP_TAR="$(mktemp -t splitch-node.XXXXXX)"
   if [ "$IS_TTY" = "1" ]; then
     curl -fSL --progress-bar "$NODE_URL" -o "$TMP_TAR"

@@ -82,6 +82,7 @@ class NodeTelemetry(BaseModel):
     context_length: int | None = None
     tools_enabled: bool = False
     workspace_root: str = ""
+    cmd_sandbox: str = ""
     models: list[LoadedModel] = Field(default_factory=list)
 
 

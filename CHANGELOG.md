@@ -3,6 +3,18 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.8.0] - 2026-11-22
+
+### Security Hardening & Supply Chain
+- **Fail-Closed OS Command Sandbox (`SPLITCH_CMD_SANDBOX=required` Default):** Changed the default `run_command` sandbox mode from `auto` to `required` so missing/broken `bwrap` or macOS `sandbox-exec` refuses execution rather than silently falling back to an unsandboxed host shell (`SPLITCH_CMD_SANDBOX=none` or `auto` remains available as an explicit opt-out).
+- **Approval Card Sandbox Visibility:** Exposed `cmd_sandbox` on `NodeTelemetry` and `sandbox` on `approval_required` SSE events (`PendingApproval`), displaying a prominent `Sandbox: bwrap/seatbelt (no net)` or `UNSANDBOXED HOST SHELL` badge inside the HITL approval card before the user clicks Allow.
+- **Read-Isolation Hardening (`bwrap` & Seatbelt):** Overlaid `--tmpfs $HOME`, `--tmpfs /root`, and `--tmpfs $SPLITCH_DATA_ROOT` before binding `<ws_root>` in Linux `bwrap` (plus post-workspace masks on `~/.ssh`, `~/.gnupg`, `~/.aws`, browser profiles, and vault/key dirs when `WORKSPACE_ROOT == $HOME`), and added explicit `(deny file-read* ...)` rules for sensitive `$HOME`/Keychain/data paths in macOS Seatbelt.
+- **In-Script Pinned SHA-256 Tables:** Hardcoded verified upstream SHA-256 digests for `uv 0.13.5` and `Node.js 22.14.0` across Linux/macOS/Windows `x64`/`arm64` inside `install.sh` and `install.ps1` (independent of artifact download origin).
+- **Agent Bind-Check Order & Expanded Security Tests:** Moved `_enforce_auth_on_exposed_bind` ahead of `--join` in `splitch agent` so unauthenticated non-loopback binds exit `2` before registering, and added dual-path tests covering fail-closed `required`, `auto` fallback, `$HOME`/vault read blocking in `bwrap`, Seatbelt profiles, and CLI exit codes.
+
+### Frontend Modularity
+- **Further `ChatTab.tsx` Split:** Extracted `dashboard/src/components/chat/ChatMessageList.tsx` and `dashboard/src/components/chat/ChatComposer.tsx`, reducing `ChatTab.tsx` from 2,136 → ~1,580 lines (down 45% from 2,882).
+
 ## [0.7.0] - 2026-11-22
 
 ### Desktop, Tray & Theme Synchronization

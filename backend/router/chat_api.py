@@ -788,6 +788,27 @@ def build_chat_router(
                         approval_id = uuid.uuid4().hex[:10]
                         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
                         pending_approvals[approval_id] = fut
+                        target_sandbox: str | None = None
+                        target_node_label = conv.exec_node
+                        if not is_external_mcp:
+                            preview_node = cluster.nodes.get(conv.exec_node) if conv.exec_node else None
+                            if preview_node is None or not preview_node.online:
+                                preview_node = next(
+                                    (
+                                        n
+                                        for n in cluster.nodes.values()
+                                        if n.online and n.telemetry and n.telemetry.tools_enabled
+                                    ),
+                                    next((n for n in cluster.nodes.values() if n.online), None),
+                                )
+                            if preview_node is not None:
+                                target_node_label = preview_node.node_id
+                                if t_name == "run_command":
+                                    target_sandbox = (
+                                        (preview_node.telemetry.cmd_sandbox or "unknown")
+                                        if preview_node.telemetry
+                                        else "unknown"
+                                    )
                         yield _sse(
                             "approval_required",
                             {
@@ -798,8 +819,9 @@ def build_chat_router(
                                 "exec_node": (
                                     f"EXTERNAL MCP ({external_mcp_target})"
                                     if is_external_mcp
-                                    else conv.exec_node
+                                    else target_node_label
                                 ),
+                                "sandbox": target_sandbox,
                             },
                         )
                         try:

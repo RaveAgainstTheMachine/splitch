@@ -1,4 +1,4 @@
-# Splitch Universal Installer & Updater for Windows (PowerShell)
+﻿# Splitch Universal Installer & Updater for Windows (PowerShell)
 #
 # Install or update in one command:
 #   irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.ps1 | iex
@@ -179,14 +179,30 @@ function Assert-Sha256Match([string]$FilePath, [string]$ExpectedHash, [string]$L
     Write-Ok "SHA-256 verified: $Label"
 }
 
+# Verified upstream SHA-256 digests pinned in-script (independent of download origin)
+$PinnedUvSha256 = @{
+    "0.13.5:uv-x86_64-pc-windows-msvc.zip"  = "a38b8d1902b7cfbc76b423ba1bb456f623f42064cdc72628b6075b89afd1019a"
+    "0.13.5:uv-aarch64-pc-windows-msvc.zip" = "09f47edf90726084a70f9426f6e3ca4f46e9bf7cbf23b1716ec64d60b055fae3"
+}
+$PinnedNodeSha256 = @{
+    "22.14.0:node-v22.14.0-win-x64.zip"   = "55b639295920b219bb2acbcfa00f90393a2789095b7323f79475c9f34795f217"
+    "22.14.0:node-v22.14.0-win-arm64.zip" = "2d71f5f9b2fffa33baa108c07d74b0d24e0c3dd8f441d567772ae0e3dd4b1a22"
+}
+
 # 2. Bootstrap pinned uv with SHA-256 verification (no piped remote script)
 Show-StepBar 1 $TotalSteps "Checking uv runtime"
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     Write-Step "Downloading pinned uv v$UvVersion with SHA-256 verification..."
-    $UvArch = if ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "i686" }
+    $OsArch = try { [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch { "X64" }
+    $UvArch = if ($OsArch -eq "Arm64") { "aarch64" } elseif ([Environment]::Is64BitOperatingSystem) { "x86_64" } else { "i686" }
     $UvZipName = "uv-$UvArch-pc-windows-msvc.zip"
     $UvBase = "https://github.com/astral-sh/uv/releases/download/$UvVersion"
-    $UvExpected = ((Invoke-WebRequest -Uri "$UvBase/$UvZipName.sha256" -UseBasicParsing).Content.Trim() -split "\s+")[0]
+    $UvPinKey = "${UvVersion}:${UvZipName}"
+    $UvExpected = if ($PinnedUvSha256.ContainsKey($UvPinKey)) {
+        $PinnedUvSha256[$UvPinKey]
+    } else {
+        ((Invoke-WebRequest -Uri "$UvBase/$UvZipName.sha256" -UseBasicParsing).Content.Trim() -split "\s+")[0]
+    }
     $TmpUvZip = Join-Path $env:TEMP $UvZipName
     $TmpUvDir = Join-Path $env:TEMP "splitch-uv-extract"
     Download-WithProgress -Url "$UvBase/$UvZipName" -OutFile $TmpUvZip -Label $UvZipName
@@ -275,13 +291,19 @@ function Ensure-Node {
     $ManagedNode = Join-Path $DataRoot "node"
     $ManagedExe = Join-Path $ManagedNode "node.exe"
     if (-not (Test-Path $ManagedExe)) {
-        $Arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
+        $OsArch = try { [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() } catch { "X64" }
+        $Arch = if ($OsArch -eq "Arm64") { "arm64" } elseif ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" }
         $ZipName = "node-v$NodeVersion-win-$Arch"
         $ZipFile = "$ZipName.zip"
         $Url = "https://nodejs.org/dist/v$NodeVersion/$ZipFile"
-        $ShaText = (Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/SHASUMS256.txt" -UseBasicParsing).Content
-        $ShaLine = ($ShaText -split "`n" | Where-Object { $_ -match "\s+$([regex]::Escape($ZipFile))\s*$" } | Select-Object -First 1)
-        $ExpectedSha = if ($ShaLine) { ($ShaLine.Trim() -split "\s+")[0] } else { "" }
+        $NodePinKey = "${NodeVersion}:${ZipFile}"
+        $ExpectedSha = if ($PinnedNodeSha256.ContainsKey($NodePinKey)) {
+            $PinnedNodeSha256[$NodePinKey]
+        } else {
+            $ShaText = (Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/SHASUMS256.txt" -UseBasicParsing).Content
+            $ShaLine = ($ShaText -split "`n" | Where-Object { $_ -match "\s+$([regex]::Escape($ZipFile))\s*$" } | Select-Object -First 1)
+            if ($ShaLine) { ($ShaLine.Trim() -split "\s+")[0] } else { "" }
+        }
         $TmpZip = Join-Path $env:TEMP $ZipFile
         $TmpExtract = Join-Path $env:TEMP "$ZipName-extract"
         Download-WithProgress -Url $Url -OutFile $TmpZip -Label $ZipFile

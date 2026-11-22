@@ -71,6 +71,7 @@ export interface NodeTelemetry {
   context_length: number | null;
   tools_enabled: boolean;
   workspace_root: string;
+  cmd_sandbox?: string;
   models: LoadedModel[];
 }
 
@@ -455,6 +456,7 @@ export interface PendingApproval {
   name: string;
   arguments: Record<string, unknown>;
   exec_node: string;
+  sandbox?: string | null;
 }
 
 // ── Settings, Connect Clients & Node Provisioning ────────────────────────────

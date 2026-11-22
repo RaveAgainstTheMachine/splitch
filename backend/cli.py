@@ -290,6 +290,14 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         return 1
     agent_scheme = "https" if (ssl_cert and ssl_key) else "http"
 
+    if not getattr(args, "join_only", False) and not _enforce_auth_on_exposed_bind(
+        "splitch agent",
+        args.host,
+        require_agent_token=True,
+        allow_unauthenticated=bool(getattr(args, "allow_unauthenticated", False)),
+    ):
+        return 2
+
     if args.join:
         lan_ip = args.advertise_host or _guess_lan_ip()
         media_adv = (getattr(args, "media_url", None) or "").replace("127.0.0.1", lan_ip).replace("localhost", lan_ip)
@@ -336,13 +344,6 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         if getattr(args, "join_only", False):
             return 0
 
-    if not _enforce_auth_on_exposed_bind(
-        "splitch agent",
-        args.host,
-        require_agent_token=True,
-        allow_unauthenticated=bool(getattr(args, "allow_unauthenticated", False)),
-    ):
-        return 2
     uv_kwargs: dict = {}
     if ssl_cert and ssl_key:
         uv_kwargs["ssl_certfile"] = ssl_cert

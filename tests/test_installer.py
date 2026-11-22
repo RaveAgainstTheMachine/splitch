@@ -423,9 +423,13 @@ def test_install_sh_syntax_and_local_install_uninstall(tmp_path: Path) -> None:
     ps1_text = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
     sh_text = install_sh.read_text(encoding="utf-8")
     assert DEFAULT_REPO_URL in ps1_text
-    assert "verify_sha256" in sh_text and "SHASUMS256.txt" in sh_text
+    assert "verify_sha256" in sh_text and "pinned_uv_sha256" in sh_text and "pinned_node_sha256" in sh_text
+    assert "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f" in sh_text
+    assert "69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec" in sh_text
     assert "astral.sh/uv/install.sh | sh" not in sh_text
-    assert "Assert-Sha256Match" in ps1_text and "SHASUMS256.txt" in ps1_text
+    assert "Assert-Sha256Match" in ps1_text and "$PinnedUvSha256" in ps1_text and "$PinnedNodeSha256" in ps1_text
+    assert "a38b8d1902b7cfbc76b423ba1bb456f623f42064cdc72628b6075b89afd1019a" in ps1_text
+    assert "55b639295920b219bb2acbcfa00f90393a2789095b7323f79475c9f34795f217" in ps1_text
     assert "astral.sh/uv/install.ps1 | iex" not in ps1_text
     assert Path(meta["install_dir"]).resolve() == REPO_ROOT.resolve()
 

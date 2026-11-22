@@ -623,10 +623,22 @@ def test_run_command_process_group_kill_and_output_cap(tmp_path: Path, monkeypat
         except ProcessLookupError:
             pass
 
-    # 3. OS-level bwrap sandbox blocks writes to host root/etc and isolates /tmp from host
+    # 3. OS-level bwrap sandbox blocks host writes, isolates /tmp, and masks $HOME + SPLITCH_DATA_ROOT secrets
     if sys.platform.startswith("linux") and shutil.which("bwrap") and agent_tools._probe_bwrap_works():
+        fake_home = tmp_path / "fake-home"
+        ws_dir = tmp_path / "workspace"
+        data_dir = tmp_path / "splitch-data"
+        (fake_home / ".ssh").mkdir(parents=True)
+        (fake_home / ".ssh" / "id_ed25519").write_text("PRIVATE_SSH_SECRET\n", encoding="utf-8")
+        data_dir.mkdir(parents=True)
+        (data_dir / "secrets.enc").write_text("VAULT_CIPHER_SECRET\n", encoding="utf-8")
+        ws_dir.mkdir(parents=True)
         outside = tmp_path.parent / f"splitch-escape-{os.getpid()}.txt"
-        monkeypatch.setattr(agent_mod, "CMD_SANDBOX", "bwrap")
+
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+        monkeypatch.setenv("SPLITCH_DATA_ROOT", str(data_dir))
+        monkeypatch.setattr(agent_mod, "WORKSPACE_ROOT", str(ws_dir))
+        monkeypatch.setattr(agent_mod, "CMD_SANDBOX", "required")
         monkeypatch.setattr(agent_mod, "_CMD_TIMEOUT_S", 5.0)
         r_sb = tc.post(
             "/tools/execute",
@@ -637,6 +649,8 @@ def test_run_command_process_group_kill_and_output_cap(tmp_path: Path, monkeypat
                     "command": (
                         f"echo inside > ok.txt && "
                         f"(touch /etc/splitch-escape-test 2>/dev/null && echo RO_ESCAPED || echo BLOCKED_RO) && "
+                        f"(cat '{fake_home / '.ssh' / 'id_ed25519'}' 2>/dev/null && echo HOME_LEAKED || echo BLOCKED_HOME) && "
+                        f"(cat '{data_dir / 'secrets.enc'}' 2>/dev/null && echo DATA_LEAKED || echo BLOCKED_DATA) && "
                         f"touch '{outside}' 2>/dev/null || true"
                     ),
                 },
@@ -646,12 +660,87 @@ def test_run_command_process_group_kill_and_output_cap(tmp_path: Path, monkeypat
         sb_body = r_sb.json()
         assert sb_body["ok"] is True and sb_body["sandbox"] == "bwrap"
         assert "BLOCKED_RO" in sb_body["output"]
-        assert (tmp_path / "ok.txt").read_text(encoding="utf-8").strip() == "inside"
+        assert "BLOCKED_HOME" in sb_body["output"]
+        assert "BLOCKED_DATA" in sb_body["output"]
+        assert "PRIVATE_SSH_SECRET" not in sb_body["output"]
+        assert "VAULT_CIPHER_SECRET" not in sb_body["output"]
+        assert (ws_dir / "ok.txt").read_text(encoding="utf-8").strip() == "inside"
         assert not outside.exists()  # private ephemeral /tmp inside bwrap cannot touch host /tmp
 
 
+def test_command_sandbox_required_fail_closed_auto_fallback_and_seatbelt_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+    import shutil
+
+    from backend.agent import tools as agent_tools
+
+    # 1. Fail-closed when required sandbox is unavailable (covers CI / restricted containers / Windows)
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    monkeypatch.setattr(agent_tools, "_BWRAP_PROBE_CACHE", False)
+    monkeypatch.setattr(agent_tools, "_find_seatbelt_bin", lambda: None)
+
+    assert agent_tools.detect_effective_sandbox("required") == "unavailable"
+    assert agent_tools.detect_effective_sandbox("auto") == "host"
+    assert agent_tools.detect_effective_sandbox("none") == "host"
+
+    res_fail = asyncio.run(
+        agent_tools.run_sandboxed_shell_command(
+            "echo should_not_run",
+            tmp_path,
+            tmp_path,
+            sandbox_mode="required",
+        )
+    )
+    assert res_fail.ok is False
+    assert res_fail.sandbox == "error"
+    assert "SPLITCH_CMD_SANDBOX=none" in res_fail.output
+
+    # 2. Explicit `auto` falls back cleanly to host shell
+    res_auto = asyncio.run(
+        agent_tools.run_sandboxed_shell_command(
+            f'"{sys.executable}" -c "print(42)"',
+            tmp_path,
+            tmp_path,
+            sandbox_mode="auto",
+        )
+    )
+    assert res_auto.ok is True
+    assert res_auto.sandbox == "host"
+    assert "42" in res_auto.output
+
+    # 3. macOS Seatbelt profile restricts both file writes AND sensitive secret reads + outbound net
+    fake_home = tmp_path / "mac-home"
+    fake_data = tmp_path / "mac-data"
+    ws = fake_home / "project"
+    ws.mkdir(parents=True)
+    fake_data.mkdir(parents=True)
+    monkeypatch.setattr(agent_tools.sys, "platform", "darwin")
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(fake_data))
+    monkeypatch.setattr(agent_tools, "_find_seatbelt_bin", lambda: "/usr/bin/sandbox-exec")
+
+    argv, label = agent_tools.build_sandboxed_command(
+        "ls", ws, ws, mode="required", allow_net=False
+    )
+    assert label == "seatbelt"
+    assert argv is not None and argv[0] == "/usr/bin/sandbox-exec"
+    profile = argv[2]
+    assert "(deny file-write*)" in profile
+    assert "(deny network-outbound)" in profile
+    assert "(deny file-read*" in profile
+    assert ".ssh" in profile
+    assert "Library/Keychains" in profile
+    assert str(fake_data.resolve()) in profile
+
+
 def test_non_loopback_bind_requires_auth_unless_overridden(monkeypatch) -> None:
-    from backend.cli import _enforce_auth_on_exposed_bind
+    import argparse
+
+    import httpx
+
+    from backend.cli import _cmd_agent, _cmd_router, _enforce_auth_on_exposed_bind
 
     for var in (
         "SPLITCH_API_KEY",
@@ -669,6 +758,54 @@ def test_non_loopback_bind_requires_auth_unless_overridden(monkeypatch) -> None:
     # Non-loopback refused by default without auth
     assert _enforce_auth_on_exposed_bind("splitch router", "0.0.0.0", require_api_key=True) is False
     assert _enforce_auth_on_exposed_bind("splitch agent", "0.0.0.0", require_agent_token=True) is False
+
+    # CLI entrypoints refuse with exit code 2 BEFORE registering with --join or starting uvicorn
+    join_called = {"count": 0}
+
+    def _boom_post(*_a, **_kw):
+        join_called["count"] += 1
+        raise AssertionError("httpx.post must not run when non-loopback bind is refused")
+
+    monkeypatch.setattr(httpx, "post", _boom_post)
+    agent_args = argparse.Namespace(
+        id="n1",
+        name="Node 1",
+        role="gpu",
+        host="0.0.0.0",
+        port=8090,
+        engine_url="http://127.0.0.1:8081",
+        media_url="",
+        storage_path="",
+        workspace="",
+        enable_tools=False,
+        yield_on_gaming=False,
+        yield_gpus="",
+        join="http://192.168.1.10:8080",
+        join_token="tok",
+        join_only=False,
+        advertise_host="",
+        ssl_certfile=None,
+        ssl_keyfile=None,
+        letsencrypt_domain=None,
+        tls_self_signed=False,
+        allow_unauthenticated=False,
+    )
+    assert _cmd_agent(agent_args) == 2
+    assert join_called["count"] == 0
+
+    router_args = argparse.Namespace(
+        config=None,
+        host="0.0.0.0",
+        port=8080,
+        ssl_certfile=None,
+        ssl_keyfile=None,
+        letsencrypt_domain=None,
+        tls_self_signed=False,
+        no_proxy_headers=False,
+        forwarded_allow_ips=None,
+        allow_unauthenticated=False,
+    )
+    assert _cmd_router(router_args) == 2
 
     # Explicit override permits LAN bind
     assert (

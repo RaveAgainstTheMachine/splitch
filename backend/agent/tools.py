@@ -28,6 +28,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
+from backend.router.config import default_data_root
 from backend.shared.models import ToolExecRequest, ToolExecResponse, WorkspaceDirListing
 
 IGNORED_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "target"}
@@ -332,6 +333,33 @@ def list_workspace_dirs(workspace_root: str, subpath: str) -> WorkspaceDirListin
 
 # ── OS-Level Command Sandbox (`bwrap` on Linux, Seatbelt `sandbox-exec` on macOS) ──
 
+_SENSITIVE_HOME_DIRS: tuple[str, ...] = (
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".kube",
+    ".docker",
+    ".config/splitch",
+    ".config/gh",
+    ".config/gcloud",
+    ".config/chromium",
+    ".config/google-chrome",
+    ".config/BraveSoftware",
+    ".mozilla",
+    ".local/share/keyrings",
+    "Library/Keychains",
+    "Library/Cookies",
+    "Library/Application Support/Google/Chrome",
+    "Library/Application Support/Firefox",
+)
+
+_SENSITIVE_HOME_FILES: tuple[str, ...] = (
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".git-credentials",
+)
+
 
 def _probe_bwrap_works() -> bool:
     global _BWRAP_PROBE_CACHE
@@ -371,8 +399,107 @@ def _probe_bwrap_works() -> bool:
     return _BWRAP_PROBE_CACHE
 
 
+def _find_seatbelt_bin() -> str | None:
+    if sys.platform != "darwin":
+        return None
+    return shutil.which("sandbox-exec") or (
+        "/usr/bin/sandbox-exec" if Path("/usr/bin/sandbox-exec").is_file() else None
+    )
+
+
+def detect_effective_sandbox(mode: str = "required", *, allow_net: bool = False) -> str:
+    """
+    Report the active OS command sandbox label for `mode` without executing a command:
+    `bwrap`, `bwrap+net`, `seatbelt`, `seatbelt+net`, `host`, or `unavailable`.
+    """
+    cleaned = (mode or "required").strip().lower()
+    suffix = "+net" if allow_net else ""
+    if cleaned in ("none", "off", "host", "disabled"):
+        return "host"
+    if cleaned in ("bwrap", "required", "strict", "auto") and sys.platform.startswith("linux"):
+        if shutil.which("bwrap") and _probe_bwrap_works():
+            return f"bwrap{suffix}"
+        if cleaned in ("bwrap", "required", "strict"):
+            return "unavailable"
+    if cleaned in ("seatbelt", "required", "strict", "auto") and sys.platform == "darwin":
+        if _find_seatbelt_bin():
+            return f"seatbelt{suffix}"
+        if cleaned in ("seatbelt", "required", "strict"):
+            return "unavailable"
+    if cleaned in ("required", "strict", "bwrap", "seatbelt"):
+        return "unavailable"
+    return "host"
+
+
 def _seatbelt_escape(path_str: str) -> str:
     return path_str.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _append_bwrap_read_masks(argv: list[str], ws_root: Path) -> None:
+    """
+    Tighten read isolation inside Linux `bwrap`:
+      - If workspace is distinct from `$HOME`, overlay `--tmpfs $HOME` BEFORE binding `ws_root`
+        so the entire home directory outside `ws_root` is hidden (`~/.ssh`, browser profiles,
+        Splitch vault/keys, etc.), while preserving Python runtime prefixes if they live in `$HOME`.
+      - Mask `/root` and `SPLITCH_DATA_ROOT` whenever they do not contain `ws_root`.
+    """
+    ws_res = ws_root.resolve()
+    home_res = Path.home().resolve()
+    data_res = default_data_root().resolve()
+
+    if ws_res != home_res and home_res.is_dir():
+        argv.extend(["--tmpfs", str(home_res)])
+        # Preserve read-only Python runtime prefixes located under $HOME so venvs/uv work
+        seen_rt: set[Path] = set()
+        for raw_prefix in (sys.prefix, sys.base_prefix):
+            if not raw_prefix:
+                continue
+            p = Path(raw_prefix).resolve()
+            if (
+                p not in seen_rt
+                and p.is_dir()
+                and p != home_res
+                and p.is_relative_to(home_res)
+                and not p.is_relative_to(data_res)
+                and not p.is_relative_to(ws_res)
+            ):
+                seen_rt.add(p)
+                argv.extend(["--ro-bind", str(p), str(p)])
+
+    root_home = Path("/root")
+    if root_home != home_res and root_home != ws_res and not ws_res.is_relative_to(root_home) and root_home.is_dir():
+        argv.extend(["--tmpfs", "/root"])
+
+    if (
+        data_res.is_dir()
+        and data_res != ws_res
+        and not ws_res.is_relative_to(data_res)
+        and (ws_res == home_res or not data_res.is_relative_to(home_res))
+    ):
+        argv.extend(["--tmpfs", str(data_res)])
+
+
+def _append_bwrap_post_ws_masks(argv: list[str], ws_root: Path) -> None:
+    """
+    Even if a user runs with `WORKSPACE_ROOT == $HOME`, mask sensitive secret dirs/files
+    AFTER binding `ws_root` so `~/.ssh`, `~/.aws`, browser profiles, and Splitch vault/keys
+    remain unreadable.
+    """
+    ws_res = ws_root.resolve()
+    home_res = Path.home().resolve()
+    data_res = default_data_root().resolve()
+
+    if ws_res == home_res or home_res.is_relative_to(ws_res):
+        for rel in _SENSITIVE_HOME_DIRS:
+            target = home_res / rel
+            if target.is_dir():
+                argv.extend(["--tmpfs", str(target)])
+        for rel in _SENSITIVE_HOME_FILES:
+            target = home_res / rel
+            if target.is_file():
+                argv.extend(["--ro-bind", "/dev/null", str(target)])
+        if data_res.is_dir() and data_res != ws_res and data_res.is_relative_to(ws_res):
+            argv.extend(["--tmpfs", str(data_res)])
 
 
 def build_sandboxed_command(
@@ -380,21 +507,30 @@ def build_sandboxed_command(
     ws_root: Path,
     cwd: Path,
     *,
-    mode: str = "auto",
+    mode: str = "required",
     allow_net: bool = False,
 ) -> tuple[list[str] | None, str]:
     """
     Build an OS-sandboxed command argv for `run_command`.
     Returns `(argv, sandbox_label)` where `argv is None` signals fallback to host shell.
-    Raises `RuntimeError` if an explicit sandbox (`bwrap` / `seatbelt`) was requested but unavailable.
+    Modes:
+      - `required` / `strict` (default): fail closed if no OS sandbox (`bwrap` / `seatbelt`) works.
+      - `bwrap` / `seatbelt`: require that specific OS sandbox.
+      - `auto`: use OS sandbox when available, falling back to `"host"` if unavailable.
+      - `none` / `off` / `host` / `disabled`: explicitly run directly on the host shell.
     """
-    cleaned_mode = (mode or "auto").strip().lower()
+    cleaned_mode = (mode or "required").strip().lower()
+    suffix = "+net" if allow_net else ""
     if cleaned_mode in ("none", "off", "host", "disabled"):
         return None, "host"
 
-    if cleaned_mode == "bwrap" or (cleaned_mode == "auto" and sys.platform.startswith("linux")):
+    if cleaned_mode == "bwrap" or (
+        cleaned_mode in ("required", "strict", "auto") and sys.platform.startswith("linux")
+    ):
         bwrap = shutil.which("bwrap")
-        if bwrap and (cleaned_mode == "bwrap" or _probe_bwrap_works()):
+        if bwrap and _probe_bwrap_works():
+            ws_res = ws_root.resolve()
+            cwd_res = cwd.resolve()
             argv = [
                 bwrap,
                 "--ro-bind",
@@ -406,26 +542,41 @@ def build_sandboxed_command(
                 "/proc",
                 "--tmpfs",
                 "/tmp",
-                "--bind",
-                str(ws_root),
-                str(ws_root),
-                "--chdir",
-                str(cwd),
-                "--die-with-parent",
             ]
+            _append_bwrap_read_masks(argv, ws_res)
+            argv.extend(["--bind", str(ws_res), str(ws_res)])
+            _append_bwrap_post_ws_masks(argv, ws_res)
+            argv.extend(["--chdir", str(cwd_res), "--die-with-parent"])
             if not allow_net:
                 argv.append("--unshare-net")
             argv.extend(["--", "/bin/sh", "-c", cmd])
-            return argv, "bwrap"
-        if cleaned_mode == "bwrap":
-            raise RuntimeError("SPLITCH_CMD_SANDBOX=bwrap requested but `bwrap` is not installed")
+            return argv, f"bwrap{suffix}"
+        if cleaned_mode in ("bwrap", "required", "strict"):
+            raise RuntimeError(
+                "OS command sandbox required (SPLITCH_CMD_SANDBOX="
+                f"{cleaned_mode}) but working `bwrap` (bubblewrap) is unavailable. "
+                "Install bubblewrap or explicitly opt out with SPLITCH_CMD_SANDBOX=none."
+            )
 
-    if cleaned_mode == "seatbelt" or (cleaned_mode == "auto" and sys.platform == "darwin"):
-        sb_exec = shutil.which("sandbox-exec") or (
-            "/usr/bin/sandbox-exec" if Path("/usr/bin/sandbox-exec").is_file() else None
-        )
+    if cleaned_mode == "seatbelt" or (
+        cleaned_mode in ("required", "strict", "auto") and sys.platform == "darwin"
+    ):
+        sb_exec = _find_seatbelt_bin()
         if sb_exec:
-            ws_esc = _seatbelt_escape(str(ws_root))
+            ws_res = ws_root.resolve()
+            home_res = Path.home().resolve()
+            data_res = default_data_root().resolve()
+            ws_esc = _seatbelt_escape(str(ws_res))
+            deny_read_clauses: list[str] = []
+            for rel in (*_SENSITIVE_HOME_DIRS, *_SENSITIVE_HOME_FILES):
+                target = home_res / rel
+                if target != ws_res and not ws_res.is_relative_to(target):
+                    deny_read_clauses.append(f'(subpath "{_seatbelt_escape(str(target))}")')
+            if data_res != ws_res and not ws_res.is_relative_to(data_res):
+                deny_read_clauses.append(f'(subpath "{_seatbelt_escape(str(data_res))}")')
+            deny_read_rule = (
+                f"(deny file-read* {' '.join(deny_read_clauses)})\n" if deny_read_clauses else ""
+            )
             net_rule = "" if allow_net else "(deny network-outbound)\n"
             profile = (
                 "(version 1)\n"
@@ -433,13 +584,23 @@ def build_sandboxed_command(
                 "(deny file-write*)\n"
                 f'(allow file-write* (subpath "{ws_esc}") '
                 '(subpath "/tmp") (subpath "/private/tmp") (literal "/dev/null"))\n'
+                f"{deny_read_rule}"
                 f"{net_rule}"
             )
-            return [sb_exec, "-p", profile, "/bin/sh", "-c", cmd], "seatbelt"
-        if cleaned_mode == "seatbelt":
+            return [sb_exec, "-p", profile, "/bin/sh", "-c", cmd], f"seatbelt{suffix}"
+        if cleaned_mode in ("seatbelt", "required", "strict"):
             raise RuntimeError(
-                "SPLITCH_CMD_SANDBOX=seatbelt requested but `/usr/bin/sandbox-exec` is unavailable"
+                "OS command sandbox required (SPLITCH_CMD_SANDBOX="
+                f"{cleaned_mode}) but `/usr/bin/sandbox-exec` is unavailable. "
+                "Explicitly opt out with SPLITCH_CMD_SANDBOX=none."
             )
+
+    if cleaned_mode in ("required", "strict"):
+        raise RuntimeError(
+            "OS command sandbox required (SPLITCH_CMD_SANDBOX="
+            f"{cleaned_mode}) but no OS sandbox is available on platform '{sys.platform}'. "
+            "Explicitly opt out with SPLITCH_CMD_SANDBOX=none."
+        )
 
     return None, "host"
 
@@ -461,7 +622,7 @@ async def run_sandboxed_shell_command(
     cwd: Path,
     *,
     timeout_s: float = 20.0,
-    sandbox_mode: str = "auto",
+    sandbox_mode: str = "required",
     allow_net: bool = False,
 ) -> ToolExecResponse:
     try:
