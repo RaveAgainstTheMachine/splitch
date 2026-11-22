@@ -20,6 +20,7 @@ from backend.shared.engines import (
 from backend.shared.updater import (
     DEFAULT_REPO_URL,
     check_update,
+    perform_rollback,
     perform_update,
     run_doctor,
 )
@@ -170,7 +171,8 @@ def test_managed_llama_archive_install_shim_and_tarslip_guard(
     assert Path(res.binary_path).exists()
 
 
-def test_git_check_and_perform_update_end_to_end(tmp_path: Path) -> None:
+def test_git_check_and_perform_update_end_to_end(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path / "data_root"))
     origin = tmp_path / "origin.git"
     work = tmp_path / "work"
     clone = tmp_path / "clone"
@@ -256,6 +258,114 @@ def test_git_check_and_perform_update_end_to_end(tmp_path: Path) -> None:
     assert res.commits_pulled == 1
     assert res.previous_sha != res.current_sha
     assert (clone / "CHANGELOG.md").exists()
+
+
+def test_updater_auto_rollback_on_sync_failure_and_manual_rollback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from backend.shared import updater as upd_mod
+
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path / "data_root"))
+    origin = tmp_path / "origin.git"
+    work = tmp_path / "work"
+    clone = tmp_path / "clone"
+
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Splitch Test",
+        "GIT_AUTHOR_EMAIL": "test@splitch.local",
+        "GIT_COMMITTER_NAME": "Splitch Test",
+        "GIT_COMMITTER_EMAIL": "test@splitch.local",
+    }
+
+    def git(*args: str, cwd: Path) -> str:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            env=git_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return proc.stdout.strip()
+
+    origin.mkdir()
+    git("init", "--bare", "--initial-branch=main", cwd=origin)
+    work.mkdir()
+    git("init", "--initial-branch=main", cwd=work)
+    git("remote", "add", "origin", str(origin), cwd=work)
+    (work / "pyproject.toml").write_text('[project]\nname = "splitch"\n', encoding="utf-8")
+    git("add", "pyproject.toml", cwd=work)
+    git("commit", "-m", "chore: initial v1", cwd=work)
+    sha1_full = git("rev-parse", "HEAD", cwd=work)
+    sha1_short = git("rev-parse", "--short", "HEAD", cwd=work)
+    git("push", "-u", "origin", "main", cwd=work)
+
+    git("clone", "--branch", "main", str(origin), str(clone), cwd=tmp_path)
+
+    # Push broken v2 commit
+    (work / "BROKEN.txt").write_text("bad release\n", encoding="utf-8")
+    git("add", "BROKEN.txt", cwd=work)
+    git("commit", "-m", "feat: broken v2", cwd=work)
+    sha2_full = git("rev-parse", "HEAD", cwd=work)
+    git("push", "origin", "main", cwd=work)
+
+    # Simulate uv sync failing after git pull -> must auto-rollback to sha1
+    orig_run = upd_mod._run
+    orig_which = upd_mod.shutil.which
+    uv_calls = {"count": 0}
+
+    def failing_uv_run(cmd: list[str], **kwargs):
+        if len(cmd) >= 2 and Path(cmd[0]).name == "uv" and cmd[1] == "sync":
+            uv_calls["count"] += 1
+            if uv_calls["count"] == 1:
+                return 1, "", "simulated dependency resolution failure"
+            return 0, "", ""
+        return orig_run(cmd, **kwargs)
+
+    monkeypatch.setattr(upd_mod, "_run", failing_uv_run)
+    monkeypatch.setattr(
+        upd_mod.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else orig_which(name)
+    )
+
+    failed = perform_update(
+        app_dir=clone,
+        branch="main",
+        agent_only=True,
+        restart_services=False,
+        sync_deps=True,
+    )
+    assert failed.ok is False
+    assert failed.rolled_back is True
+    assert failed.updated is False
+    assert failed.current_sha == sha1_short
+    assert git("rev-parse", "HEAD", cwd=clone) == sha1_full
+    assert not (clone / "BROKEN.txt").exists()
+
+    # Restore normal _run, apply clean update, then test manual `perform_rollback()`
+    monkeypatch.setattr(upd_mod, "_run", orig_run)
+    ok_res = perform_update(
+        app_dir=clone,
+        branch="main",
+        agent_only=True,
+        restart_services=False,
+        sync_deps=False,
+    )
+    assert ok_res.ok is True and ok_res.updated is True
+    assert git("rev-parse", "HEAD", cwd=clone) == sha2_full
+    assert (clone / "BROKEN.txt").exists()
+
+    rb = perform_rollback(
+        app_dir=clone,
+        agent_only=True,
+        restart_services=False,
+        sync_deps=False,
+    )
+    assert rb.ok is True
+    assert rb.rolled_back is True
+    assert rb.current_sha == sha1_short
+    assert git("rev-parse", "HEAD", cwd=clone) == sha1_full
+    assert not (clone / "BROKEN.txt").exists()
 
 
 def test_install_sh_syntax_and_local_install_uninstall(tmp_path: Path) -> None:

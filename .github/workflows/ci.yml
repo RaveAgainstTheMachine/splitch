@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  verify:
-    name: Lint, Build & Test
+  verify-linux:
+    name: Linux Lint, Build & Unit/Integration
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -42,13 +42,81 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
-      - name: Validate POSIX shell scripts
+      - name: Validate SemVer & POSIX shell scripts
         run: |
           sh -n install.sh
           sh -n scripts/preflight.sh
+          uv run --no-sync python -c "import json, tomllib; from pathlib import Path; from backend.version import __version__, is_valid_semver; assert is_valid_semver(__version__); assert __version__ == tomllib.loads(Path('pyproject.toml').read_text())['project']['version'] == json.loads(Path('dashboard/package.json').read_text())['version']"
 
       - name: Run Ruff static analysis
         run: uv run --no-sync ruff check backend tests
 
-      - name: Run pytest suite
+      - name: Run unit & integration pytest suite
         run: uv run --no-sync pytest --ignore=tests/test_ui_e2e.py -q
+
+  ui-e2e:
+    name: Browser UI E2E (Headless Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Astral uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync Python dependencies
+        run: uv sync --python 3.12
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard UI
+        working-directory: dashboard
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Ensure Chromium is available
+        run: |
+          if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y chromium-browser
+          fi
+
+      - name: Run Headless Chromium UI E2E tests
+        run: uv run --no-sync pytest tests/test_ui_e2e.py -q
+
+  cross-platform:
+    name: Cross-Platform Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Astral uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync Python dependencies
+        run: uv sync --python 3.12
+
+      - name: Run cross-platform pytest suite
+        run: uv run --no-sync pytest --ignore=tests/test_ui_e2e.py --ignore=tests/test_installer.py -q

@@ -372,10 +372,10 @@ Splitch speaks **OpenAI Chat (`/v1/chat/completions`)**, **OpenAI Responses (`/v
 
 ## Security & Environment Variables
 
-- **Workspace tools are OFF by default** (`SPLITCH_ENABLE_TOOLS=0`). Only opt in on trusted machines with an explicit `--workspace` root. All file access enforces `Path.is_relative_to` sandboxing, and mutating tools (`write_file`, `run_command`) pause for **Allow / Deny** approval unless Auto-Approve is enabled per chat.
+- **Workspace tools are OFF by default** (`SPLITCH_ENABLE_TOOLS=0`). Only opt in on trusted machines with an explicit `--workspace` root. All file access enforces `Path.is_relative_to` sandboxing, mutating tools (`write_file`, `edit_file`, `run_command`) pause for **Allow / Deny** approval and are authenticated at the node agent via short-lived HMAC-SHA256 approval assertions (`SPLITCH_AGENT_TOKEN`, or loopback-only when unset), and shell commands run in isolated process groups with bounded output caps.
 - **Sandboxed Artifact Previews:** Inline HTML/JS/SVG previews run inside `<iframe sandbox="allow-scripts">` (opaque origin, no `allow-same-origin`, strict `connect-src 'none'` CSP, `referrerPolicy="no-referrer"`, and `Origin.from(event)` message validation).
-- **Optional Auth, Native HTTPS & Reverse Proxies:**
-  - Set `SPLITCH_API_KEY` to protect `/v1/*`, `/api/*`, `/infill`, and `/ws/status` (with per-IP login brute-force rate limiting, strict `script-src 'self'` CSP, HSTS, and `Secure; HttpOnly; SameSite=Strict` cookies over HTTPS); set `SPLITCH_AGENT_TOKEN` for router ↔ node agent auth.
+- **Auth, CSRF/SSRF Defenses, Native HTTPS & Reverse Proxies:**
+  - Set `SPLITCH_API_KEY` to protect `/v1/*`, `/api/*`, `/infill`, and `/ws/status` (with trusted-proxy-gated per-IP login brute-force rate limiting, strict `script-src 'self'` CSP, cookie CSRF `Origin` checks, loopback-only default credentialed CORS, DNS-resolved SSRF node URL checks, HSTS, and `Secure; HttpOnly; SameSite=Strict` cookies over HTTPS); set `SPLITCH_AGENT_TOKEN` for router ↔ node agent auth and signed tool approvals.
   - **Native HTTPS:** Run directly with self-signed SAN certs (`splitch tls init` / `--tls-self-signed`), custom/enterprise certs (`--ssl-certfile`/`--ssl-keyfile`), or Let's Encrypt (`splitch tls letsencrypt <domain>` / `--letsencrypt-domain`).
   - **External Reverse Proxies:** Ready-to-use configs in [infra/proxies/](infra/proxies/) for **Nginx**, **Nginx Proxy Manager**, **Caddy**, **Apache**, **HAProxy**, and **Traefik** — see [HTTPS & Reverse Proxies Wiki](docs/wiki/HTTPS-and-Reverse-Proxies.md).
 

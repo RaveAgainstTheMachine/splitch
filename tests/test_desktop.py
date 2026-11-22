@@ -19,6 +19,7 @@ from backend.desktop.shortcuts import (
     uninstall_desktop_integration,
 )
 from backend.desktop.tray import TrayController
+from backend.version import __version__ as VERSION
 
 
 def test_icon_rasterizer_png_argb_and_ico(tmp_path: Path) -> None:
@@ -101,7 +102,7 @@ def test_tray_controller_state_badges_and_menu_tree(tmp_path: Path, monkeypatch)
 
     ctrl.online = True
     ctrl.snapshot = {
-        "version": "0.3.0",
+        "version": VERSION,
         "control": {"gaming_mode": False, "force_node": "auto"},
         "nodes": [
             {
@@ -157,7 +158,7 @@ def test_dbus_next_struct_signatures_valid(tmp_path: Path, monkeypatch) -> None:
     ctrl = TrayController(router_url="http://127.0.0.1:8080")
     ctrl.online = True
     ctrl.snapshot = {
-        "version": "0.3.0",
+        "version": VERSION,
         "control": {"gaming_mode": False, "force_node": "auto"},
         "nodes": [{"node_id": "n1", "display_name": "Node 1", "online": True, "telemetry": {}}],
     }

@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import sys
 import time
 import uuid
@@ -60,6 +61,8 @@ from backend.shared.models import (
     ToolExecResponse,
     WorkspaceDirListing,
 )
+from backend.shared.security import is_loopback_host, verify_tool_approval
+from backend.version import __version__ as VERSION
 
 logger = logging.getLogger("splitch.agent")
 
@@ -88,6 +91,11 @@ EXTRA_MODEL_DIRS = [
 POLL_INTERVAL_S = float(os.getenv("SPLITCH_AGENT_POLL_S", "3.0"))
 ENABLE_TOOLS = os.getenv("SPLITCH_ENABLE_TOOLS", "0").strip().lower() in ("1", "true", "yes")
 AGENT_TOKEN = os.getenv("SPLITCH_AGENT_TOKEN", "").strip()
+ALLOW_UNAUTH_TOOLS = os.getenv("SPLITCH_ALLOW_UNAUTH_TOOLS", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 def _collect_storage(path_str: str) -> tuple[bool, float, float]:
@@ -444,7 +452,7 @@ async def lifespan(_app: FastAPI):
         await state.client.aclose()
 
 
-app = FastAPI(title="Splitch Node Agent", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Splitch Node Agent", version=VERSION, lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -1319,6 +1327,21 @@ async def browse_workspace_dirs(subpath: str = "") -> WorkspaceDirListing:
 
 
 _MUTATING_WORKSPACE_TOOLS = frozenset({"write_file", "edit_file", "run_command"})
+_CMD_TIMEOUT_S = float(os.getenv("SPLITCH_CMD_TIMEOUT_S", "20.0"))
+_MAX_CMD_STDOUT_BYTES = 64 * 1024  # 64 KB hard RAM cap
+_MAX_CMD_DRAIN_BYTES = 4 * 1024 * 1024  # 4 MB runaway flood fuse
+_MAX_CMD_OUTPUT_CHARS = 12_000
+
+
+def _kill_proc_tree(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    if os.name != "nt":
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+    with contextlib.suppress(ProcessLookupError, OSError):
+        proc.kill()
 
 
 @app.post("/tools/execute", response_model=ToolExecResponse)
@@ -1329,18 +1352,41 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
             detail="Workspace tools are disabled on this node (start with --enable-tools or SPLITCH_ENABLE_TOOLS=1)",
         )
     if req.tool in _MUTATING_WORKSPACE_TOOLS:
-        has_router_approval = request.headers.get("x-splitch-router-approved", "").strip() == "1"
-        auth = request.headers.get("authorization", "")
-        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-        has_valid_token = bool(AGENT_TOKEN and token and hmac.compare_digest(token, AGENT_TOKEN))
-        if not (has_router_approval or has_valid_token):
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"Direct execution of mutating tool '{req.tool}' requires router approval "
-                    "gate (X-Splitch-Router-Approved) or SPLITCH_AGENT_TOKEN authentication."
-                ),
+        if AGENT_TOKEN:
+            ts_hdr = request.headers.get("x-splitch-approval-ts", "")
+            sig_hdr = request.headers.get("x-splitch-approval-sig", "")
+            if not verify_tool_approval(
+                AGENT_TOKEN,
+                ts_hdr,
+                sig_hdr,
+                req.tool,
+                req.arguments,
+                req.workspace_subpath,
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Execution of mutating tool '{req.tool}' requires a valid "
+                        "router-signed HMAC approval assertion "
+                        "(X-Splitch-Approval-Ts / X-Splitch-Approval-Sig)."
+                    ),
+                )
+        else:
+            peer_host = request.client.host if request.client else ""
+            has_router_approval = (
+                request.headers.get("x-splitch-router-approved", "").strip() == "1"
             )
+            if not has_router_approval or (
+                not is_loopback_host(peer_host) and not ALLOW_UNAUTH_TOOLS
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Direct execution of mutating tool '{req.tool}' is restricted to "
+                        "loopback router-approved calls when SPLITCH_AGENT_TOKEN is unset. "
+                        "Configure SPLITCH_AGENT_TOKEN on router and agent for remote execution."
+                    ),
+                )
     if req.tool != "run_command":
         return await asyncio.to_thread(_exec_fs_tool, req)
 
@@ -1352,22 +1398,62 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
         return ToolExecResponse(ok=False, output=f"Working dir not found: {cwd}", exit_code=1)
 
     proc: asyncio.subprocess.Process | None = None
+    buf = bytearray()
+    truncated = False
+    flood_killed = False
     try:
         proc = await asyncio.create_subprocess_shell(
             cmd,
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            start_new_session=(os.name != "nt"),
         )
-        raw_out, _ = await asyncio.wait_for(proc.communicate(), timeout=20.0)
-        text = raw_out.decode("utf-8", errors="replace")
-        if len(text) > 12_000:
-            text = text[:12_000] + "\n... (output truncated)"
+        assert proc.stdout is not None
+
+        async def _stream_bounded() -> None:
+            nonlocal truncated, flood_killed
+            total_read = 0
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                total_read += len(chunk)
+                remaining = _MAX_CMD_STDOUT_BYTES - len(buf)
+                if remaining > 0:
+                    buf.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    truncated = True
+                if total_read > _MAX_CMD_DRAIN_BYTES:
+                    flood_killed = True
+                    _kill_proc_tree(proc)
+                    break
+            await proc.wait()
+
+        await asyncio.wait_for(_stream_bounded(), timeout=_CMD_TIMEOUT_S)
+        text = buf.decode("utf-8", errors="replace")
+        if len(text) > _MAX_CMD_OUTPUT_CHARS:
+            text = text[:_MAX_CMD_OUTPUT_CHARS]
+            truncated = True
+        if flood_killed:
+            text += "\n... (output truncated; process terminated after exceeding 4 MB output limit)"
+        elif truncated:
+            text += "\n... (output truncated)"
         code = proc.returncode if proc.returncode is not None else -1
-        return ToolExecResponse(ok=code == 0, output=text or "(no output)", exit_code=code)
+        return ToolExecResponse(
+            ok=(code == 0 and not flood_killed),
+            output=text or "(no output)",
+            exit_code=code,
+        )
     except TimeoutError:
-        if proc is not None and proc.returncode is None:
-            proc.kill()
-        return ToolExecResponse(ok=False, output="Command timed out after 20s", exit_code=124)
+        if proc is not None:
+            _kill_proc_tree(proc)
+            with contextlib.suppress(TimeoutError, OSError):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+        return ToolExecResponse(
+            ok=False,
+            output=f"Command timed out after {int(_CMD_TIMEOUT_S)}s",
+            exit_code=124,
+        )
     except OSError as exc:
         return ToolExecResponse(ok=False, output=str(exc), exit_code=1)

@@ -12,6 +12,7 @@ import hmac
 import ipaddress
 import os
 import re
+import socket
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -58,6 +59,7 @@ from backend.shared.models import (
     NodeStatus,
     WorkspaceDirListing,
 )
+from backend.shared.security import is_loopback_host, is_trusted_proxy
 from backend.shared.updater import DoctorReport, UpdateStatus, check_update, run_doctor
 
 _ROOT = default_data_root()
@@ -98,10 +100,7 @@ HSTS_ENABLED = (
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_EXTRA_ORIGINS,
-    allow_origin_regex=(
-        r"https?://(localhost|127\.0\.0\.1|10\..*|192\.168\..*|172\.(1[6-9]|2\d|3[0-1])\..*"
-        r"|100\..*|[^/]+\.local)(:\d+)?"
-    ),
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -126,18 +125,32 @@ _CSP_HEADER = (
 )
 
 
+def _peer_host(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
 def _is_https_request(request: Request) -> bool:
     if request.url.scheme == "https":
         return True
-    fwd = request.headers.get("x-forwarded-proto", "")
-    return fwd.split(",")[0].strip().lower() == "https"
+    if is_trusted_proxy(_peer_host(request), config.security.trusted_proxies):
+        fwd = request.headers.get("x-forwarded-proto", "")
+        return fwd.split(",")[0].strip().lower() == "https"
+    return False
 
 
 def _client_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for", "").strip()
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    peer = _peer_host(request)
+    if is_trusted_proxy(peer, config.security.trusted_proxies):
+        xff = request.headers.get("x-forwarded-for", "").strip()
+        if xff:
+            return xff.split(",")[0].strip()
+    return peer or "unknown"
+
+
+def _is_forbidden_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_link_local or ip.is_multicast or ip.is_unspecified
 
 
 def _validate_http_url(raw: str, field_name: str, *, allow_empty: bool = False) -> str:
@@ -163,7 +176,7 @@ def _validate_http_url(raw: str, field_name: str, *, allow_empty: bool = False) 
         )
     try:
         ip = ipaddress.ip_address(host)
-        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+        if _is_forbidden_ip(ip):
             raise HTTPException(
                 status_code=400,
                 detail=f"{field_name} points to a forbidden link-local, multicast, or unspecified IP",
@@ -173,13 +186,44 @@ def _validate_http_url(raw: str, field_name: str, *, allow_empty: bool = False) 
     return cleaned
 
 
+async def _validate_node_url(raw: str, field_name: str, *, allow_empty: bool = False) -> str:
+    cleaned = _validate_http_url(raw, field_name, allow_empty=allow_empty)
+    if not cleaned:
+        return ""
+    host = (urlparse(cleaned).hostname or "").lower()
+    try:
+        ipaddress.ip_address(host)
+        return cleaned
+    except ValueError:
+        pass
+    try:
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return cleaned
+    for info in infos:
+        addr = info[4][0]
+        try:
+            resolved_ip = ipaddress.ip_address(addr.split("%", 1)[0])
+        except ValueError:
+            continue
+        if _is_forbidden_ip(resolved_ip):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{field_name} hostname '{host}' resolves to a forbidden link-local, "
+                    "multicast, or unspecified IP"
+                ),
+            )
+    return cleaned
+
+
 def _session_cookie_token(api_key: str) -> str:
     return hmac.new(api_key.encode("utf-8"), b"splitch-ui-session-v1", hashlib.sha256).hexdigest()
 
 
-def _is_request_authenticated(request: Request) -> bool:
+def _auth_method(request: Request) -> Literal["open", "header", "cookie", "none"]:
     if not API_KEY:
-        return True
+        return "open"
     auth = request.headers.get("authorization", "")
     header_tok = (
         auth[7:].strip()
@@ -187,16 +231,39 @@ def _is_request_authenticated(request: Request) -> bool:
         else request.headers.get("x-api-key", "").strip()
     )
     if header_tok and hmac.compare_digest(header_tok, API_KEY):
-        return True
+        return "header"
     cookie_tok = request.cookies.get(SESSION_COOKIE_NAME, "").strip()
-    return bool(
-        cookie_tok and hmac.compare_digest(cookie_tok, _session_cookie_token(API_KEY))
-    )
+    if cookie_tok and hmac.compare_digest(cookie_tok, _session_cookie_token(API_KEY)):
+        return "cookie"
+    return "none"
+
+
+def _is_request_authenticated(request: Request) -> bool:
+    return _auth_method(request) != "none"
+
+
+def _is_origin_allowed(request: Request, origin: str) -> bool:
+    parsed = urlparse(origin.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    norm_origin = f"{parsed.scheme}://{parsed.netloc}".lower()
+    req_host = (request.headers.get("host") or request.url.netloc or "").strip().lower()
+    if req_host and parsed.netloc.lower() == req_host:
+        return True
+    if is_loopback_host(parsed.hostname):
+        return True
+    allowed_set = {
+        o.strip().rstrip("/").lower()
+        for o in [*config.security.allowed_origins, *_EXTRA_ORIGINS]
+        if o.strip()
+    }
+    return norm_origin in allowed_set
 
 
 @app.middleware("http")
 async def _security_and_auth_middleware(request: Request, call_next):
     path = request.url.path
+    auth_kind = _auth_method(request)
     has_join_token = (
         path == "/api/nodes"
         and request.method == "POST"
@@ -206,12 +273,28 @@ async def _security_and_auth_middleware(request: Request, call_next):
         API_KEY
         and path not in _AUTH_EXEMPT_PATHS
         and (path.startswith(("/v1/", "/api/")) or path == "/infill")
-        and not _is_request_authenticated(request)
+        and auth_kind == "none"
         and not has_join_token
     ):
         response: Response = JSONResponse(
             status_code=401, content={"detail": "Invalid or missing API key"}
         )
+    elif (
+        auth_kind == "cookie"
+        and request.method in ("POST", "PUT", "PATCH", "DELETE")
+        and (path.startswith(("/v1/", "/api/")) or path == "/infill")
+    ):
+        origin = request.headers.get("origin", "").strip()
+        sec_fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
+        if (origin and not _is_origin_allowed(request, origin)) or (
+            not origin and sec_fetch_site == "cross-site"
+        ):
+            response = JSONResponse(
+                status_code=403,
+                content={"detail": "Cross-origin cookie-authenticated mutation blocked"},
+            )
+        else:
+            response = await call_next(request)
     else:
         response = await call_next(request)
 
@@ -419,9 +502,9 @@ async def register_node(req: NodeRegisterRequest, request: Request) -> NodeStatu
             status_code=400, detail="Node id must be lowercase alphanumeric/hyphen/underscore"
         )
     req.id = slug
-    req.agent_url = _validate_http_url(req.agent_url, "agent_url")
-    req.engine_url = _validate_http_url(req.engine_url, "engine_url")
-    req.media_url = _validate_http_url(req.media_url, "media_url", allow_empty=True)
+    req.agent_url = await _validate_node_url(req.agent_url, "agent_url")
+    req.engine_url = await _validate_node_url(req.engine_url, "engine_url")
+    req.media_url = await _validate_node_url(req.media_url, "media_url", allow_empty=True)
     return await cluster.register_node(req)
 
 

@@ -84,6 +84,7 @@ class UpdateStatus(BaseModel):
 class UpdateResult(BaseModel):
     ok: bool = True
     updated: bool = False
+    rolled_back: bool = False
     previous_sha: str = ""
     current_sha: str = ""
     commits_pulled: int = 0
@@ -644,6 +645,27 @@ def _restart_active_services() -> list[str]:
     return restarted
 
 
+def _rollback_git(
+    resolved: Path,
+    git_bin: str,
+    target_sha: str,
+    *,
+    sync_deps: bool = True,
+) -> tuple[bool, list[str], str | None]:
+    steps: list[str] = []
+    rc_rst, _, err_rst = _run([git_bin, "reset", "--hard", target_sha], cwd=resolved, timeout=30.0)
+    if rc_rst != 0:
+        return False, steps, f"git reset --hard {target_sha} failed: {err_rst}"
+    steps.append(f"Rolled back git checkout to {target_sha[:8]}")
+    if sync_deps:
+        uv_bin = shutil.which("uv")
+        if uv_bin:
+            rc_uv, _, _ = _run([uv_bin, "sync"], cwd=resolved, timeout=180.0)
+            if rc_uv == 0:
+                steps.append("Restored Python environment via uv sync")
+    return True, steps, None
+
+
 def perform_update(
     *,
     app_dir: Path | None = None,
@@ -706,7 +728,27 @@ def perform_update(
     remote_name, _ = _resolve_update_remote(resolved, git_bin, meta)
     remote_name = remote_name or "origin"
     old_sha = status.local_sha
+    _, prev_full_sha, _ = _run([git_bin, "rev-parse", "HEAD"], cwd=resolved)
+    new_full_sha = prev_full_sha
     dashboard_changed = False
+    pulled_new_commit = False
+
+    def _fail_with_rollback(err_msg: str) -> UpdateResult:
+        result.ok = False
+        result.error = err_msg
+        if pulled_new_commit and prev_full_sha:
+            with step_ctx(f"Rolling back failed update to {old_sha}"):
+                rb_ok, rb_steps, rb_err = _rollback_git(
+                    resolved, git_bin, prev_full_sha, sync_deps=sync_deps
+                )
+            result.steps.extend(rb_steps)
+            if rb_ok:
+                result.rolled_back = True
+                result.updated = False
+                result.current_sha = old_sha
+            elif rb_err:
+                result.error = f"{err_msg} (rollback failed: {rb_err})"
+        return result
 
     if status.update_available:
         rc_diff, diff_out, _ = _run(
@@ -728,6 +770,8 @@ def perform_update(
             return result
 
         _, new_sha, _ = _run([git_bin, "rev-parse", "--short", "HEAD"], cwd=resolved)
+        _, new_full_sha, _ = _run([git_bin, "rev-parse", "HEAD"], cwd=resolved)
+        pulled_new_commit = bool(new_full_sha and new_full_sha != prev_full_sha)
         result.updated = True
         result.current_sha = new_sha
         result.commits_pulled = status.behind_count
@@ -743,9 +787,7 @@ def perform_update(
             with step_ctx("Syncing Python environment (uv sync)"):
                 rc_uv, _, err_uv = _run([uv_bin, "sync"], cwd=resolved, timeout=180.0)
             if rc_uv != 0:
-                result.ok = False
-                result.error = f"uv sync failed: {err_uv}"
-                return result
+                return _fail_with_rollback(f"uv sync failed: {err_uv}")
             result.steps.append("Synchronized Python environment via uv sync")
         else:
             result.steps.append("Skipped uv sync (uv not found on PATH)")
@@ -759,9 +801,9 @@ def perform_update(
     if should_build_ui:
         node_bin, npm_bin, node_ver = _find_node_bin()
         if not node_bin or not npm_bin or _parse_major(node_ver) < 20:
-            result.ok = False
-            result.error = "Node.js 20+ required to rebuild dashboard (or pass --agent-only)"
-            return result
+            return _fail_with_rollback(
+                "Node.js 20+ required to rebuild dashboard (or pass --agent-only)"
+            )
         env = os.environ.copy()
         env["PATH"] = f"{Path(node_bin).parent}{os.pathsep}{env.get('PATH', '')}"
         dash_dir = resolved / "dashboard"
@@ -773,15 +815,11 @@ def perform_update(
         with step_ctx("Installing dashboard dependencies"):
             rc_i, _, err_i = _run(install_cmd, cwd=dash_dir, timeout=180.0, env=env)
         if rc_i != 0:
-            result.ok = False
-            result.error = f"npm install failed: {err_i}"
-            return result
+            return _fail_with_rollback(f"npm install failed: {err_i}")
         with step_ctx("Building dashboard bundle"):
             rc_b, _, err_b = _run([npm_bin, "run", "build"], cwd=dash_dir, timeout=180.0, env=env)
         if rc_b != 0:
-            result.ok = False
-            result.error = f"Dashboard build failed: {err_b}"
-            return result
+            return _fail_with_rollback(f"Dashboard build failed: {err_b}")
         result.ui_rebuilt = True
         result.steps.append("Rebuilt dashboard bundle (tsc -b && vite build)")
 
@@ -818,10 +856,141 @@ def perform_update(
         if restarted:
             result.steps.append(f"Restarted active services: {', '.join(restarted)}")
 
-    if meta:
+    if meta or pulled_new_commit:
+        if pulled_new_commit and prev_full_sha:
+            meta["previous_sha"] = old_sha
+            meta["previous_full_sha"] = prev_full_sha
+            meta["current_full_sha"] = new_full_sha
         meta["updated_at"] = time.time()
         write_install_meta(meta)
 
+    return result
+
+
+def perform_rollback(
+    *,
+    app_dir: Path | None = None,
+    to_sha: str | None = None,
+    agent_only: bool = False,
+    rebuild_ui: bool = False,
+    restart_services: bool = True,
+    sync_deps: bool = True,
+    progress: TerminalProgress | None = None,
+) -> UpdateResult:
+    """Roll back Splitch to the previously recorded working git SHA (or an explicit `--to <sha>`)."""
+    step_ctx = progress.step if progress is not None else null_step
+    resolved = resolve_app_dir(app_dir)
+    meta = read_install_meta()
+    effective_agent_only = agent_only or bool(meta.get("agent_only", False))
+    git_bin = shutil.which("git")
+    if not git_bin or not (resolved / ".git").exists():
+        return UpdateResult(
+            ok=False,
+            error="Not a git checkout; manual rollback requires a git installation.",
+        )
+
+    _, cur_short, _ = _run([git_bin, "rev-parse", "--short", "HEAD"], cwd=resolved)
+    _, cur_full, _ = _run([git_bin, "rev-parse", "HEAD"], cwd=resolved)
+    target = (
+        (to_sha or "").strip()
+        or str(meta.get("previous_full_sha") or "").strip()
+        or str(meta.get("previous_sha") or "").strip()
+    )
+    if not target:
+        return UpdateResult(
+            ok=False,
+            previous_sha=cur_short,
+            current_sha=cur_short,
+            error="No previous SHA recorded in install_meta.json; pass --to <commit-sha> explicitly.",
+        )
+
+    rc_ver, target_full, err_ver = _run(
+        [git_bin, "rev-parse", "--verify", f"{target}^{{commit}}"],
+        cwd=resolved,
+    )
+    if rc_ver != 0 or not target_full:
+        return UpdateResult(
+            ok=False,
+            previous_sha=cur_short,
+            current_sha=cur_short,
+            error=f"Invalid rollback target '{target}': {err_ver or 'commit not found'}",
+        )
+
+    dashboard_changed = False
+    rc_diff, diff_out, _ = _run(
+        [git_bin, "diff", "--name-only", f"HEAD..{target_full}"],
+        cwd=resolved,
+    )
+    if rc_diff == 0 and any(line.startswith("dashboard/") for line in diff_out.splitlines()):
+        dashboard_changed = True
+
+    with step_ctx(f"Rolling back git checkout to {target_full[:8]}"):
+        rb_ok, rb_steps, rb_err = _rollback_git(
+            resolved, git_bin, target_full, sync_deps=sync_deps
+        )
+    if not rb_ok:
+        return UpdateResult(
+            ok=False,
+            previous_sha=cur_short,
+            current_sha=cur_short,
+            steps=rb_steps,
+            error=rb_err,
+        )
+
+    _, new_short, _ = _run([git_bin, "rev-parse", "--short", "HEAD"], cwd=resolved)
+    result = UpdateResult(
+        ok=True,
+        updated=True,
+        rolled_back=True,
+        previous_sha=cur_short,
+        current_sha=new_short,
+        steps=rb_steps,
+    )
+
+    should_build_ui = (
+        not effective_agent_only
+        and (resolved / "dashboard" / "package.json").exists()
+        and (rebuild_ui or dashboard_changed)
+    )
+    if should_build_ui:
+        node_bin, npm_bin, node_ver = _find_node_bin()
+        if node_bin and npm_bin and _parse_major(node_ver) >= 20:
+            env = os.environ.copy()
+            env["PATH"] = f"{Path(node_bin).parent}{os.pathsep}{env.get('PATH', '')}"
+            dash_dir = resolved / "dashboard"
+            install_cmd = (
+                [npm_bin, "ci", "--no-audit", "--no-fund"]
+                if (dash_dir / "package-lock.json").exists()
+                else [npm_bin, "install", "--no-audit", "--no-fund"]
+            )
+            with step_ctx("Rebuilding dashboard bundle for rolled-back revision"):
+                rc_i, _, err_i = _run(install_cmd, cwd=dash_dir, timeout=180.0, env=env)
+                if rc_i == 0:
+                    rc_b, _, err_b = _run(
+                        [npm_bin, "run", "build"], cwd=dash_dir, timeout=180.0, env=env
+                    )
+                else:
+                    rc_b, err_b = rc_i, err_i
+            if rc_b == 0:
+                result.ui_rebuilt = True
+                result.steps.append("Rebuilt dashboard bundle (tsc -b && vite build)")
+            else:
+                result.ok = False
+                result.error = f"Rollback succeeded in git, but dashboard rebuild failed: {err_b}"
+                return result
+
+    if restart_services:
+        with step_ctx("Restarting active services"):
+            restarted = _restart_active_services()
+        result.restarted_services = restarted
+        if restarted:
+            result.steps.append(f"Restarted active services: {', '.join(restarted)}")
+
+    meta["previous_sha"] = cur_short
+    meta["previous_full_sha"] = cur_full
+    meta["current_full_sha"] = target_full
+    meta["updated_at"] = time.time()
+    write_install_meta(meta)
     return result
 
 

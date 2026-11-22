@@ -26,8 +26,7 @@ from backend.shared.models import (
     NodeTelemetry,
     TraceEntry,
 )
-
-VERSION = "0.3.0"
+from backend.version import __version__ as VERSION
 
 
 class ClusterState:

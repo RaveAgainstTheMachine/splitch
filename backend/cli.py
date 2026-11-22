@@ -43,6 +43,7 @@ from backend.router.telemetry import VERSION
 from backend.shared.bench import BenchRunRequest, format_bench_table, run_benchmark_suite
 from backend.shared.engines import get_engine_status, install_or_update_engine
 from backend.shared.progress import TerminalProgress
+from backend.shared.security import is_loopback_host
 from backend.shared.tls import (
     default_certs_dir,
     generate_self_signed_cert,
@@ -50,7 +51,13 @@ from backend.shared.tls import (
     issue_letsencrypt_cert,
     resolve_tls_files,
 )
-from backend.shared.updater import check_update, fix_doctor_issues, perform_update, run_doctor
+from backend.shared.updater import (
+    check_update,
+    fix_doctor_issues,
+    perform_rollback,
+    perform_update,
+    run_doctor,
+)
 
 
 def _detect_local_engine() -> str:
@@ -155,6 +162,29 @@ def _uvicorn_tls_and_proxy_kwargs(args: argparse.Namespace) -> dict:
     return kwargs
 
 
+def _warn_if_exposed_without_auth(
+    component: str,
+    host: str,
+    *,
+    require_api_key: bool = False,
+    require_agent_token: bool = False,
+) -> None:
+    if is_loopback_host(host):
+        return
+    if require_api_key and not os.getenv("SPLITCH_API_KEY", "").strip():
+        print(
+            f"[splitch] SECURITY WARNING: {component} is binding to {host} without SPLITCH_API_KEY set.\n"
+            "[splitch] Set SPLITCH_API_KEY before exposing the router beyond localhost.",
+            file=sys.stderr,
+        )
+    if require_agent_token and not os.getenv("SPLITCH_AGENT_TOKEN", "").strip():
+        print(
+            f"[splitch] SECURITY WARNING: {component} is binding to {host} without SPLITCH_AGENT_TOKEN set.\n"
+            "[splitch] Set SPLITCH_AGENT_TOKEN on router and agent; unauthenticated remote mutating tools are blocked.",
+            file=sys.stderr,
+        )
+
+
 def _cmd_router(args: argparse.Namespace) -> int:
     if args.config:
         os.environ["SPLITCH_CONFIG"] = str(args.config)
@@ -163,6 +193,7 @@ def _cmd_router(args: argparse.Namespace) -> int:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"[splitch] TLS configuration error: {exc}", file=sys.stderr)
         return 1
+    _warn_if_exposed_without_auth("splitch router", args.host, require_api_key=True)
     scheme = "https" if "ssl_certfile" in extra else "http"
     print(f"[splitch] Router listening on {scheme}://{args.host}:{args.port}")
     uvicorn.run("backend.router.app:app", host=args.host, port=args.port, **extra)
@@ -250,6 +281,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         if getattr(args, "join_only", False):
             return 0
 
+    _warn_if_exposed_without_auth("splitch agent", args.host, require_agent_token=True)
     uv_kwargs: dict = {}
     if ssl_cert and ssl_key:
         uv_kwargs["ssl_certfile"] = ssl_cert
@@ -276,6 +308,7 @@ def _cmd_up(args: argparse.Namespace) -> int:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"[splitch] TLS configuration error: {exc}", file=sys.stderr)
         return 1
+    _warn_if_exposed_without_auth("splitch up", args.host, require_api_key=True)
     scheme = "https" if "ssl_certfile" in extra else "http"
 
     print(f"[splitch] Starting local agent (:{args.agent_port}) -> engine {engine_url}")
@@ -466,9 +499,9 @@ def _cmd_desktop(args: argparse.Namespace) -> int:
         eng = get_engine_status(check_remote=True)
         parts: list[str] = []
         if up.update_available:
-            parts.append(f"Splitch update available ({up.commits_behind} behind)")
+            parts.append(f"Splitch update available ({up.behind_count} behind)")
         else:
-            parts.append(f"Splitch up to date ({up.current_sha or 'local'})")
+            parts.append(f"Splitch up to date ({up.local_sha or 'local'})")
         if eng.update_available and eng.latest_llama_tag:
             parts.append(f"llama.cpp {eng.latest_llama_tag} available")
         elif eng.latest_llama_tag:
@@ -598,7 +631,8 @@ def _cmd_update(args: argparse.Namespace) -> int:
     for step in res.steps:
         print(f"  ✓ {step}")
     if not res.ok:
-        print(f"[splitch] Update error: {res.error}", file=sys.stderr)
+        rb_note = " (rolled back cleanly to previous commit)" if res.rolled_back else ""
+        print(f"[splitch] Update error{rb_note}: {res.error}", file=sys.stderr)
         return 1
     if args.check:
         return 0
@@ -606,6 +640,24 @@ def _cmd_update(args: argparse.Namespace) -> int:
         print(f"[splitch] Update complete ({res.previous_sha} -> {res.current_sha}).")
     else:
         print(f"[splitch] Already up to date ({res.current_sha}).")
+    return 0
+
+
+def _cmd_rollback(args: argparse.Namespace) -> int:
+    progress = TerminalProgress()
+    res = perform_rollback(
+        to_sha=args.to,
+        agent_only=bool(args.agent_only),
+        rebuild_ui=bool(args.rebuild_ui),
+        restart_services=not bool(args.no_restart),
+        progress=progress,
+    )
+    for step in res.steps:
+        print(f"  ✓ {step}")
+    if not res.ok:
+        print(f"[splitch] Rollback error: {res.error}", file=sys.stderr)
+        return 1
+    print(f"[splitch] Rolled back ({res.previous_sha} -> {res.current_sha}).")
     return 0
 
 
@@ -793,6 +845,16 @@ def main() -> None:
     p_upd.add_argument("--no-restart", action="store_true", help="Do not restart active OS services")
     p_upd.add_argument("--force", action="store_true", help="Proceed even if working tree is dirty")
     p_upd.set_defaults(func=_cmd_update)
+
+    p_rb = sub.add_parser(
+        "rollback",
+        help="Roll back Splitch to the previously recorded working git commit (or --to <sha>)",
+    )
+    p_rb.add_argument("--to", default=None, help="Explicit git commit SHA or tag to roll back to")
+    p_rb.add_argument("--agent-only", action="store_true", help="Skip Node.js / dashboard rebuild")
+    p_rb.add_argument("--rebuild-ui", action="store_true", help="Force dashboard UI rebuild")
+    p_rb.add_argument("--no-restart", action="store_true", help="Do not restart active OS services")
+    p_rb.set_defaults(func=_cmd_rollback)
 
     p_ver = sub.add_parser("version", help="Print installed Splitch version")
     p_ver.set_defaults(func=_cmd_version)

@@ -47,6 +47,21 @@ if leaks:
     print("\n".join(leaks), file=sys.stderr)
     sys.exit(1)
 print("  ✓ 0 private data leaks across", len(files), "tracked files")
+
+import json, tomllib
+from backend.version import __version__ as py_ver, is_valid_semver
+
+assert is_valid_semver(py_ver), f"Invalid SemVer in backend/version.py: {py_ver}"
+proj_ver = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+dash_ver = json.loads(Path("dashboard/package.json").read_text(encoding="utf-8"))["version"]
+if not (py_ver == proj_ver == dash_ver):
+    print(
+        f"[preflight] ERROR: Version drift detected: backend/version.py={py_ver}, "
+        f"pyproject.toml={proj_ver}, dashboard/package.json={dash_ver}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+print(f"  ✓ SemVer 2.0.0 parity verified: v{py_ver}")
 PY
 
 echo "[preflight 2/5] Validating POSIX shell scripts..."

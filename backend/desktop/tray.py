@@ -55,6 +55,7 @@ from backend.desktop.shortcuts import (
 from backend.router.config import default_data_root
 from backend.shared.engines import get_engine_status
 from backend.shared.updater import check_update
+from backend.version import __version__ as VERSION
 
 logger = logging.getLogger("splitch.tray")
 
@@ -146,7 +147,7 @@ class TrayController:
     def tooltip_summary(self) -> tuple[str, str]:
         nodes = self.snapshot.get("nodes") or []
         online_nodes = [n for n in nodes if n.get("online")]
-        ver = self.snapshot.get("version") or "0.3.0"
+        ver = self.snapshot.get("version") or VERSION
         if not self.online:
             return f"Splitch v{ver} — Offline", f"Router unreachable ({self.router_url})"
 

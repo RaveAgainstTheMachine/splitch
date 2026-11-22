@@ -2,15 +2,16 @@ services:
   splitch-router:
     build: .
     ports:
-      - "8080:8080"
+      # Safe localhost default; bind "8080:8080" only with SPLITCH_API_KEY enabled
+      - "127.0.0.1:8080:8080"
     volumes:
       - ./splitch.toml:/app/splitch.toml:ro
       - splitch_data:/data
     environment:
       SPLITCH_CONFIG: /app/splitch.toml
-      # Optional security tokens:
-      # SPLITCH_API_KEY: "change-me"
-      # SPLITCH_AGENT_TOKEN: "change-me"
+      # Required before exposing Splitch beyond loopback:
+      SPLITCH_API_KEY: "${SPLITCH_API_KEY:-}"
+      SPLITCH_AGENT_TOKEN: "${SPLITCH_AGENT_TOKEN:-}"
     restart: unless-stopped
 
 volumes:

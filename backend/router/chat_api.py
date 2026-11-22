@@ -47,6 +47,8 @@ from backend.shared.models import (
     TraceEntry,
     WorkspaceScopeUpdate,
 )
+from backend.shared.security import sign_tool_approval
+from backend.version import __version__ as VERSION
 
 MEDIA_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
@@ -652,7 +654,7 @@ async def _call_mcp_tool(
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "splitch-chat", "version": "0.3.0"},
+                    "clientInfo": {"name": "splitch-chat", "version": VERSION},
                 },
             }
             proc.stdin.write((json.dumps(init) + "\n").encode("utf-8"))
@@ -773,7 +775,7 @@ async def _fetch_mcp_tools(
                             "params": {
                                 "protocolVersion": "2024-11-05",
                                 "capabilities": {},
-                                "clientInfo": {"name": "splitch-chat", "version": "0.3.0"},
+                                "clientInfo": {"name": "splitch-chat", "version": VERSION},
                             },
                         }
                     )
@@ -1675,12 +1677,22 @@ def build_chat_router(
                             tool_ok = False
                         else:
                             try:
+                                tool_headers: dict[str, str] = {
+                                    **cluster.agent_headers(),
+                                    "X-Splitch-Router-Approved": "1",
+                                }
+                                if cluster.agent_token:
+                                    ts_hdr, sig_hdr = sign_tool_approval(
+                                        cluster.agent_token,
+                                        t_name,
+                                        parsed_args,
+                                        conv.workspace_subpath,
+                                    )
+                                    tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
+                                    tool_headers["X-Splitch-Approval-Sig"] = sig_hdr
                                 async with httpx.AsyncClient(
                                     timeout=25.0,
-                                    headers={
-                                        **cluster.agent_headers(),
-                                        "X-Splitch-Router-Approved": "1",
-                                    },
+                                    headers=tool_headers,
                                 ) as http:
                                     r = await http.post(
                                         f"{exec_node.agent_url}/tools/execute",

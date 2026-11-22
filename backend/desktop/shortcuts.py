@@ -32,6 +32,7 @@ from backend.desktop.icons import (
     render_svg_text,
 )
 from backend.router.config import default_data_root
+from backend.version import __version__ as VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SVG_LOGO_SRC = REPO_ROOT / "docs" / "assets" / "splitch-logo.svg"
@@ -440,7 +441,7 @@ def install_desktop_integration(
             "  <key>CFBundleName</key><string>Splitch</string>\n"
             "  <key>CFBundleDisplayName</key><string>Splitch</string>\n"
             "  <key>CFBundleIdentifier</key><string>ai.splitch.desktop</string>\n"
-            "  <key>CFBundleVersion</key><string>0.3.0</string>\n"
+            f"  <key>CFBundleVersion</key><string>{VERSION}</string>\n"
             "  <key>CFBundleExecutable</key><string>splitch-launcher</string>\n"
             "  <key>CFBundleIconFile</key><string>splitch.png</string>\n"
             "  <key>LSUIElement</key><true/>\n"
