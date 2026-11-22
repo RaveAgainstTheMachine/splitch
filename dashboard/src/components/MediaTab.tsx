@@ -792,7 +792,7 @@ export function MediaTab({ onError, onConfirm }: Props) {
 
             <div className="media-field">
               <span>Seed</span>
-              <div className="ws-input-row">
+              <div className="media-seed-row">
                 <input
                   type="text"
                   value={seedText}
