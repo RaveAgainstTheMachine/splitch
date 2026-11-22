@@ -727,12 +727,13 @@ def test_command_sandbox_required_fail_closed_auto_fallback_and_seatbelt_profile
     assert label == "seatbelt"
     assert argv is not None and argv[0] == "/usr/bin/sandbox-exec"
     profile = argv[2]
+    profile_posix = profile.replace("\\\\", "/")
     assert "(deny file-write*)" in profile
     assert "(deny network-outbound)" in profile
     assert "(deny file-read*" in profile
-    assert ".ssh" in profile
-    assert "Library/Keychains" in profile
-    assert str(fake_data.resolve()) in profile
+    assert ".ssh" in profile_posix
+    assert "Library/Keychains" in profile_posix
+    assert fake_data.resolve().as_posix() in profile_posix
 
 
 def test_non_loopback_bind_requires_auth_unless_overridden(monkeypatch) -> None:
