@@ -22,6 +22,7 @@ import {
   RefreshCw,
   Search,
   Square,
+  Tag,
   Trash2,
   X
 } from "lucide-react";
@@ -197,11 +198,17 @@ export function ModelsTab({
   const [dismissedDownloads, setDismissedDownloads] = useState<Record<string, boolean>>({});
   const [downloadNotice, setDownloadNotice] = useState("");
   const prevActiveIdsRef = useRef<Set<string>>(new Set());
+  const [assignTarget, setAssignTarget] = useState<{ nodeId: string; modelId: string } | null>(null);
+  const [assignSelected, setAssignSelected] = useState<Record<string, boolean>>({});
+  const [assignSaving, setAssignSaving] = useState(false);
 
   const listRef = useRef<HTMLDivElement>(null);
   const aliasDialogRef = useRef<HTMLDialogElement>(null);
+  const assignDialogRef = useRef<HTMLDialogElement>(null);
   useDialogLightDismiss(aliasDialogRef);
+  useDialogLightDismiss(assignDialogRef);
   const aliasDialogTitleId = useId();
+  const assignDialogTitleId = useId();
   const invCaptionId = useId();
   const aliasCaptionId = useId();
   const fitSwitchId = useId();
@@ -513,6 +520,65 @@ export function ModelsTab({
         }
       }
     });
+  };
+
+  const openAssignAliasesDialog = (nodeId: string, modelId: string) => {
+    const isEmbed = /embed|bge-|bge_|nomic|e5-|gte-|mxbai|minilm/i.test(modelId);
+    const matching = aliases.filter(
+      (a) => a.primary_node === nodeId || a.fallback_node === nodeId
+    );
+    const initial: Record<string, boolean> = {};
+    for (const a of matching) {
+      const sameRole = isEmbed ? a.task_kind === "embed" : a.task_kind !== "embed";
+      const alreadyBound =
+        (a.primary_node === nodeId && a.primary_model === modelId) ||
+        (a.fallback_node === nodeId && a.fallback_model === modelId);
+      initial[a.alias] = sameRole && !alreadyBound;
+    }
+    setAssignTarget({ nodeId, modelId });
+    setAssignSelected(initial);
+    assignDialogRef.current?.showModal();
+  };
+
+  const applyAssignAliases = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assignTarget) return;
+    const chosen = aliases.filter((a) => assignSelected[a.alias]);
+    if (chosen.length === 0) {
+      assignDialogRef.current?.close();
+      return;
+    }
+    setAssignSaving(true);
+    try {
+      for (const a of chosen) {
+        const updated: AliasConfig = {
+          ...a,
+          primary_model: a.primary_node === assignTarget.nodeId ? assignTarget.modelId : a.primary_model,
+          fallback_model:
+            a.fallback_node === assignTarget.nodeId ? assignTarget.modelId : a.fallback_model
+        };
+        const res = await fetch(`/api/aliases/${encodeURIComponent(a.alias)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updated)
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `HTTP ${res.status}`);
+        }
+      }
+      assignDialogRef.current?.close();
+      setAssignTarget(null);
+      setDownloadNotice(
+        `Updated ${chosen.length} alias${chosen.length > 1 ? "es" : ""} to ${assignTarget.modelId}`
+      );
+      await onStatusRefresh();
+      onError(null);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to update aliases");
+    } finally {
+      setAssignSaving(false);
+    }
   };
 
   const openAliasDialog = (existing?: AliasConfig) => {
@@ -1279,33 +1345,43 @@ export function ModelsTab({
                       <td>
                         <div className="row-actions">
                           {engineModel && (
-                            <button
-                              type="button"
-                              className={`btn btn--sm ${isLoaded ? "" : "btn--accent"}`}
-                              disabled={isLoading || isUnloading}
-                              onClick={() =>
-                                void onModelAction(
-                                  inv.node_id,
-                                  engineModel.id,
-                                  isLoaded ? "unload" : "load"
-                                )
-                              }
-                            >
-                              {isLoading || isUnloading ? (
-                                <>
-                                  <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
-                                  {isUnloading ? "Unloading…" : "Loading…"}
-                                </>
-                              ) : isLoaded ? (
-                                <>
-                                  <Square size={11} aria-hidden="true" /> Unload
-                                </>
-                              ) : (
-                                <>
-                                  <Play size={11} aria-hidden="true" /> Load
-                                </>
-                              )}
-                            </button>
+                            <>
+                              <button
+                                type="button"
+                                className={`btn btn--sm ${isLoaded ? "" : "btn--accent"}`}
+                                disabled={isLoading || isUnloading}
+                                onClick={() =>
+                                  void onModelAction(
+                                    inv.node_id,
+                                    engineModel.id,
+                                    isLoaded ? "unload" : "load"
+                                  )
+                                }
+                              >
+                                {isLoading || isUnloading ? (
+                                  <>
+                                    <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
+                                    {isUnloading ? "Unloading…" : "Loading…"}
+                                  </>
+                                ) : isLoaded ? (
+                                  <>
+                                    <Square size={11} aria-hidden="true" /> Unload
+                                  </>
+                                ) : (
+                                  <>
+                                    <Play size={11} aria-hidden="true" /> Load
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn--sm"
+                                title="Update aliases pointing to this node"
+                                onClick={() => openAssignAliasesDialog(inv.node_id, engineModel.id)}
+                              >
+                                <Tag size={11} aria-hidden="true" /> Aliases
+                              </button>
+                            </>
                           )}
                           {f.managed ? (
                             <button
@@ -1598,6 +1674,13 @@ export function ModelsTab({
                       <div className="downloads-dock__actions">
                         <button
                           type="button"
+                          className="btn btn--sm"
+                          onClick={() => openAssignAliasesDialog(d.node_id, engineModel.id)}
+                        >
+                          <Tag size={11} aria-hidden="true" /> Update Aliases…
+                        </button>
+                        <button
+                          type="button"
                           className={`btn btn--sm ${isLoaded ? "" : "btn--accent"}`}
                           disabled={isBusy}
                           onClick={() =>
@@ -1632,6 +1715,76 @@ export function ModelsTab({
           )}
         </aside>
       )}
+      <dialog
+        ref={assignDialogRef}
+        aria-labelledby={assignDialogTitleId}
+        {...({ closedby: "any" } as Record<string, string>)}
+      >
+        <h2 id={assignDialogTitleId}>Update Aliases for {assignTarget?.nodeId}</h2>
+        {assignTarget && (
+          <form className="modal-form" onSubmit={applyAssignAliases}>
+            <p className="muted" style={{ margin: 0 }}>
+              Choose which aliases targeting <strong>{assignTarget.nodeId}</strong> should point to{" "}
+              <code>{assignTarget.modelId}</code>:
+            </p>
+            <div className="assign-alias-list">
+              {aliases
+                .filter(
+                  (a) =>
+                    a.primary_node === assignTarget.nodeId ||
+                    a.fallback_node === assignTarget.nodeId
+                )
+                .map((a) => {
+                  const isPrimary = a.primary_node === assignTarget.nodeId;
+                  const currentModel = isPrimary ? a.primary_model : a.fallback_model;
+                  return (
+                    <label key={a.alias} className="assign-alias-row">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(assignSelected[a.alias])}
+                        onChange={(e) =>
+                          setAssignSelected((prev) => ({ ...prev, [a.alias]: e.target.checked }))
+                        }
+                      />
+                      <span className="assign-alias-row__info">
+                        <span>
+                          <code>{a.alias}</code>{" "}
+                          <span className="pill">{a.task_kind}</span>{" "}
+                          <span className="muted">({isPrimary ? "primary" : "fallback"})</span>
+                        </span>
+                        <span className="muted" style={{ fontSize: "0.75rem" }}>
+                          Currently: <code>{currentModel || "none"}</code>
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              {aliases.every(
+                (a) =>
+                  a.primary_node !== assignTarget.nodeId &&
+                  a.fallback_node !== assignTarget.nodeId
+              ) && (
+                <p className="muted" style={{ margin: 0 }}>
+                  No existing aliases target {assignTarget.nodeId}. Use{" "}
+                  <strong>Add Alias</strong> to create one.
+                </p>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => assignDialogRef.current?.close()}
+              >
+                Cancel
+              </button>
+              <button type="submit" className="btn btn--accent" disabled={assignSaving}>
+                {assignSaving ? "Updating…" : "Update Selected"}
+              </button>
+            </div>
+          </form>
+        )}
+      </dialog>
     </div>
   );
 }

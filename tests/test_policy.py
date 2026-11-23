@@ -402,3 +402,67 @@ def test_post_splitch_work_gpu_util_grace_prevents_false_cooldown() -> None:
     assert gpu.telemetry is not None
     gpu.telemetry.non_llm_vram_mb = 6144.0
     assert check_node_eligibility(gpu, "coder-heavy", control, guards) == "gpu-rig_gpu_busy_app"
+
+
+def test_auto_heal_aliases_for_node_preserves_valid_and_embed_separation(tmp_path) -> None:
+    """Placeholder aliases auto-heal to newly indexed models without clobbering valid/embed ones."""
+    import asyncio
+
+    from backend.router.config import NodeConfig, SplitchConfig
+    from backend.router.telemetry import ClusterState
+
+    cfg = SplitchConfig(
+        nodes=[
+            NodeConfig(
+                id="pc",
+                display_name="PC",
+                role="gpu",
+                agent_url="http://127.0.0.1:8090",
+                engine_url="http://127.0.0.1:8081",
+            )
+        ],
+        aliases=[
+            AliasConfig(
+                alias="heavy",
+                task_kind="code",
+                primary_node="pc",
+                primary_model="coder-heavy",
+            ),
+            AliasConfig(
+                alias="valid-custom",
+                task_kind="chat",
+                primary_node="pc",
+                primary_model="existing-model",
+            ),
+            AliasConfig(
+                alias="embed",
+                task_kind="embed",
+                primary_node="pc",
+                primary_model="embed-bge",
+            ),
+        ],
+    )
+    cluster = ClusterState(cfg, data_dir=tmp_path)
+    pc = cluster.nodes["pc"]
+    pc.telemetry = NodeTelemetry(
+        node_id="pc",
+        role="gpu",
+        platform="linux",
+        timestamp=1.0,
+        engine="llama-server",
+        engine_healthy=True,
+        models=[
+            LoadedModel(id="Qwen3.8-27B-Q4_K_M", status="unloaded"),
+            LoadedModel(id="existing-model", status="loaded"),
+        ],
+    )
+
+    healed = asyncio.run(cluster.auto_heal_aliases_for_node(pc))
+    assert healed == ["heavy"]
+    assert cluster.aliases["heavy"].primary_model == "Qwen3.8-27B-Q4_K_M"
+    # Existing valid alias is untouched
+    assert cluster.aliases["valid-custom"].primary_model == "existing-model"
+    # Embed alias is not overwritten by a generative model
+    assert cluster.aliases["embed"].primary_model == "embed-bge"
+    # Persisted to aliases.json
+    assert (tmp_path / "aliases.json").is_file()

@@ -1763,7 +1763,34 @@ input[type="checkbox"][switch]:focus-visible {
 .downloads-dock__actions {
   display: flex;
   justify-content: flex-end;
+  gap: 0.4rem;
   padding-top: 0.15rem;
+}
+
+.assign-alias-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  max-block-size: 280px;
+  overflow-y: auto;
+}
+
+.assign-alias-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.assign-alias-row__info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-inline-size: 0;
 }
 
 /* Custom-styled native <progress> (modern-web-guidance: progress) */

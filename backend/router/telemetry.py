@@ -267,6 +267,54 @@ class ClusterState:
                 if resp.status_code < 400:
                     m.status = "unloaded"
 
+    async def persist_aliases(self) -> None:
+        base_dir = self.data_dir or (default_data_root() / "data")
+        aliases_file = base_dir / "aliases.json"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps([a.model_dump() for a in self.aliases.values()], indent=2)
+        await asyncio.to_thread(aliases_file.write_text, payload, "utf-8")
+
+    async def auto_heal_aliases_for_node(self, node: NodeStatus) -> list[str]:
+        """Rebind broken/placeholder aliases targeting `node` once real models are indexed."""
+        t = node.telemetry
+        if t is None or not t.models:
+            return []
+        real_ids = [
+            m.id
+            for m in t.models
+            if m.id and not any(skip in m.id.lower() for skip in ("mmproj", "imatrix"))
+        ]
+        if not real_ids:
+            return []
+        available_set = set(real_ids)
+        embed_tokens = ("embed", "bge-", "bge_", "nomic", "e5-", "gte-", "mxbai", "minilm")
+        embed_ids = [m for m in real_ids if any(tok in m.lower() for tok in embed_tokens)]
+        gen_ids = [m for m in real_ids if m not in embed_ids]
+
+        healed: list[str] = []
+        for alias in self.aliases.values():
+            replacement = (embed_ids[0] if embed_ids else None) if alias.task_kind == "embed" else (gen_ids[0] if gen_ids else None)
+            if not replacement:
+                continue
+            changed = False
+            if alias.primary_node == node.node_id and alias.primary_model not in available_set:
+                alias.primary_model = replacement
+                changed = True
+            if (
+                alias.fallback_node == node.node_id
+                and alias.fallback_model
+                and alias.fallback_model not in available_set
+            ):
+                alias.fallback_model = replacement
+                changed = True
+            if changed:
+                healed.append(alias.alias)
+
+        if healed:
+            with contextlib.suppress(OSError):
+                await self.persist_aliases()
+        return healed
+
     async def _poll_single(self, node: NodeStatus) -> None:
         assert self._poll_client is not None
         t0 = time.perf_counter()
@@ -280,6 +328,8 @@ class ClusterState:
             node.online = True
             node.telemetry = telemetry
             node.latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            if telemetry.models:
+                await self.auto_heal_aliases_for_node(node)
             if node.in_flight > 0:
                 node.last_splitch_work_ts = time.time()
             non_llm_mb, gpu_util, _, _ = watched_gpu_metrics(node)

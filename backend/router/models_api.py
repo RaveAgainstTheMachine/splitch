@@ -393,9 +393,8 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
             pass
 
     async def _persist_aliases() -> None:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps([a.model_dump() for a in cluster.aliases.values()], indent=2)
-        await asyncio.to_thread(aliases_file.write_text, payload, "utf-8")
+        cluster.data_dir = data_dir
+        await cluster.persist_aliases()
 
     @router.get("/models/search", response_model=list[HfRepoResult])
     async def search_hf_models(

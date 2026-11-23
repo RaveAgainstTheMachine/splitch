@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.10.2] - 2026-11-22
+
+### Smart Alias Management
+- **Auto-Heal Placeholder/Broken Aliases (`ClusterState.auto_heal_aliases_for_node`):** When a node indexes real models on `llama-server`/Ollama, any alias targeting that node whose model ID does not exist (such as default placeholders `coder-heavy` / `architect-dense`) automatically rebinds to the indexed model and persists to `aliases.json` — while preserving existing valid aliases and keeping `embed` aliases separated from generative models.
+- **Update Aliases Dialog (`ModelsTab.tsx`):** Added an **Update Aliases…** action on completed downloads in the **Downloads Dock** and an **Aliases** button on every indexed row in **Node Models**, opening a checkbox dialog to rebind selected aliases on that node to a newly added model without silently overwriting working setups.
+
 ## [0.10.1] - 2026-11-22
 
 ### Bug Fixes
