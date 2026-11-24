@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.agent import main as agent_mod
@@ -943,3 +944,40 @@ def test_streaming_first_chunk_failover_and_no_primary_retry_loop(monkeypatch) -
         router_mod.cluster.nodes.update(old_nodes)
         router_mod.cluster.aliases.clear()
         router_mod.cluster.aliases.update(old_aliases)
+
+
+def test_ui_update_cluster_security_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import HTTPException
+
+    from backend.router import app as router_mod
+
+    class _DummyClient:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+    class _DummyReq:
+        def __init__(self, host: str) -> None:
+            self.client = _DummyClient(host)
+            self.headers: dict[str, str] = {}
+
+    monkeypatch.setattr(router_mod, "API_KEY", "")
+    monkeypatch.setattr(router_mod, "API_KEY_HASH", "")
+    monkeypatch.delenv("SPLITCH_ALLOW_UI_UPDATE", raising=False)
+
+    # 1) Unauthenticated non-loopback LAN request is refused with 403
+    with pytest.raises(HTTPException) as exc_info:
+        router_mod._assert_ui_update_allowed(_DummyReq("198.51.100.42"))  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 403
+
+    # 2) Loopback request is allowed on open router
+    router_mod._assert_ui_update_allowed(_DummyReq("127.0.0.1"))  # type: ignore[arg-type]
+    router_mod._assert_ui_update_allowed(_DummyReq("::1"))  # type: ignore[arg-type]
+
+    # 3) Explicit SPLITCH_ALLOW_UI_UPDATE=1 opts in non-loopback requests
+    monkeypatch.setenv("SPLITCH_ALLOW_UI_UPDATE", "1")
+    router_mod._assert_ui_update_allowed(_DummyReq("198.51.100.42"))  # type: ignore[arg-type]
+    monkeypatch.delenv("SPLITCH_ALLOW_UI_UPDATE", raising=False)
+
+    # 4) Authenticated router allows non-loopback (auth middleware enforces Bearer/cookie)
+    monkeypatch.setattr(router_mod, "API_KEY", "test-secret-key")
+    router_mod._assert_ui_update_allowed(_DummyReq("198.51.100.42"))  # type: ignore[arg-type]

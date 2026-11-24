@@ -24,16 +24,17 @@ import httpx
 from pydantic import BaseModel, Field
 
 from backend.router.config import default_data_root
-from backend.router.telemetry import VERSION
 from backend.shared.engines import (
     EngineBackend,
     EngineTarget,
     get_engine_status,
     install_or_update_engine,
     read_engine_meta,
+    read_mlx_engine_meta,
     read_sd_engine_meta,
 )
 from backend.shared.progress import TerminalProgress, null_step
+from backend.version import __version__ as VERSION
 
 CheckStatus = Literal["ok", "warn", "error", "info"]
 
@@ -858,6 +859,13 @@ def perform_update(
             )
             result.steps.extend(sd_res.steps)
             if sd_res.ok and sd_res.action in ("install", "update"):
+                result.updated = True
+        if read_mlx_engine_meta():
+            mlx_res = install_or_update_engine(
+                "mlx-lm", backend=engine_backend, force=force, progress=progress
+            )
+            result.steps.extend(mlx_res.steps)
+            if mlx_res.ok and mlx_res.action in ("install", "update"):
                 result.updated = True
 
     if restart_services and (result.updated or result.ui_rebuilt):

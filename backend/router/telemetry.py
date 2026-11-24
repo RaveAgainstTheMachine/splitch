@@ -27,6 +27,7 @@ from backend.router.policy import (
     is_splitch_recently_active,
     watched_gpu_metrics,
 )
+from backend.shared.engines import get_engine_status
 from backend.shared.models import (
     AliasConfig,
     ControlState,
@@ -37,6 +38,7 @@ from backend.shared.models import (
     TraceEntry,
     UiThemeConfig,
     UiThemeUpdate,
+    UpdateSummary,
 )
 from backend.shared.secrets import (
     SecretVault,
@@ -45,6 +47,7 @@ from backend.shared.secrets import (
     resolve_secret_value,
     sign_agent_request_ed25519,
 )
+from backend.shared.updater import check_update
 from backend.version import __version__ as VERSION
 
 
@@ -96,6 +99,8 @@ class ClusterState:
         self._poll_client: httpx.AsyncClient | None = None
         self._proxy_client: httpx.AsyncClient | None = None
         self._poll_task: asyncio.Task | None = None
+        self.update_summary: UpdateSummary | None = None
+        self._update_check_task: asyncio.Task | None = None
 
     def agent_headers(self, method: str = "ANY", path: str = "*") -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -239,8 +244,14 @@ class ClusterState:
         )
         await self.poll_all_nodes()
         self._poll_task = asyncio.create_task(self._poll_loop())
+        if not os.getenv("PYTEST_CURRENT_TEST") and self._update_check_interval_s() > 0:
+            self._update_check_task = asyncio.create_task(self._update_check_loop())
 
     async def stop(self) -> None:
+        if self._update_check_task:
+            self._update_check_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._update_check_task
         if self._poll_task:
             self._poll_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -249,6 +260,43 @@ class ClusterState:
             await self._poll_client.aclose()
         if self._proxy_client:
             await self._proxy_client.aclose()
+
+    @staticmethod
+    def _update_check_interval_s() -> float:
+        raw = os.getenv("SPLITCH_UPDATE_CHECK_INTERVAL_S", "21600").strip()
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return 21600.0
+
+    async def refresh_update_summary(self, *, fetch_remote: bool = True) -> UpdateSummary:
+        up_status = None
+        eng_status = None
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            up_status = await asyncio.to_thread(check_update, fetch_remote=fetch_remote)
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            eng_status = await asyncio.to_thread(get_engine_status, check_remote=fetch_remote)
+        summary = UpdateSummary(
+            update_available=bool(up_status and up_status.update_available),
+            behind_count=int(up_status.behind_count) if up_status else 0,
+            local_sha=(up_status.local_sha if up_status else "") or "",
+            remote_sha=(up_status.remote_sha if up_status else "") or "",
+            checked_at=time.time(),
+            engine_update_available=bool(eng_status and eng_status.update_available),
+            latest_llama_tag=(eng_status.latest_llama_tag if eng_status else "") or "",
+        )
+        self.update_summary = summary
+        await self.broadcast_snapshot()
+        return summary
+
+    async def _update_check_loop(self) -> None:
+        await asyncio.sleep(15.0)
+        while True:
+            await self.refresh_update_summary(fetch_remote=True)
+            interval = self._update_check_interval_s()
+            if interval <= 0:
+                return
+            await asyncio.sleep(interval)
 
     async def _auto_evict_loaded_models(
         self, node: NodeStatus, telemetry: NodeTelemetry
@@ -377,6 +425,7 @@ class ClusterState:
             nodes=list(self.nodes.values()),
             aliases=list(self.aliases.values()),
             traces=list(self.traces),
+            update_summary=self.update_summary,
         )
 
     async def update_theme(self, update: UiThemeUpdate) -> UiThemeConfig:

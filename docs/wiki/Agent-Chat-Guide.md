@@ -61,7 +61,18 @@ Whenever the model outputs a runnable **`html`**, **`htm`**, or **`svg`** fenced
 
 ---
 
-## 4. Organizing Chats: Pinning, Multi-Select Bulk Delete & Trash Bin
+## 4. Workspace File Tree & Git Review Explorer
+
+Switch the left sidebar between **Chats**, **Files**, and **Changes (N)** to inspect and manage the active `--enable-tools` node's workspace without leaving Splitch:
+
+- **Lazy File Tree (`Files`):** Expands folders on demand (skipping `node_modules`, `.venv`, `.git`, `dist`, `__pycache__`), shows inline Git status badges (`M`, `A`, `D`, `U`), and provides a 1-click **`@`** button on every file to attach `@relative/path` to the composer.
+- **Read-Only File & Diff Viewer (Right Split Pane):** Clicking any file in **Files** opens a line-numbered, syntax-aware viewer with **Copy** and **Attach `@path`**. Clicking any file in **Changes** opens a colorized unified diff viewer with a **Staged / Working Tree** toggle.
+- **Safe Local Git Actions (`Changes`):** View current branch + ahead/behind counts, **Stage / Unstage** individual or all files, **Discard** uncommitted changes (with confirmation), **Commit**, and click **Generate** to draft a Conventional Commit message from your diff using the router's active/fast model. (`git push` and `reset --hard` are intentionally excluded.)
+- **Auto-Refresh:** Git status automatically refreshes after every completed agent turn.
+
+---
+
+## 5. Organizing Chats: Pinning, Multi-Select Bulk Delete & Trash Bin
 
 - **Pin to Top:** Click the **Pin** icon on any conversation in the sidebar to keep important threads anchored at the top. Unpinning preserves the original `updated_at` timestamp so the thread returns smoothly to its exact chronological slot.
 - **Multi-Select Bulk Actions:** Click **Select** next to **New Chat** (press `Esc` or **Done** to exit):
@@ -74,7 +85,7 @@ Whenever the model outputs a runnable **`html`**, **`htm`**, or **`svg`** fenced
 
 ---
 
-## 5. Appearance & Theme Customization
+## 6. Appearance & Theme Customization
 
 ![Splitch Appearance and Theme Customizer](../assets/screenshots/appearance.png)
 

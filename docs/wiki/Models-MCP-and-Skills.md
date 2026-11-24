@@ -8,8 +8,8 @@ Beyond routing and Agent Chat, Splitch provides a unified management plane acros
 
 ![Splitch Models and Aliases](../assets/screenshots/models.png)
 
-### Hugging Face GGUF Discovery, Fit Switch & Inline Model Cards
-1. Pick a **Target Node** (and specific **GPU** on multi-GPU nodes, or `All GPUs`) in the **Models & Aliases** tab.
+### Hugging Face GGUF & MLX Discovery, Fit Switch & Inline Model Cards
+1. Pick a **Format** (`GGUF (llama.cpp)` or `MLX (Apple Silicon)` — auto-selects `MLX` when targeting an `mlx-lm` node), **Target Node** (and specific **GPU** on multi-GPU nodes, or `All GPUs`) in the **Models & Aliases** tab.
 2. Toggle **`Only show models that fit (≤ XX.X GB)`** (`<input type="checkbox" switch>`) to filter both search result repositories and expanded GGUF files to those that fit within the selected GPU or node memory budget.
 3. Search Hugging Face (e.g., `Qwen3-Coder`, `Llama-3.3`, `Gemma-3`) — results render as **full-width horizontal slices** displaying parameter count, estimated minimum GGUF size, fit badge, context length, capabilities, downloads, likes, and recency.
 4. Click any repository slice to expand an inline drawer showing the cleaned **Hugging Face Model Description** (`README.md` excerpt + `Base`, `Arch`, `Context`, `Params` metadata pills) above **full-width horizontal GGUF quantization slices** with single-GPU vs `Multi-GPU` fit badges.

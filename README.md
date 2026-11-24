@@ -33,7 +33,7 @@
 
 1. **Multiple Computers, One Local AI Cluster:** Pool an NVIDIA gaming PC, an AMD/Intel compute box, an Apple Silicon Mac, and an always-on Linux server behind a single hardware-aware router. Start on one machine (`splitch up`) and add nodes without changing client URLs.
 2. **Automatic GPU Yielding When Gaming:** Live GPU telemetry (`nvidia-smi pmon`, ROCm, Vulkan, Apple Silicon) detects 3D games or creative workloads, yields the busy GPU, and transparently fails over active requests to your standby node.
-3. **One Unified Endpoint for Every Tool:** Exposes OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), Embeddings (`/v1/embeddings`), FIM (`/infill`), and Images/Videos (`/v1/images/generations`) over **`llama-server`**, **Ollama**, **LM Studio**, **vLLM**, **`sd-server`**, and **ComfyUI** — plus a built-in **Agent Chat IDE**, **Media Studio**, **MCP/Skills control plane**, and **Benchmark harness**.
+3. **One Unified Endpoint for Every Tool:** Exposes OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), Embeddings (`/v1/embeddings`), FIM (`/infill`), and Images/Videos (`/v1/images/generations`) over **`llama-server`**, **Apple Silicon `mlx-lm`**, **Ollama**, **LM Studio**, **vLLM**, **Strata**, **`sd-server`**, and **ComfyUI** — plus a built-in **Agent Chat IDE** (with **Workspace File Tree**, **Git Review & AI Commit**, and **Artifact Preview**), **Media Studio**, **MCP/Skills control plane**, **UI Cluster Update & Rollback**, and **Benchmark harness**.
 
 ---
 

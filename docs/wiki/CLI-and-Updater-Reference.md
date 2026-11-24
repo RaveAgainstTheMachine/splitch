@@ -141,11 +141,13 @@ splitch engine status --check-remote
 splitch engine install llama.cpp --dry-run
 splitch engine install sd.cpp --dry-run
 
-# Atomically install or upgrade managed llama.cpp or stable-diffusion.cpp (`sd-server`)
+# Atomically install or upgrade managed llama.cpp, stable-diffusion.cpp (`sd-server`), or Apple Silicon MLX (`mlx-lm`)
 splitch engine install llama.cpp --backend auto
 splitch engine install sd.cpp --backend auto
+splitch engine install mlx-lm          # macOS arm64 only: isolated uv venv + splitch-mlx-server
 splitch engine update llama.cpp
 splitch engine update sd.cpp
+splitch engine update mlx-lm
 
 # Install or update Ollama via official installer / Homebrew / winget
 splitch engine install ollama
@@ -178,6 +180,8 @@ splitch update --rebuild-ui              # force dashboard rebuild even if uncha
 splitch update --no-restart              # skip automatic systemd / launchd restart
 splitch update --branch main --force     # override branch or bypass dirty-tree guard
 ```
+
+> **UI Cluster Update & Rollback:** `splitch-router` also checks upstream every 6 hours (`SPLITCH_UPDATE_CHECK_INTERVAL_S=21600`, `0` to disable), surfaces an **Update** pill in the topbar & system tray, and lets authenticated/localhost users run **Update All Nodes** (updating worker nodes first, rolling back siblings on partial failure, then updating the router) or **Rollback Cluster** from **Settings → Security & System**.
 
 ### `splitch launch`, `splitch tray`, `splitch stop` & `splitch desktop` — Desktop Launcher & Universal System Tray
 

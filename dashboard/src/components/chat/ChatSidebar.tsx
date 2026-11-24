@@ -1,10 +1,27 @@
 import type React from "react";
-import { ArchiveRestore, CheckSquare, Pin, Plus, Search, Trash2 } from "lucide-react";
+import {
+  ArchiveRestore,
+  CheckSquare,
+  FolderTree,
+  GitBranch,
+  MessageSquare,
+  Pin,
+  Plus,
+  Search,
+  Trash2
+} from "lucide-react";
 import type { ConversationSummary } from "../../types";
+import { WorkspaceExplorer, type WorkspaceExplorerProps } from "./WorkspaceExplorer";
 import { fmtShortDate } from "./chatHelpers";
+
+export type SidebarMode = "chats" | "files" | "changes";
 
 export interface ChatSidebarProps {
   sidebarCollapsed: boolean;
+  sidebarMode: SidebarMode;
+  setSidebarMode: (mode: SidebarMode) => void;
+  dirtyCount: number;
+  workspaceProps: Omit<WorkspaceExplorerProps, "mode">;
   streaming: boolean;
   searchOpen: boolean;
   setSearchOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -44,6 +61,10 @@ export interface ChatSidebarProps {
 
 export function ChatSidebar({
   sidebarCollapsed,
+  sidebarMode,
+  setSidebarMode,
+  dirtyCount,
+  workspaceProps,
   streaming,
   searchOpen,
   setSearchOpen,
@@ -83,9 +104,47 @@ export function ChatSidebar({
   return (
     <aside
       className={`chat-sidebar ${sidebarCollapsed ? "chat-sidebar--collapsed" : ""}`}
-      aria-label="Conversations"
+      aria-label="Workspace & Conversations"
     >
-      <div className="chat-sidebar__head">
+      <div className="sidebar-mode-tabs" role="tablist" aria-label="Sidebar mode">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={sidebarMode === "chats"}
+          className={`sidebar-mode-tab ${sidebarMode === "chats" ? "sidebar-mode-tab--active" : ""}`}
+          onClick={() => setSidebarMode("chats")}
+        >
+          <MessageSquare size={12} aria-hidden="true" />
+          <span>Chats</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={sidebarMode === "files"}
+          className={`sidebar-mode-tab ${sidebarMode === "files" ? "sidebar-mode-tab--active" : ""}`}
+          onClick={() => setSidebarMode("files")}
+        >
+          <FolderTree size={12} aria-hidden="true" />
+          <span>Files</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={sidebarMode === "changes"}
+          className={`sidebar-mode-tab ${sidebarMode === "changes" ? "sidebar-mode-tab--active" : ""}`}
+          onClick={() => setSidebarMode("changes")}
+        >
+          <GitBranch size={12} aria-hidden="true" />
+          <span>Changes</span>
+          {dirtyCount > 0 && <span className="sidebar-mode-badge">{dirtyCount}</span>}
+        </button>
+      </div>
+
+      {sidebarMode !== "chats" ? (
+        <WorkspaceExplorer mode={sidebarMode} {...workspaceProps} />
+      ) : (
+        <>
+          <div className="chat-sidebar__head">
         <button
           type="button"
           className="btn chat-new-btn"
@@ -383,6 +442,8 @@ export function ChatSidebar({
             ))
           )}
         </ul>
+      )}
+        </>
       )}
     </aside>
   );

@@ -1,7 +1,7 @@
 // Exact 1:1 mirror of backend/shared/models.py
 
 export type NodeRole = "gpu" | "unified" | "cpu";
-export type EngineKind = "llama-server" | "ollama" | "openai" | "unknown";
+export type EngineKind = "llama-server" | "ollama" | "mlx-lm" | "strata" | "openai" | "unknown";
 export type MediaEngineKind = "sd-server" | "comfyui" | "openai-images" | "none";
 export type MediaKind = "image" | "video";
 export type GpuVendor = "nvidia" | "amd" | "intel" | "apple" | "other";
@@ -41,6 +41,7 @@ export interface NodeTelemetry {
   platform: string;
   timestamp: number;
   online: boolean;
+  version?: string;
   cpu_percent: number;
   ram_total_mb: number;
   ram_used_mb: number;
@@ -131,6 +132,16 @@ export interface TraceEntry {
   error: string | null;
 }
 
+export interface UpdateSummary {
+  update_available: boolean;
+  behind_count: number;
+  local_sha: string;
+  remote_sha: string;
+  checked_at: number;
+  engine_update_available: boolean;
+  latest_llama_tag: string;
+}
+
 export interface DashboardSnapshot {
   version: string;
   uptime_s: number;
@@ -139,6 +150,7 @@ export interface DashboardSnapshot {
   nodes: NodeStatus[];
   aliases: AliasConfig[];
   traces: TraceEntry[];
+  update_summary?: UpdateSummary | null;
 }
 
 export interface LocalModelFile {
@@ -146,6 +158,7 @@ export interface LocalModelFile {
   path: string;
   size_gb: number;
   managed: boolean;
+  format?: "gguf" | "mlx";
 }
 
 export interface DownloadJob {
@@ -621,4 +634,93 @@ export interface BenchReport {
   concurrency: number;
   max_tokens: number;
   results: BenchTargetResult[];
+}
+
+export type NodeUpdateStepStatus =
+  | "pending"
+  | "updating"
+  | "restarting"
+  | "done"
+  | "rolled_back"
+  | "failed";
+
+export interface NodeUpdateRunResult {
+  node_id: string;
+  display_name: string;
+  status: NodeUpdateStepStatus;
+  ok: boolean;
+  updated: boolean;
+  rolled_back: boolean;
+  previous_sha: string;
+  current_sha: string;
+  steps: string[];
+  error: string | null;
+}
+
+export interface ClusterUpdateJob {
+  id: string;
+  action: "update" | "rollback";
+  status: "idle" | "running" | "restarting" | "done" | "aborted" | "failed";
+  started_at: number;
+  finished_at: number | null;
+  with_engine: boolean;
+  router_restarting: boolean;
+  rolled_back: boolean;
+  error: string | null;
+  nodes: NodeUpdateRunResult[];
+}
+
+export interface WorkspaceTreeEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size_bytes: number;
+  git_status: string;
+}
+
+export interface WorkspaceTreeListing {
+  root: string;
+  subpath: string;
+  dir_path: string;
+  entries: WorkspaceTreeEntry[];
+}
+
+export interface WorkspaceFileContent {
+  path: string;
+  content: string;
+  language: string;
+  size_bytes: number;
+  truncated: boolean;
+  is_binary: boolean;
+}
+
+export interface GitFileChange {
+  path: string;
+  index_status: string;
+  worktree_status: string;
+  staged: boolean;
+  untracked: boolean;
+}
+
+export interface GitStatusResponse {
+  is_git_repo: boolean;
+  branch: string;
+  ahead: number;
+  behind: number;
+  changes: GitFileChange[];
+  error: string | null;
+}
+
+export interface GitDiffResponse {
+  path: string;
+  staged: boolean;
+  diff: string;
+  truncated: boolean;
+}
+
+export interface GitActionResponse {
+  ok: boolean;
+  output: string;
+  commit_sha: string;
+  error: string | null;
 }

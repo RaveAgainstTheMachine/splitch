@@ -35,10 +35,11 @@ from backend.shared.models import GpuDevice
 from backend.shared.progress import TerminalProgress, null_download, null_step
 
 EngineBackend = Literal["auto", "cuda", "rocm", "vulkan", "metal", "cpu"]
-EngineTarget = Literal["llama.cpp", "ollama", "sd.cpp"]
+EngineTarget = Literal["llama.cpp", "ollama", "sd.cpp", "mlx-lm"]
 
 LLAMA_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 SD_RELEASES_API = "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases"
+MLX_LM_PYPI_API = "https://pypi.org/pypi/mlx-lm/json"
 
 
 class EngineBinaryInfo(BaseModel):
@@ -93,6 +94,31 @@ def _managed_sd_dir() -> Path:
 
 def _sd_meta_path() -> Path:
     return default_data_root() / "sd_engine_meta.json"
+
+
+def _managed_mlx_dir() -> Path:
+    return default_data_root() / "engines" / "mlx-lm"
+
+
+def _mlx_meta_path() -> Path:
+    return default_data_root() / "mlx_engine_meta.json"
+
+
+def read_mlx_engine_meta() -> dict:
+    p = _mlx_meta_path()
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_mlx_engine_meta(meta: dict) -> None:
+    p = _mlx_meta_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
 
 def read_sd_engine_meta() -> dict:
@@ -321,6 +347,33 @@ def detect_installed_engines() -> list[EngineBinaryInfo]:
                     path=sys_sd,
                     version="system",
                     managed=False,
+                )
+            )
+
+    # 5. Managed or system Apple Silicon MLX (`mlx-lm`)
+    mlx_meta = read_mlx_engine_meta()
+    managed_mlx_py = _managed_mlx_dir() / ".venv" / "bin" / "python"
+    if managed_mlx_py.is_file():
+        found.append(
+            EngineBinaryInfo(
+                engine="mlx-lm",
+                path=str(mlx_meta.get("shim_path") or managed_mlx_py),
+                version=str(mlx_meta.get("version") or "managed"),
+                build_tag=str(mlx_meta.get("version") or ""),
+                managed=True,
+                backend="metal",
+            )
+        )
+    else:
+        sys_mlx = shutil.which("mlx_lm.server") or shutil.which("splitch-mlx-server")
+        if sys_mlx:
+            found.append(
+                EngineBinaryInfo(
+                    engine="mlx-lm",
+                    path=sys_mlx,
+                    version="system",
+                    managed=False,
+                    backend="metal",
                 )
             )
 
@@ -919,6 +972,14 @@ def install_or_update_engine(
     step_ctx = progress.step if progress is not None else null_step
     if engine == "ollama":
         return _install_or_update_ollama(dry_run=dry_run, progress=progress)
+    if engine == "mlx-lm":
+        return _install_or_update_mlx(
+            version=version,
+            bin_dir=bin_dir,
+            force=force,
+            dry_run=dry_run,
+            progress=progress,
+        )
     if engine == "sd.cpp":
         os_name = _norm_os()
         arch = _norm_arch()
@@ -1123,6 +1184,168 @@ def install_or_update_engine(
                 backend=eff_backend,
                 bin_dir=bin_dir,
             )
+
+
+def fetch_latest_mlx_version() -> str:
+    """Fetch the latest `mlx-lm` release version from PyPI."""
+    with httpx.Client(timeout=15.0, follow_redirects=True) as client:
+        r = client.get(MLX_LM_PYPI_API, headers={"Accept": "application/json"})
+        r.raise_for_status()
+        data = r.json()
+    info = data.get("info") if isinstance(data, dict) else {}
+    return str(info.get("version") or "").strip()
+
+
+def _write_mlx_shim(venv_py: Path, bin_dir: Path) -> Path:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    server_script = Path(__file__).resolve().parent / "mlx_server.py"
+    shim = bin_dir / "splitch-mlx-server"
+    content = (
+        "#!/bin/sh\n"
+        "# Managed by Splitch — runs Apple Silicon MLX OpenAI server in isolated venv\n"
+        f'exec "{venv_py}" "{server_script}" "$@"\n'
+    )
+    shim.write_text(content, encoding="utf-8")
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return shim
+
+
+def _install_or_update_mlx(
+    *,
+    version: str = "latest",
+    bin_dir: Path | None = None,
+    force: bool = False,
+    dry_run: bool = False,
+    progress: TerminalProgress | None = None,
+) -> EngineActionResult:
+    step_ctx = progress.step if progress is not None else null_step
+    os_name = _norm_os()
+    arch = _norm_arch()
+    if os_name != "macos" or arch != "arm64":
+        return EngineActionResult(
+            ok=False,
+            engine="mlx-lm",
+            backend="metal",
+            error=f"mlx-lm requires Apple Silicon macOS (macos/arm64); detected {os_name}/{arch}",
+        )
+
+    prev_meta = read_mlx_engine_meta()
+    prev_ver = str(prev_meta.get("version") or "")
+    target_ver = ""
+    if version and version != "latest":
+        target_ver = version.lstrip("v")
+    else:
+        try:
+            with step_ctx("Resolving latest mlx-lm release from PyPI"):
+                target_ver = fetch_latest_mlx_version()
+        except (httpx.HTTPError, ValueError) as exc:
+            if not prev_ver:
+                return EngineActionResult(
+                    ok=False,
+                    engine="mlx-lm",
+                    backend="metal",
+                    error=f"Failed to resolve mlx-lm version from PyPI: {exc}",
+                )
+
+    venv_dir = _managed_mlx_dir() / ".venv"
+    venv_py = venv_dir / "bin" / "python"
+    resolved_bin_dir = bin_dir or (Path.home() / ".local" / "bin")
+    pkg_spec = f"mlx-lm=={target_ver}" if target_ver else "mlx-lm"
+
+    if prev_ver and target_ver and prev_ver == target_ver and venv_py.is_file() and not force:
+        return EngineActionResult(
+            ok=True,
+            engine="mlx-lm",
+            action="noop",
+            previous_tag=prev_ver,
+            current_tag=prev_ver,
+            backend="metal",
+            binary_path=str(venv_py),
+            shim_path=str(prev_meta.get("shim_path") or ""),
+            steps=[f"Managed mlx-lm is already up to date ({prev_ver})"],
+        )
+
+    if dry_run:
+        steps = [
+            f"Resolved mlx-lm {target_ver or 'latest'} for macos/arm64 (backend=metal)",
+            f"Would create/update isolated venv at {venv_dir}",
+            f"Would install {pkg_spec}",
+            f"Would write shim at {resolved_bin_dir / 'splitch-mlx-server'}",
+        ]
+        return EngineActionResult(
+            ok=True,
+            engine="mlx-lm",
+            action="dry-run",
+            previous_tag=prev_ver,
+            current_tag=target_ver or "latest",
+            backend="metal",
+            steps=steps,
+        )
+
+    uv_bin = shutil.which("uv")
+    steps: list[str] = []
+    venv_dir.parent.mkdir(parents=True, exist_ok=True)
+    if not venv_py.is_file():
+        create_cmd = [uv_bin, "venv", str(venv_dir)] if uv_bin else [sys.executable, "-m", "venv", str(venv_dir)]
+        with step_ctx("Creating isolated mlx-lm virtual environment"):
+            rc, _, err = _run_cmd(create_cmd, timeout=120.0)
+        if rc != 0:
+            return EngineActionResult(
+                ok=False,
+                engine="mlx-lm",
+                backend="metal",
+                previous_tag=prev_ver,
+                error=f"Failed to create mlx-lm venv: {err}",
+            )
+        steps.append(f"Created isolated venv at {venv_dir}")
+
+    install_cmd = (
+        [uv_bin, "pip", "install", "--python", str(venv_py), "--upgrade", pkg_spec]
+        if uv_bin
+        else [str(venv_py), "-m", "pip", "install", "--upgrade", pkg_spec]
+    )
+    with step_ctx(f"Installing {pkg_spec} into isolated venv"):
+        rc, _, err = _run_cmd(install_cmd, timeout=600.0)
+    if rc != 0:
+        return EngineActionResult(
+            ok=False,
+            engine="mlx-lm",
+            backend="metal",
+            previous_tag=prev_ver,
+            error=f"Failed to install {pkg_spec}: {err}",
+        )
+    steps.append(f"Installed {pkg_spec}")
+
+    _, installed_ver, _ = _run_cmd(
+        [str(venv_py), "-c", "import importlib.metadata as m; print(m.version('mlx-lm'))"],
+        timeout=10.0,
+    )
+    cur_ver = installed_ver.strip() or target_ver or "installed"
+    shim_path = _write_mlx_shim(venv_py, resolved_bin_dir)
+    steps.append(f"Wrote shim: {shim_path}")
+
+    write_mlx_engine_meta(
+        {
+            "engine": "mlx-lm",
+            "version": cur_ver,
+            "backend": "metal",
+            "venv_path": str(venv_dir),
+            "binary_path": str(venv_py),
+            "shim_path": str(shim_path),
+            "updated_at": time.time(),
+        }
+    )
+    return EngineActionResult(
+        ok=True,
+        engine="mlx-lm",
+        action="update" if prev_ver else "install",
+        previous_tag=prev_ver,
+        current_tag=cur_ver,
+        backend="metal",
+        binary_path=str(venv_py),
+        shim_path=str(shim_path),
+        steps=steps,
+    )
 
 
 def _install_or_update_ollama(

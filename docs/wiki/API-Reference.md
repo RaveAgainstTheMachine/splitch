@@ -186,6 +186,16 @@ Authenticated with `SPLITCH_AGENT_TOKEN` when configured:
 | `POST` | `/sync/client-config` | Merge generated client config (`opencode`, `zed`, `hermes`, `codex`, `claude_code`, `aider`) into local user config path. |
 | `POST` | `/sync/mcp-script` | Write a custom generated Python MCP script to local node. |
 | `GET` | `/workspace/dirs` | List sandboxed subdirectories (requires `SPLITCH_ENABLE_TOOLS=1`). |
+| `GET` | `/workspace/tree` | Lazy directory listing with file sizes (requires `SPLITCH_ENABLE_TOOLS=1`). |
+| `GET` | `/workspace/file` | Read-only file viewer (256 KB cap, binary detection, language inference). |
+| `GET` | `/workspace/git/status` | Git branch, ahead/behind, and staged/unstaged/untracked changes. |
+| `GET` | `/workspace/git/diff` | Unified diff for staged or working-tree/untracked files. |
+| `POST` | `/workspace/git/stage` | Stage selected workspace paths (`git add --`). |
+| `POST` | `/workspace/git/unstage` | Unstage selected workspace paths (`git restore --staged --`). |
+| `POST` | `/workspace/git/discard` | Discard working-tree changes or remove untracked files. |
+| `POST` | `/workspace/git/commit` | Commit staged changes with message. |
+| `POST` | `/system/update` | Signed self-update endpoint for worker node agents (`splitch-router` → `splitch-agent`). |
+| `POST` | `/system/rollback` | Signed rollback endpoint for worker node agents. |
 | `POST` | `/tools/execute` | Execute a sandboxed Agent Chat workspace tool (requires `SPLITCH_ENABLE_TOOLS=1`). |
 
 ---
@@ -225,6 +235,25 @@ Authenticated with `SPLITCH_AGENT_TOKEN` when configured:
 | `GET` | `/api/media/files/{filename}` | Serve generated PNG/JPEG/WebP/MP4/WebM artifacts safely. |
 | `POST` | `/v1/images/generations` | OpenAI-compatible synchronous image generation (`b64_json` or `url`). |
 | `POST` | `/v1/videos/generations` | Synchronous video generation via `ComfyUI` or video-enabled `sd-server`. |
+
+---
+
+## 9. Cluster Self-Update, Rollback & Workspace Git Explorer
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` | `/api/system/update-cluster` | Update all online worker nodes first, roll back siblings on partial failure, then update router (requires auth, loopback, or `SPLITCH_ALLOW_UI_UPDATE=1`). |
+| `POST` | `/api/system/rollback-cluster` | Roll back online worker nodes and router to their previous git revision. |
+| `GET` | `/api/system/update-cluster/status` | Poll live per-node progress for the active cluster update/rollback job. |
+| `GET` | `/api/nodes/{node_id}/workspace/tree` | Proxy lazy directory tree listing for a tools-enabled node. |
+| `GET` | `/api/nodes/{node_id}/workspace/file` | Proxy read-only file content for a tools-enabled node. |
+| `GET` | `/api/nodes/{node_id}/git/status` | Proxy Git repository status for a tools-enabled node. |
+| `GET` | `/api/nodes/{node_id}/git/diff` | Proxy unified diff for a file (`staged=true\|false`). |
+| `POST` | `/api/nodes/{node_id}/git/stage` | Stage selected paths on target node. |
+| `POST` | `/api/nodes/{node_id}/git/unstage` | Unstage selected paths on target node. |
+| `POST` | `/api/nodes/{node_id}/git/discard` | Discard uncommitted changes on target node. |
+| `POST` | `/api/nodes/{node_id}/git/commit` | Commit staged changes on target node. |
+| `POST` | `/api/nodes/{node_id}/git/generate-commit-message` | Summarize staged/working diff into a Conventional Commit message via `/v1/chat/completions`. |
 
 ---
 

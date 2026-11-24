@@ -3,6 +3,7 @@ import {
   Activity,
   BookOpen,
   Cpu,
+  Download,
   Gamepad2,
   Gauge,
   HardDrive,
@@ -487,6 +488,17 @@ export default function App() {
         </div>
 
         <div className="topbar__meta">
+          {snapshot?.update_summary?.update_available && (
+            <button
+              type="button"
+              className="endpoint-pill endpoint-pill--btn pill--accent"
+              onClick={() => openSettings("security")}
+              title={`Splitch update available (${snapshot.update_summary.behind_count} commit${snapshot.update_summary.behind_count === 1 ? "" : "s"} behind)`}
+            >
+              <Download size={12} aria-hidden="true" />
+              <span>Update</span>
+            </button>
+          )}
           <button
             type="button"
             className={`endpoint-pill endpoint-pill--btn status-pill ${

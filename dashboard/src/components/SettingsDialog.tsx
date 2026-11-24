@@ -698,6 +698,8 @@ export function SettingsDialog({
                 setOriginsText={setOriginsText}
                 saving={saving}
                 saveSettings={saveSettings}
+                snapshot={snapshot}
+                onLocalError={setLocalError}
               />
             )}
 

@@ -180,6 +180,7 @@ export function ModelsTab({
 }) {
   const [inventory, setInventory] = useState<NodeModelInventory[]>([]);
   const [query, setQuery] = useState("Qwen3-Coder");
+  const [searchFormat, setSearchFormat] = useState<"gguf" | "mlx">("gguf");
   const [sortBy, setSortBy] = useState<SortKey>("downloads");
   const [sortDesc, setSortDesc] = useState(true);
   const [sortStatusText, setSortStatusText] = useState("");
@@ -310,7 +311,8 @@ export function ModelsTab({
   const executeHfSearch = async (
     q: string,
     sortKey: SortKey,
-    desc: boolean
+    desc: boolean,
+    fmt: "gguf" | "mlx" = searchFormat
   ) => {
     const trimmed = q.trim();
     if (trimmed.length < 2) return;
@@ -319,7 +321,7 @@ export function ModelsTab({
       const serverSort = sortKey === "gguf_count" ? "downloads" : sortKey;
       const dir = desc ? -1 : 1;
       const res = await fetch(
-        `/api/models/search?q=${encodeURIComponent(trimmed)}&sort=${encodeURIComponent(serverSort)}&direction=${dir}&limit=18`
+        `/api/models/search?q=${encodeURIComponent(trimmed)}&sort=${encodeURIComponent(serverSort)}&direction=${dir}&limit=18&format=${encodeURIComponent(fmt)}`
       );
       if (!res.ok) throw new Error(`Search failed: HTTP ${res.status}`);
       const items: HfRepoResult[] = await res.json();
@@ -449,7 +451,12 @@ export function ModelsTab({
     setFitFilter(checked ? "selected" : "all");
   };
 
-  const pullGguf = async (repoId: string, filename: string, nodeId: string) => {
+  const pullGguf = async (
+    repoId: string,
+    filename: string,
+    nodeId: string,
+    format: "gguf" | "mlx" = "gguf"
+  ) => {
     const pullKey = `${nodeId}:${filename}`;
     setStartingPulls((prev) => ({ ...prev, [pullKey]: true }));
     setDownloadsOpen(true);
@@ -457,7 +464,7 @@ export function ModelsTab({
       const res = await fetch("/api/models/pull", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ node_id: nodeId, repo_id: repoId, filename })
+        body: JSON.stringify({ node_id: nodeId, repo_id: repoId, filename, format })
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -715,12 +722,36 @@ export function ModelsTab({
           <h2>Hugging Face</h2>
           <div className="hf-target-controls">
             <label className="inline-field">
+              <span className="muted">Format</span>
+              <select
+                aria-label="Model format"
+                value={searchFormat}
+                onChange={(e) => {
+                  const nextFmt = e.target.value as "gguf" | "mlx";
+                  setSearchFormat(nextFmt);
+                  setSelectedRepo(null);
+                  if (repos.length > 0) {
+                    void executeHfSearch(query, sortBy, sortDesc, nextFmt);
+                  }
+                }}
+              >
+                <option value="gguf">GGUF (llama.cpp)</option>
+                <option value="mlx">MLX (Apple Silicon)</option>
+              </select>
+            </label>
+
+            <label className="inline-field">
               <span className="muted">Node</span>
               <select
                 value={targetNode}
                 onChange={(e) => {
-                  setTargetNode(e.target.value);
+                  const nextId = e.target.value;
+                  setTargetNode(nextId);
                   setTargetGpu("all");
+                  const nextNode = nodes.find((n) => n.node_id === nextId);
+                  if (nextNode?.telemetry?.engine === "mlx-lm") {
+                    setSearchFormat("mlx");
+                  }
                 }}
               >
                 {nodes.map((n) => {
@@ -1241,7 +1272,14 @@ export function ModelsTab({
                                                   className="btn btn--sm btn--accent"
                                                   disabled={!targetNode}
                                                   onClick={() =>
-                                                    void pullGguf(r.repo_id, f.filename, targetNode)
+                                                    void pullGguf(
+                                                      r.repo_id,
+                                                      f.filename,
+                                                      targetNode,
+                                                      f.quant === "MLX" || searchFormat === "mlx"
+                                                        ? "mlx"
+                                                        : "gguf"
+                                                    )
                                                   }
                                                 >
                                                   <Download size={12} aria-hidden="true" /> Pull →{" "}

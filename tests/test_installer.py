@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.router.app import app as router_app
@@ -492,3 +493,409 @@ def test_terminal_progress_bar_spinner_and_osc_sequences() -> None:
     assert "\r" not in nout
     assert "✓ sd.zip" in nout
     assert "✓ Syncing" in nout
+
+
+def test_tray_action_check_updates_and_snapshot_indicator(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
+    from backend.desktop import tray as tray_mod
+    from backend.shared.engines import EngineStatus
+    from backend.shared.updater import UpdateStatus
+
+    notifications: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        tray_mod,
+        "send_desktop_notification",
+        lambda title, msg: notifications.append((title, msg)),
+    )
+    monkeypatch.setattr(
+        tray_mod,
+        "get_engine_status",
+        lambda check_remote=True: EngineStatus(
+            platform="linux",
+            arch="x86_64",
+            recommended_backend="cpu",
+            latest_llama_tag="b9000",
+            update_available=False,
+        ),
+    )
+
+    ctrl = tray_mod.TrayController("http://127.0.0.1:8080")
+
+    # 1) Update available path: uses behind_count (never commits_behind)
+    monkeypatch.setattr(
+        tray_mod,
+        "check_update",
+        lambda fetch_remote=True: UpdateStatus(
+            version="0.10.3",
+            app_dir="/tmp/splitch",
+            local_sha="1111111",
+            remote_sha="2222222",
+            behind_count=4,
+            update_available=True,
+        ),
+    )
+    ctrl.action_check_updates()
+    for _ in range(50):
+        if "4 behind" in ctrl.update_note:
+            break
+        time.sleep(0.02)
+    assert "4 behind" in ctrl.update_note
+    assert any("4 behind" in msg for _, msg in notifications)
+
+    # 2) Up-to-date path: uses local_sha (never current_sha)
+    monkeypatch.setattr(
+        tray_mod,
+        "check_update",
+        lambda fetch_remote=True: UpdateStatus(
+            version="0.10.3",
+            app_dir="/tmp/splitch",
+            local_sha="abcdef1",
+            remote_sha="abcdef1",
+            behind_count=0,
+            update_available=False,
+        ),
+    )
+    ctrl.action_check_updates()
+    for _ in range(50):
+        if "abcdef1" in ctrl.update_note:
+            break
+        time.sleep(0.02)
+    assert "abcdef1" in ctrl.update_note
+
+    # 3) Live /ws/status snapshot update_summary indicator
+    ctrl.apply_snapshot(
+        {
+            "version": "0.10.3",
+            "nodes": [],
+            "control": {"gaming_mode": False, "force_node": "auto"},
+            "update_summary": {
+                "update_available": True,
+                "behind_count": 2,
+                "local_sha": "1111111",
+                "remote_sha": "3333333",
+                "checked_at": time.time(),
+            },
+        },
+        sync_desktop=False,
+    )
+    assert ctrl.update_note == "Update available (2 commits)"
+    _, body = ctrl.tooltip_summary()
+    assert "Update available (2 commits)" in body
+
+    ctrl.apply_snapshot(
+        {
+            "version": "0.10.3",
+            "nodes": [],
+            "control": {"gaming_mode": False, "force_node": "auto"},
+            "update_summary": {
+                "update_available": False,
+                "behind_count": 0,
+                "local_sha": "3333333",
+                "remote_sha": "3333333",
+                "checked_at": time.time(),
+            },
+        },
+        sync_desktop=False,
+    )
+    assert ctrl.update_note == ""
+
+
+def test_coordinated_cluster_update_success_and_partial_failure_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from backend.router import app as router_mod
+    from backend.shared.models import (
+        ClusterUpdateJob,
+        ClusterUpdateRequest,
+        NodeStatus,
+    )
+    from backend.shared.updater import UpdateResult
+
+    old_nodes = dict(router_mod.cluster.nodes)
+    try:
+        router_mod.cluster.nodes.clear()
+        router_mod.cluster.nodes["worker-a"] = NodeStatus(
+            node_id="worker-a",
+            display_name="Worker A",
+            role="gpu",
+            agent_url="http://worker-a.example:8090",
+            engine_url="http://worker-a.example:8081",
+            online=True,
+        )
+        router_mod.cluster.nodes["worker-b"] = NodeStatus(
+            node_id="worker-b",
+            display_name="Worker B",
+            role="gpu",
+            agent_url="http://worker-b.example:8090",
+            engine_url="http://worker-b.example:8081",
+            online=True,
+        )
+
+        # Case A: Both workers succeed -> router update runs and marks restarting
+        calls: list[tuple[str, str, dict]] = []
+        router_calls = 0
+
+        async def _fake_call_ok(_client, node, endpoint, payload):
+            calls.append((node.node_id, endpoint, payload))
+            return {
+                "ok": True,
+                "updated": True,
+                "rolled_back": False,
+                "previous_sha": "aaa1111",
+                "current_sha": "bbb2222",
+                "steps": ["Pulled 1 commit"],
+                "error": None,
+            }
+
+        def _fake_router_update(**_kwargs):
+            nonlocal router_calls
+            router_calls += 1
+            return UpdateResult(
+                ok=True,
+                updated=True,
+                previous_sha="aaa1111",
+                current_sha="bbb2222",
+                steps=["Pulled 1 commit"],
+            )
+
+        monkeypatch.setattr(router_mod, "_call_worker_agent_system", _fake_call_ok)
+        monkeypatch.setattr(router_mod, "perform_update", _fake_router_update)
+
+        job_ok = ClusterUpdateJob(id="job-ok", action="update", status="running")
+        asyncio.run(
+            router_mod._run_cluster_update_job(
+                job_ok, ClusterUpdateRequest(with_engine=False, rollback_on_failure=True)
+            )
+        )
+        assert job_ok.status == "restarting"
+        assert job_ok.router_restarting is True
+        assert router_calls == 1
+        assert {c[0] for c in calls} == {"worker-a", "worker-b"}
+
+        # Case B: worker-a succeeds, worker-b fails -> router aborted, worker-a rolled back
+        calls.clear()
+        router_calls = 0
+
+        async def _fake_call_partial(_client, node, endpoint, payload):
+            calls.append((node.node_id, endpoint, payload))
+            if endpoint == "/system/rollback":
+                return {
+                    "ok": True,
+                    "updated": True,
+                    "rolled_back": True,
+                    "previous_sha": "bbb2222",
+                    "current_sha": "aaa1111",
+                    "steps": ["Rolled back to aaa1111"],
+                    "error": None,
+                }
+            if node.node_id == "worker-a":
+                return {
+                    "ok": True,
+                    "updated": True,
+                    "rolled_back": False,
+                    "previous_sha": "aaa1111",
+                    "current_sha": "bbb2222",
+                    "steps": ["Pulled 1 commit"],
+                    "error": None,
+                }
+            return {
+                "ok": False,
+                "updated": False,
+                "rolled_back": True,
+                "previous_sha": "aaa1111",
+                "current_sha": "aaa1111",
+                "steps": ["uv sync failed"],
+                "error": "uv sync failed",
+            }
+
+        monkeypatch.setattr(router_mod, "_call_worker_agent_system", _fake_call_partial)
+
+        job_fail = ClusterUpdateJob(id="job-fail", action="update", status="running")
+        asyncio.run(
+            router_mod._run_cluster_update_job(
+                job_fail, ClusterUpdateRequest(with_engine=False, rollback_on_failure=True)
+            )
+        )
+        assert job_fail.status == "aborted"
+        assert job_fail.router_restarting is False
+        assert job_fail.rolled_back is True
+        assert router_calls == 0
+        rb_calls = [c for c in calls if c[1] == "/system/rollback"]
+        assert len(rb_calls) == 1
+        assert rb_calls[0][0] == "worker-a"
+        assert rb_calls[0][2]["to_sha"] == "aaa1111"
+    finally:
+        router_mod.cluster.nodes.clear()
+        router_mod.cluster.nodes.update(old_nodes)
+
+
+def test_mlx_engine_install_platform_gate_and_dry_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from backend.shared import engines as eng_mod
+
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path))
+
+    # Non-macOS host is cleanly rejected
+    monkeypatch.setattr(eng_mod, "_norm_os", lambda *_a: "linux")
+    monkeypatch.setattr(eng_mod, "_norm_arch", lambda *_a: "x64")
+    res_linux = eng_mod.install_or_update_engine("mlx-lm", dry_run=True)
+    assert res_linux.ok is False
+    assert "Apple Silicon" in (res_linux.error or "")
+
+    # macOS arm64 dry-run resolves PyPI version and plans isolated venv + shim
+    monkeypatch.setattr(eng_mod, "_norm_os", lambda *_a: "macos")
+    monkeypatch.setattr(eng_mod, "_norm_arch", lambda *_a: "arm64")
+    monkeypatch.setattr(eng_mod, "fetch_latest_mlx_version", lambda: "0.24.1")
+    res_mac = eng_mod.install_or_update_engine("mlx-lm", dry_run=True, bin_dir=tmp_path / "bin")
+    assert res_mac.ok is True
+    assert res_mac.action == "dry-run"
+    assert res_mac.backend == "metal"
+    assert res_mac.current_tag == "0.24.1"
+    assert any("splitch-mlx-server" in s for s in res_mac.steps)
+
+
+def test_mlx_agent_discovery_local_scan_and_router_search(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    import httpx
+
+    from backend.agent import main as agent_mod
+    from backend.shared.mlx_server import discover_mlx_models
+
+    # 1) Local MLX model directory scan & discovery
+    mlx_dir = tmp_path / "mlx" / "mlx-community--Qwen3-4B-4bit"
+    mlx_dir.mkdir(parents=True)
+    (mlx_dir / "config.json").write_text('{"model_type":"qwen3"}', encoding="utf-8")
+    (mlx_dir / "model.safetensors").write_bytes(b"\x00" * 1024)
+
+    monkeypatch.setattr(agent_mod, "STORAGE_PATH", str(tmp_path))
+    scanned = agent_mod._scan_local_mlx_models()
+    assert len(scanned) == 1
+    assert scanned[0].filename == "mlx-community--Qwen3-4B-4bit"
+    assert scanned[0].format == "mlx"
+
+    discovered = discover_mlx_models(tmp_path / "mlx")
+    assert "mlx-community/Qwen3-4B-4bit" in discovered
+
+    # 2) Agent _collect_engine_models detects mlx-lm via /health + /v1/models
+    def _mock_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "engine": "mlx-lm"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "mlx-community/Qwen3-4B-4bit",
+                            "owned_by": "mlx-lm",
+                            "status": {"value": "loaded"},
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(404)
+
+    async def _probe():
+        transport = httpx.MockTransport(_mock_handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await agent_mod._collect_engine_models(client)
+
+    monkeypatch.setattr(agent_mod, "ENGINE_URL", "http://mlx.mock:8081")
+    healthy, kind, models, _ = asyncio.run(_probe())
+    assert healthy is True
+    assert kind == "mlx-lm"
+    assert len(models) == 1
+    assert models[0].id == "mlx-community/Qwen3-4B-4bit"
+    assert models[0].status == "loaded"
+
+    # 3) Router GET /api/models/search?format=mlx forwards filter=mlx to HF
+    seen_params: list[str] = []
+
+    class _FakeResp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list:
+            return []
+
+    class _FakeAsyncClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a) -> None:
+            return None
+
+        async def get(self, _url: str, params=None):
+            seen_params.extend([f"{k}={v}" for k, v in (params or [])])
+            return _FakeResp()
+
+    from backend.router import models_api as models_api_mod
+
+    monkeypatch.setattr(models_api_mod.httpx, "AsyncClient", _FakeAsyncClient)
+    tc = TestClient(router_app)
+    r = tc.get("/api/models/search?q=qwen&format=mlx")
+    assert r.status_code == 200
+    assert "filter=mlx" in seen_params
+
+
+def test_strata_process_allowlist_and_engine_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    import httpx
+
+    from backend.agent import main as agent_mod
+    from backend.shared.gpu_probe import parse_nvidia_pmon
+
+    # 1) strata-server VRAM is classified as LLM (is_llm == True)
+    procs = parse_nvidia_pmon(
+        "# gpu pid type fb mem enc dec jpg ofa command\n"
+        "0 4242 C 14336 - 0 0 0 0 strata-server\n"
+    )
+    assert len(procs) == 1
+    assert procs[0].is_llm is True
+
+    # 2) Agent _collect_engine_models detects engine=="strata" via /health and /v1/models
+    def _mock_health_strata(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "engine": "strata"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "Qwen3.8-Flash-Next"}]},
+            )
+        return httpx.Response(404)
+
+    def _mock_models_strata(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [{"id": "strata", "owned_by": "strata"}],
+                },
+            )
+        return httpx.Response(404)
+
+    async def _probe(handler) -> tuple:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await agent_mod._collect_engine_models(client)
+
+    monkeypatch.setattr(agent_mod, "ENGINE_URL", "http://strata.mock:8081")
+    h1, k1, m1, _ = asyncio.run(_probe(_mock_health_strata))
+    assert h1 is True and k1 == "strata" and m1[0].id == "Qwen3.8-Flash-Next"
+    assert m1[0].status == "loaded"
+
+    h2, k2, m2, _ = asyncio.run(_probe(_mock_models_strata))
+    assert h2 is True and k2 == "strata" and m2[0].id == "strata"

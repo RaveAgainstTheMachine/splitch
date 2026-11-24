@@ -92,6 +92,7 @@ class TrayController:
         self.theme: dict[str, Any] = self.cfg.theme.model_dump()
         self._theme_tag: str = theme_tag(self.theme)
         self.update_note: str = ""
+        self._notified_remote_sha: str = ""
         self.revision: int = 1
         self._listeners: list[Callable[[], None]] = []
         self._action_map: dict[int, Callable[[], None]] = {}
@@ -154,6 +155,25 @@ class TrayController:
                     ensure_tray_icon_theme(default_data_root() / "icons", theme=self.theme)
                 if sync_desktop and not os.getenv("PYTEST_CURRENT_TEST"):
                     self._schedule_desktop_icon_sync(dict(self.theme))
+        raw_upd = data.get("update_summary")
+        if isinstance(raw_upd, dict):
+            if raw_upd.get("update_available"):
+                behind = int(raw_upd.get("behind_count") or 0)
+                rsha = str(raw_upd.get("remote_sha") or "")
+                suffix = "s" if behind != 1 else ""
+                self.update_note = f"Update available ({behind} commit{suffix})"
+                if (
+                    rsha
+                    and rsha != self._notified_remote_sha
+                    and not os.getenv("PYTEST_CURRENT_TEST")
+                ):
+                    self._notified_remote_sha = rsha
+                    send_desktop_notification(
+                        "Splitch Update Available",
+                        f"{behind} new commit{suffix} available ({rsha}). Open Settings → Security & System to update.",
+                    )
+            elif self.update_note.startswith("Update available"):
+                self.update_note = ""
         self._notify_changed()
 
     def auth_headers(self) -> dict[str, str]:
@@ -209,6 +229,8 @@ class TrayController:
                 "OFFLINE" if not n.get("online") else str(n.get("busy_reason"))
             )
             lines.append(f"{n.get('display_name', n.get('node_id'))}: {mem_s} ({st})")
+        if self.update_note and "Update available" in self.update_note:
+            lines.append(self.update_note)
         return title, "\n".join(lines)
 
     # ── Actions ──────────────────────────────────────────────────────────────
@@ -263,9 +285,9 @@ class TrayController:
                 eng = get_engine_status(check_remote=True)
                 parts: list[str] = []
                 if up.update_available:
-                    parts.append(f"Splitch update available ({up.commits_behind} behind)")
+                    parts.append(f"Splitch update available ({up.behind_count} behind)")
                 else:
-                    parts.append(f"Splitch up to date ({up.current_sha or 'local'})")
+                    parts.append(f"Splitch up to date ({up.local_sha or 'local'})")
                 if eng.update_available and eng.latest_llama_tag:
                     parts.append(f"llama.cpp {eng.latest_llama_tag} available")
                 elif eng.latest_llama_tag:

@@ -17,7 +17,8 @@ import { CodeBlock } from "./chat/ChatCodeBlocks";
 import { ChatComposer } from "./chat/ChatComposer";
 import { ContextMemoryDialog, WorkspaceBrowserDialog } from "./chat/ChatDialogs";
 import { ChatMessageList } from "./chat/ChatMessageList";
-import { ChatSidebar } from "./chat/ChatSidebar";
+import { ChatSidebar, type SidebarMode } from "./chat/ChatSidebar";
+import { WorkspaceViewerPane, type WorkspaceInspectTarget } from "./chat/WorkspaceViewerPane";
 import {
   DEFAULT_DRAFT,
   type DraftChatConfig,
@@ -28,12 +29,15 @@ import type {
   ChatMessageRecord,
   ConversationSummary,
   DashboardSnapshot,
+  GitDiffResponse,
+  GitStatusResponse,
   McpServerConfig,
   PendingApproval,
   ScopedExtensionsConfig,
   SkillItem,
   ToolCallRecord,
-  WorkspaceDirListing
+  WorkspaceDirListing,
+  WorkspaceFileContent
 } from "../types";
 
 interface Props {
@@ -89,9 +93,13 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
 
   const [messagesLoadedTick, setMessagesLoadedTick] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarMode, setSidebarMode] = useState<SidebarMode>("chats");
   const [searchOpen, setSearchOpen] = useState(false);
   const [inspectedArtifact, setInspectedArtifact] = useState<InspectedArtifact | null>(null);
   const [lastArtifact, setLastArtifact] = useState<InspectedArtifact | null>(null);
+  const [workspaceInspect, setWorkspaceInspect] = useState<WorkspaceInspectTarget | null>(null);
+  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
+  const [gitLoading, setGitLoading] = useState(false);
   const [paneWidth, setPaneWidth] = useState<number>(470);
   const [isResizingPane, setIsResizingPane] = useState(false);
 
@@ -99,6 +107,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const openArtifactInPane = (art: InspectedArtifact) => {
+    setWorkspaceInspect(null);
     setInspectedArtifact(art);
     setLastArtifact(art);
     if (typeof window !== "undefined" && window.innerWidth < 1380) {
@@ -1298,20 +1307,144 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
     setter(list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
   };
 
+  const activeWorkspaceNode = useMemo(() => {
+    const nodes = snapshot?.nodes ?? [];
+    if (effectiveConfig.exec_node) {
+      return nodes.find((n) => n.node_id === effectiveConfig.exec_node) ?? null;
+    }
+    return nodes.find((n) => n.online && n.telemetry?.tools_enabled) ?? null;
+  }, [snapshot?.nodes, effectiveConfig.exec_node]);
+
+  const wsNodeId = activeWorkspaceNode?.node_id ?? "";
+  const wsToolsEnabled = Boolean(
+    activeWorkspaceNode?.online && activeWorkspaceNode?.telemetry?.tools_enabled
+  );
+
+  const refreshGitStatus = async () => {
+    if (!wsNodeId || !wsToolsEnabled) {
+      setGitStatus(null);
+      return;
+    }
+    setGitLoading(true);
+    try {
+      const res = await fetch(
+        `/api/nodes/${encodeURIComponent(wsNodeId)}/git/status?subpath=${encodeURIComponent(
+          effectiveConfig.workspace_subpath
+        )}`
+      );
+      if (res.ok) {
+        setGitStatus((await res.json()) as GitStatusResponse);
+      }
+    } catch {
+      // ignore transient poll errors
+    } finally {
+      setGitLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refreshGitStatus();
+  }, [wsNodeId, wsToolsEnabled, effectiveConfig.workspace_subpath]);
+
+  useEffect(() => {
+    if (!streaming && wsNodeId && wsToolsEnabled) {
+      void refreshGitStatus();
+    }
+  }, [streaming]);
+
+  const openWorkspaceFile = async (relPath: string) => {
+    if (!wsNodeId) return;
+    setInspectedArtifact(null);
+    setWorkspaceInspect({ kind: "file", path: relPath, data: null, loading: true });
+    if (typeof window !== "undefined" && window.innerWidth < 1380) {
+      setSidebarCollapsed(true);
+    }
+    try {
+      const res = await fetch(
+        `/api/nodes/${encodeURIComponent(wsNodeId)}/workspace/file?subpath=${encodeURIComponent(
+          effectiveConfig.workspace_subpath
+        )}&path=${encodeURIComponent(relPath)}`
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as WorkspaceFileContent;
+      setWorkspaceInspect({ kind: "file", path: relPath, data, loading: false });
+    } catch (err) {
+      setWorkspaceInspect({ kind: "file", path: relPath, data: null, loading: false });
+      onError(err instanceof Error ? err.message : "Failed to read workspace file");
+    }
+  };
+
+  const openWorkspaceDiff = async (relPath: string, staged: boolean) => {
+    if (!wsNodeId) return;
+    setInspectedArtifact(null);
+    setWorkspaceInspect({ kind: "diff", path: relPath, staged, data: null, loading: true });
+    if (typeof window !== "undefined" && window.innerWidth < 1380) {
+      setSidebarCollapsed(true);
+    }
+    try {
+      const res = await fetch(
+        `/api/nodes/${encodeURIComponent(wsNodeId)}/git/diff?subpath=${encodeURIComponent(
+          effectiveConfig.workspace_subpath
+        )}&path=${encodeURIComponent(relPath)}&staged=${staged ? "true" : "false"}`
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as GitDiffResponse;
+      setWorkspaceInspect({ kind: "diff", path: relPath, staged, data, loading: false });
+    } catch (err) {
+      setWorkspaceInspect({ kind: "diff", path: relPath, staged, data: null, loading: false });
+      onError(err instanceof Error ? err.message : "Failed to load git diff");
+    }
+  };
+
+  const attachWorkspacePath = (relPath: string) => {
+    const token = `@${relPath}`;
+    setComposerText((prev) => {
+      if (!prev.trim()) return `${token} `;
+      return prev.endsWith(" ") || prev.endsWith("\n") ? `${prev}${token} ` : `${prev} ${token} `;
+    });
+    textareaRef.current?.focus();
+  };
+
+  const rightPaneOpen = Boolean(inspectedArtifact || workspaceInspect);
+
   return (
     <div
       ref={layoutRef}
       className={`chat-layout ${sidebarCollapsed ? "chat-layout--sidebar-collapsed" : ""} ${
-        inspectedArtifact ? "chat-layout--with-artifact" : ""
+        rightPaneOpen ? "chat-layout--with-artifact" : ""
       } ${isResizingPane ? "chat-layout--resizing" : ""}`}
       style={
-        inspectedArtifact
+        rightPaneOpen
           ? ({ "--artifact-pane-width": `${paneWidth}px` } as React.CSSProperties)
           : undefined
       }
     >
       <ChatSidebar
         sidebarCollapsed={sidebarCollapsed}
+        sidebarMode={sidebarMode}
+        setSidebarMode={setSidebarMode}
+        dirtyCount={gitStatus?.changes?.length ?? 0}
+        workspaceProps={{
+          nodeId: wsNodeId,
+          subpath: effectiveConfig.workspace_subpath,
+          model: effectiveConfig.model,
+          toolsEnabled: wsToolsEnabled,
+          gitStatus,
+          gitLoading,
+          onRefreshGit: refreshGitStatus,
+          onOpenFile: (p) => void openWorkspaceFile(p),
+          onOpenDiff: (p, st) => void openWorkspaceDiff(p, st),
+          onAttachPath: attachWorkspacePath,
+          onOpenWorkspaceDialog: openWorkspaceBrowser,
+          onConfirm,
+          onError
+        }}
         streaming={streaming}
         searchOpen={searchOpen}
         setSearchOpen={setSearchOpen}
@@ -1528,14 +1661,14 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
         />
       </section>
 
-      {inspectedArtifact && (
+      {rightPaneOpen && (
         <>
           <div
             className="chat-splitter"
             role="separator"
             tabIndex={0}
             aria-orientation="vertical"
-            aria-label="Resize artifact inspector pane"
+            aria-label="Resize inspector pane"
             aria-valuemin={280}
             aria-valuenow={paneWidth}
             title="Drag to resize • Double-click to reset width"
@@ -1551,10 +1684,21 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
               }
             }}
           />
-          <ArtifactSplitPane
-            artifact={inspectedArtifact}
-            onClose={() => setInspectedArtifact(null)}
-          />
+          {workspaceInspect ? (
+            <WorkspaceViewerPane
+              target={workspaceInspect}
+              onAttachPath={attachWorkspacePath}
+              onToggleDiffStaged={(p, nextStaged) => void openWorkspaceDiff(p, nextStaged)}
+              onClose={() => setWorkspaceInspect(null)}
+            />
+          ) : (
+            inspectedArtifact && (
+              <ArtifactSplitPane
+                artifact={inspectedArtifact}
+                onClose={() => setInspectedArtifact(null)}
+              />
+            )
+          )}
         </>
       )}
 

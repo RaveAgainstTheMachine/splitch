@@ -48,6 +48,16 @@ from backend.agent.tools import (
     run_post_edit_verification,
     run_sandboxed_shell_command,
 )
+from backend.agent.workspace_git import (
+    get_git_diff,
+    get_git_status,
+    git_commit,
+    git_discard_paths,
+    git_stage_paths,
+    git_unstage_paths,
+    list_workspace_tree,
+    read_workspace_file,
+)
 from backend.router.config import default_data_root
 from backend.shared.engines import detect_installed_engines, install_or_update_engine
 from backend.shared.gpu_probe import (
@@ -59,9 +69,16 @@ from backend.shared.gpu_probe import (
     parse_nvidia_pmon as _parse_pmon,  # noqa: F401
 )
 from backend.shared.models import (
+    AgentRollbackRequest,
+    AgentUpdateRequest,
     ClientConfigSyncRequest,
     DownloadJob,
     EngineKind,
+    GitActionResponse,
+    GitCommitRequest,
+    GitDiffResponse,
+    GitPathsRequest,
+    GitStatusResponse,
     InstallMediaEngineRequest,
     LoadedModel,
     LocalModelFile,
@@ -79,6 +96,8 @@ from backend.shared.models import (
     ToolExecRequest,
     ToolExecResponse,
     WorkspaceDirListing,
+    WorkspaceFileContent,
+    WorkspaceTreeListing,
 )
 from backend.shared.secrets import (
     load_ed25519_public_key,
@@ -87,6 +106,12 @@ from backend.shared.secrets import (
     verify_tool_approval_ed25519,
 )
 from backend.shared.security import is_loopback_host, verify_tool_approval
+from backend.shared.updater import (
+    UpdateResult,
+    _restart_active_services,
+    perform_rollback,
+    perform_update,
+)
 from backend.version import __version__ as VERSION
 
 logger = logging.getLogger("splitch.agent")
@@ -197,6 +222,28 @@ def _normalize_ollama_models(tags_payload: dict, ps_payload: dict | None = None)
 async def _collect_engine_models(
     client: httpx.AsyncClient,
 ) -> tuple[bool, EngineKind, list[LoadedModel], int | None]:
+    # 0. Splitch managed MLX-LM or Strata server (/health engine/server tag + /v1/models)
+    try:
+        h_resp = await client.get(f"{ENGINE_URL}/health")
+        if h_resp.status_code == 200:
+            h_body = h_resp.json()
+            if isinstance(h_body, dict):
+                h_eng = str(h_body.get("engine") or "").lower()
+                h_srv = str(h_body.get("server") or h_body.get("name") or "").lower()
+                detected_kind: EngineKind | None = (
+                    "mlx-lm"
+                    if h_eng == "mlx-lm"
+                    else ("strata" if (h_eng == "strata" or "strata" in h_srv) else None)
+                )
+                if detected_kind is not None:
+                    m_resp = await client.get(f"{ENGINE_URL}/v1/models")
+                    if m_resp.status_code == 200:
+                        m_body = m_resp.json()
+                        if isinstance(m_body, dict) and isinstance(m_body.get("data"), list):
+                            return True, detected_kind, _normalize_models(m_body), None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.debug("mlx-lm / strata /health probe skipped: %s", exc)
+
     # 1. llama-server router mode (/models + optional /props for n_ctx)
     try:
         resp = await client.get(f"{ENGINE_URL}/models")
@@ -229,13 +276,28 @@ async def _collect_engine_models(
     except (httpx.HTTPError, ValueError) as exc:
         logger.debug("ollama /api/tags probe skipped: %s", exc)
 
-    # 3. Generic OpenAI-compatible server (LM Studio, vLLM, KoboldCpp, SGLang, llama-server)
+    # 3. Generic OpenAI-compatible server (LM Studio, vLLM, KoboldCpp, SGLang, MLX, Strata, llama-server)
     try:
         resp = await client.get(f"{ENGINE_URL}/v1/models")
         if resp.status_code == 200:
             body = resp.json()
             if isinstance(body, dict) and isinstance(body.get("data"), list):
-                return True, "openai", _normalize_models(body), None
+                data_list = body.get("data") or []
+                is_mlx = any(
+                    isinstance(m, dict) and str(m.get("owned_by") or "").lower() == "mlx-lm"
+                    for m in data_list
+                )
+                is_strata = any(
+                    isinstance(m, dict)
+                    and (
+                        str(m.get("owned_by") or "").lower() == "strata"
+                        or str(m.get("id") or "").lower() == "strata"
+                        or str(m.get("id") or "").lower().startswith("strata-")
+                    )
+                    for m in data_list
+                )
+                kind: EngineKind = "mlx-lm" if is_mlx else ("strata" if is_strata else "openai")
+                return True, kind, _normalize_models(body), None
     except (httpx.HTTPError, ValueError) as exc:
         logger.debug("openai /v1/models probe skipped: %s", exc)
 
@@ -388,6 +450,7 @@ class AgentState:
             role=NODE_ROLE,
             platform=platform.system().lower(),
             timestamp=time.time(),
+            version=VERSION,
             storage_path=STORAGE_PATH,
             engine_url=ENGINE_URL,
             tools_enabled=ENABLE_TOOLS,
@@ -436,6 +499,7 @@ class AgentState:
             platform=platform.system().lower(),
             timestamp=time.time(),
             online=True,
+            version=VERSION,
             cpu_percent=round(cpu_pct, 1),
             ram_total_mb=ram_total_mb,
             ram_used_mb=ram_used_mb,
@@ -538,6 +602,7 @@ async def _agent_auth_middleware(request: Request, call_next):
 async def health() -> dict[str, str | bool]:
     return {
         "status": "ok",
+        "version": VERSION,
         "node_id": NODE_ID,
         "engine": state.snapshot.engine,
         "engine_healthy": state.snapshot.engine_healthy,
@@ -581,13 +646,41 @@ async def model_action(action: Literal["load", "unload"], req: ModelActionReques
 # ── Local GGUF Storage Management ────────────────────────────────────────────
 
 
+def _scan_local_mlx_models() -> list[LocalModelFile]:
+    files: list[LocalModelFile] = []
+    mlx_root = Path(STORAGE_PATH) / "mlx"
+    if not mlx_root.exists() or not mlx_root.is_dir():
+        return files
+    for entry in sorted(mlx_root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if not (entry / "config.json").is_file() or not any(entry.glob("*.safetensors")):
+            continue
+        total_bytes = 0
+        for child in entry.rglob("*"):
+            if child.is_file():
+                with contextlib.suppress(OSError):
+                    total_bytes += child.stat().st_size
+        files.append(
+            LocalModelFile(
+                filename=entry.name,
+                path=str(entry),
+                size_gb=round(total_bytes / (1024**3), 2),
+                managed=True,
+                format="mlx",
+            )
+        )
+    return files
+
+
 @app.get("/files/models", response_model=NodeModelInventory)
 async def list_model_files() -> NodeModelInventory:
-    files = await asyncio.to_thread(_scan_local_ggufs)
+    ggufs = await asyncio.to_thread(_scan_local_ggufs)
+    mlxs = await asyncio.to_thread(_scan_local_mlx_models)
     return NodeModelInventory(
         node_id=NODE_ID,
         storage_path=STORAGE_PATH,
-        files=files,
+        files=[*ggufs, *mlxs],
         downloads=list(state.downloads.values()),
     )
 
@@ -712,10 +805,108 @@ async def _run_hf_download(job: DownloadJob) -> None:
                 part.unlink()
 
 
+async def _run_hf_mlx_download(job: DownloadJob) -> None:
+    mlx_root = Path(STORAGE_PATH) / "mlx"
+    mlx_root.mkdir(parents=True, exist_ok=True)
+    slug = job.repo_id.replace("/", "--")
+    dest_dir = mlx_root / slug
+    tmp_dir = mlx_root / f".{slug}.part"
+    headers = {}
+    hf_token = os.getenv("HF_TOKEN")
+    if hf_token:
+        headers["Authorization"] = f"Bearer {hf_token}"
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0),
+        ) as dl_client:
+            tree_resp = await dl_client.get(
+                f"https://huggingface.co/api/models/{job.repo_id}/tree/main",
+                params={"recursive": "true"},
+                headers=headers,
+            )
+            tree_resp.raise_for_status()
+            entries = tree_resp.json()
+            if not isinstance(entries, list):
+                raise TypeError("Unexpected HF tree response")
+
+            wanted: list[tuple[str, int]] = []
+            for item in entries:
+                if not isinstance(item, dict) or item.get("type") != "file":
+                    continue
+                path_str = str(item.get("path") or "")
+                if not path_str or ".." in path_str or path_str.startswith("."):
+                    continue
+                lo = path_str.lower()
+                if lo.endswith((".safetensors", ".json", ".model", ".tiktoken", ".txt")):
+                    size_b = int(
+                        (item.get("lfs") or {}).get("size") or item.get("size") or 0
+                    )
+                    wanted.append((path_str, size_b))
+
+            if not any(p.lower().endswith(".safetensors") for p, _ in wanted):
+                raise ValueError("Repository does not contain MLX .safetensors weights")
+
+            job.total_bytes = sum(sz for _, sz in wanted)
+            if tmp_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, tmp_dir)
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+
+            for rel_path, _ in wanted:
+                out_file = (tmp_dir / rel_path).resolve()
+                if not out_file.is_relative_to(tmp_dir.resolve()):
+                    continue
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                url = f"https://huggingface.co/{job.repo_id}/resolve/main/{rel_path}"
+                async with dl_client.stream("GET", url, headers=headers) as resp:
+                    resp.raise_for_status()
+                    with out_file.open("wb") as f:
+                        async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
+                            if not chunk:
+                                continue
+                            await asyncio.to_thread(f.write, chunk)
+                            job.downloaded_bytes += len(chunk)
+                            if job.total_bytes > 0:
+                                job.percent = min(
+                                    99.9,
+                                    round((job.downloaded_bytes / job.total_bytes) * 100.0, 1),
+                                )
+
+        if dest_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, dest_dir)
+        tmp_dir.replace(dest_dir)
+        job.percent = 100.0
+        job.status = "completed"
+        asyncio.create_task(state.poll_once())
+    except (httpx.HTTPError, OSError, TypeError, ValueError) as exc:
+        job.status = "failed"
+        job.error = str(exc)
+        with contextlib.suppress(OSError):
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+
+
 @app.post("/files/models/pull", response_model=DownloadJob)
 async def pull_model_file(req: PullModelRequest) -> DownloadJob:
     if not re.fullmatch(r"[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+", req.repo_id):
         raise HTTPException(status_code=400, detail="Invalid Hugging Face repo_id")
+    if req.format == "mlx":
+        mounted, _, _ = await asyncio.to_thread(_collect_storage, STORAGE_PATH)
+        if not mounted:
+            raise HTTPException(status_code=503, detail=f"Storage not mounted: {STORAGE_PATH}")
+        slug = req.repo_id.replace("/", "--")
+        job = DownloadJob(
+            id=uuid.uuid4().hex[:10],
+            node_id=NODE_ID,
+            repo_id=req.repo_id,
+            filename=slug,
+            status="downloading",
+        )
+        state.downloads[job.id] = job
+        asyncio.create_task(_run_hf_mlx_download(job))
+        return job
+
     if ".." in req.filename or not req.filename.lower().endswith((".gguf", ".safetensors")):
         raise HTTPException(
             status_code=400, detail="Only safe .gguf or .safetensors filenames are allowed"
@@ -1223,16 +1414,27 @@ async def proxy_local_media_engine(path: str, request: Request) -> Response:
 
 @app.delete("/files/models/{filename}")
 async def delete_model_file(filename: str) -> dict:
-    if Path(filename).name != filename or not filename.lower().endswith(".gguf"):
-        raise HTTPException(status_code=400, detail="Invalid GGUF filename")
+    if Path(filename).name != filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid model filename")
     root = Path(STORAGE_PATH).resolve()
-    target = (root / filename).resolve()
-    if not target.is_relative_to(root):
+    if filename.lower().endswith(".gguf"):
+        target = (root / filename).resolve()
+        if not target.is_relative_to(root):
+            raise HTTPException(status_code=403, detail="Path traversal blocked")
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="Model file not found")
+        await asyncio.to_thread(target.unlink)
+        asyncio.create_task(_refresh_engine_model_index())
+        return {"ok": True, "deleted": filename}
+
+    mlx_root = (root / "mlx").resolve()
+    mlx_target = (mlx_root / filename).resolve()
+    if not mlx_target.is_relative_to(mlx_root) or mlx_target == mlx_root:
         raise HTTPException(status_code=403, detail="Path traversal blocked")
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="Model file not found")
-    await asyncio.to_thread(target.unlink)
-    asyncio.create_task(_refresh_engine_model_index())
+    if not mlx_target.is_dir():
+        raise HTTPException(status_code=404, detail="Model file or MLX directory not found")
+    await asyncio.to_thread(shutil.rmtree, mlx_target)
+    asyncio.create_task(state.poll_once())
     return {"ok": True, "deleted": filename}
 
 
@@ -1304,6 +1506,64 @@ async def browse_workspace_dirs(subpath: str = "") -> WorkspaceDirListing:
             detail="Workspace tools are disabled on this node (start with --enable-tools or SPLITCH_ENABLE_TOOLS=1)",
         )
     return await asyncio.to_thread(list_workspace_dirs, WORKSPACE_ROOT, subpath)
+
+
+def _require_tools_enabled() -> None:
+    if not ENABLE_TOOLS:
+        raise HTTPException(
+            status_code=403,
+            detail="Workspace tools are disabled on this node (start with --enable-tools or SPLITCH_ENABLE_TOOLS=1)",
+        )
+
+
+@app.get("/workspace/tree", response_model=WorkspaceTreeListing)
+async def get_workspace_tree(subpath: str = "", dir_path: str = "") -> WorkspaceTreeListing:
+    _require_tools_enabled()
+    return await asyncio.to_thread(list_workspace_tree, WORKSPACE_ROOT, subpath, dir_path)
+
+
+@app.get("/workspace/file", response_model=WorkspaceFileContent)
+async def get_workspace_file(subpath: str = "", path: str = "") -> WorkspaceFileContent:
+    _require_tools_enabled()
+    return await asyncio.to_thread(read_workspace_file, WORKSPACE_ROOT, subpath, path)
+
+
+@app.get("/workspace/git/status", response_model=GitStatusResponse)
+async def get_workspace_git_status(subpath: str = "") -> GitStatusResponse:
+    _require_tools_enabled()
+    return await asyncio.to_thread(get_git_status, WORKSPACE_ROOT, subpath)
+
+
+@app.get("/workspace/git/diff", response_model=GitDiffResponse)
+async def get_workspace_git_diff(
+    subpath: str = "", path: str = "", staged: bool = False
+) -> GitDiffResponse:
+    _require_tools_enabled()
+    return await asyncio.to_thread(get_git_diff, WORKSPACE_ROOT, subpath, path, staged)
+
+
+@app.post("/workspace/git/stage", response_model=GitActionResponse)
+async def post_workspace_git_stage(req: GitPathsRequest) -> GitActionResponse:
+    _require_tools_enabled()
+    return await asyncio.to_thread(git_stage_paths, WORKSPACE_ROOT, req.subpath, req.paths)
+
+
+@app.post("/workspace/git/unstage", response_model=GitActionResponse)
+async def post_workspace_git_unstage(req: GitPathsRequest) -> GitActionResponse:
+    _require_tools_enabled()
+    return await asyncio.to_thread(git_unstage_paths, WORKSPACE_ROOT, req.subpath, req.paths)
+
+
+@app.post("/workspace/git/discard", response_model=GitActionResponse)
+async def post_workspace_git_discard(req: GitPathsRequest) -> GitActionResponse:
+    _require_tools_enabled()
+    return await asyncio.to_thread(git_discard_paths, WORKSPACE_ROOT, req.subpath, req.paths)
+
+
+@app.post("/workspace/git/commit", response_model=GitActionResponse)
+async def post_workspace_git_commit(req: GitCommitRequest) -> GitActionResponse:
+    _require_tools_enabled()
+    return await asyncio.to_thread(git_commit, WORKSPACE_ROOT, req.subpath, req.message)
 
 
 @app.post("/tools/execute", response_model=ToolExecResponse)
@@ -1380,3 +1640,47 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
         sandbox_mode=CMD_SANDBOX,
         allow_net=CMD_SANDBOX_ALLOW_NET,
     )
+
+
+# ── Signed Remote Self-Update & Rollback (Protected by Agent Auth Middleware) ─
+
+
+def _schedule_delayed_restart(delay_s: float = 1.5) -> None:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+
+    async def _do_restart() -> None:
+        await asyncio.sleep(delay_s)
+        with contextlib.suppress(OSError, RuntimeError):
+            await asyncio.to_thread(_restart_active_services)
+
+    asyncio.create_task(_do_restart())
+
+
+@app.post("/system/update", response_model=UpdateResult)
+async def agent_system_update(req: AgentUpdateRequest | None = None) -> UpdateResult:
+    body = req or AgentUpdateRequest()
+    res = await asyncio.to_thread(
+        perform_update,
+        agent_only=True,
+        restart_services=False,
+        with_engine=body.with_engine,
+        force=body.force,
+    )
+    if res.ok and (res.updated or res.ui_rebuilt):
+        _schedule_delayed_restart(1.5)
+    return res
+
+
+@app.post("/system/rollback", response_model=UpdateResult)
+async def agent_system_rollback(req: AgentRollbackRequest | None = None) -> UpdateResult:
+    body = req or AgentRollbackRequest()
+    res = await asyncio.to_thread(
+        perform_rollback,
+        agent_only=True,
+        to_sha=body.to_sha,
+        restart_services=False,
+    )
+    if res.ok and res.updated:
+        _schedule_delayed_restart(1.5)
+    return res

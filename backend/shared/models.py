@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 NodeRole = Literal["gpu", "unified", "cpu"]
-EngineKind = Literal["llama-server", "ollama", "openai", "unknown"]
+EngineKind = Literal["llama-server", "ollama", "mlx-lm", "strata", "openai", "unknown"]
 MediaEngineKind = Literal["sd-server", "comfyui", "openai-images", "none"]
 MediaKind = Literal["image", "video"]
 GpuVendor = Literal["nvidia", "amd", "intel", "apple", "other"]
@@ -52,6 +52,7 @@ class NodeTelemetry(BaseModel):
     platform: str
     timestamp: float
     online: bool = True
+    version: str = ""
     cpu_percent: float = 0.0
     ram_total_mb: float = 0.0
     ram_used_mb: float = 0.0
@@ -162,6 +163,16 @@ class TraceEntry(BaseModel):
     error: str | None = None
 
 
+class UpdateSummary(BaseModel):
+    update_available: bool = False
+    behind_count: int = 0
+    local_sha: str = ""
+    remote_sha: str = ""
+    checked_at: float = 0.0
+    engine_update_available: bool = False
+    latest_llama_tag: str = ""
+
+
 class DashboardSnapshot(BaseModel):
     version: str
     uptime_s: float
@@ -170,6 +181,7 @@ class DashboardSnapshot(BaseModel):
     nodes: list[NodeStatus]
     aliases: list[AliasConfig]
     traces: list[TraceEntry]
+    update_summary: UpdateSummary | None = None
 
 
 class ControlUpdate(BaseModel):
@@ -189,6 +201,7 @@ class LocalModelFile(BaseModel):
     path: str
     size_gb: float
     managed: bool = True
+    format: Literal["gguf", "mlx"] = "gguf"
 
 
 class DownloadJob(BaseModel):
@@ -213,7 +226,8 @@ class NodeModelInventory(BaseModel):
 class PullModelRequest(BaseModel):
     node_id: str = ""
     repo_id: str
-    filename: str
+    filename: str = ""
+    format: Literal["gguf", "mlx"] = "gguf"
 
 
 class HfRepoResult(BaseModel):
@@ -785,7 +799,7 @@ class JoinTokenCreateRequest(BaseModel):
     node_id: str = ""
     role: NodeRole = "gpu"
     yield_on_gaming: bool = True
-    engine: Literal["auto", "llama.cpp", "ollama", "none"] = "auto"
+    engine: Literal["auto", "llama.cpp", "ollama", "mlx-lm", "none"] = "auto"
     backend: Literal["auto", "cuda", "rocm", "vulkan", "metal", "cpu"] = "auto"
     with_media: bool = False
     enable_tools: bool = False
@@ -832,7 +846,7 @@ class NodeSshProvisionRequest(BaseModel):
     role: NodeRole = "gpu"
     yield_on_gaming: bool = True
     yield_gpu_indices: list[int] = Field(default_factory=list)
-    engine: Literal["auto", "llama.cpp", "ollama", "none"] = "auto"
+    engine: Literal["auto", "llama.cpp", "ollama", "mlx-lm", "none"] = "auto"
     backend: Literal["auto", "cuda", "rocm", "vulkan", "metal", "cpu"] = "auto"
     with_media: bool = False
     enable_tools: bool = False
@@ -840,3 +854,129 @@ class NodeSshProvisionRequest(BaseModel):
     router_url: str = ""
     agent_port: int = Field(default=8090, ge=1024, le=65535)
     engine_port: int = Field(default=8081, ge=1024, le=65535)
+
+
+# ── Cluster Update & Rollback Schemas ────────────────────────────────────────
+
+
+class AgentUpdateRequest(BaseModel):
+    with_engine: bool = False
+    force: bool = False
+
+
+class AgentRollbackRequest(BaseModel):
+    to_sha: str | None = None
+
+
+class NodeUpdateRunResult(BaseModel):
+    node_id: str
+    display_name: str
+    status: Literal["pending", "updating", "restarting", "done", "rolled_back", "failed"] = (
+        "pending"
+    )
+    ok: bool = False
+    updated: bool = False
+    rolled_back: bool = False
+    previous_sha: str = ""
+    current_sha: str = ""
+    steps: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class ClusterUpdateRequest(BaseModel):
+    with_engine: bool = False
+    rollback_on_failure: bool = True
+
+
+class ClusterRollbackRequest(BaseModel):
+    to_sha: str | None = None
+
+
+class ClusterUpdateJob(BaseModel):
+    id: str
+    action: Literal["update", "rollback"] = "update"
+    status: Literal["idle", "running", "restarting", "done", "aborted", "failed"] = "idle"
+    started_at: float = 0.0
+    finished_at: float | None = None
+    with_engine: bool = False
+    router_restarting: bool = False
+    rolled_back: bool = False
+    error: str | None = None
+    nodes: list[NodeUpdateRunResult] = Field(default_factory=list)
+
+
+# ── Workspace File Tree & Git Review Explorer Schemas ────────────────────────
+
+
+class WorkspaceTreeEntry(BaseModel):
+    name: str
+    path: str
+    is_dir: bool
+    size_bytes: int = 0
+    git_status: str = ""
+
+
+class WorkspaceTreeListing(BaseModel):
+    root: str
+    subpath: str = ""
+    dir_path: str = ""
+    entries: list[WorkspaceTreeEntry] = Field(default_factory=list)
+
+
+class WorkspaceFileContent(BaseModel):
+    path: str
+    content: str = ""
+    language: str = "text"
+    size_bytes: int = 0
+    truncated: bool = False
+    is_binary: bool = False
+
+
+class GitFileChange(BaseModel):
+    path: str
+    index_status: str = " "
+    worktree_status: str = " "
+    staged: bool = False
+    untracked: bool = False
+
+
+class GitStatusResponse(BaseModel):
+    is_git_repo: bool = False
+    branch: str = ""
+    ahead: int = 0
+    behind: int = 0
+    changes: list[GitFileChange] = Field(default_factory=list)
+    error: str | None = None
+
+
+class GitDiffResponse(BaseModel):
+    path: str
+    staged: bool = False
+    diff: str = ""
+    truncated: bool = False
+
+
+class GitPathsRequest(BaseModel):
+    subpath: str = ""
+    paths: list[str] = Field(default_factory=list)
+
+
+class GitCommitRequest(BaseModel):
+    subpath: str = ""
+    message: str
+
+
+class GitCommitMessageRequest(BaseModel):
+    subpath: str = ""
+    model: str = "fast"
+
+
+class GitCommitMessageResponse(BaseModel):
+    message: str
+
+
+class GitActionResponse(BaseModel):
+    ok: bool = True
+    output: str = ""
+    commit_sha: str = ""
+    error: str | None = None

@@ -116,11 +116,12 @@ OLLAMA_HOST=0.0.0.0:11434 ollama serve
 
 Point your agent to `--engine-url http://127.0.0.1:11434` (Splitch auto-detects Ollama via `/api/tags`).
 
-### C. LM Studio / vLLM / MLX Server
+### C. LM Studio / vLLM / MLX Server / Strata
 
 Any server implementing `/v1/models` and `/v1/chat/completions` works out of the box:
 - **LM Studio:** Enable Local Server (`http://0.0.0.0:1234`), pass `--engine-url http://127.0.0.1:1234`.
 - **vLLM:** `vllm serve <model> --host 0.0.0.0 --port 8000`, pass `--engine-url http://127.0.0.1:8000`.
+- **Strata (`Niko1221/Strata`):** Note that `strata-server` defaults to `:8080`, which collides with `splitch-router`. Run Strata on `:8081` (`--port 8081`) and pass `--engine-url http://127.0.0.1:8081` (auto-detected as `engine="strata"` and excluded from false GPU Auto-Yield).
 
 ---
 

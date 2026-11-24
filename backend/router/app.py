@@ -7,6 +7,7 @@ model/MCP/skills control plane, Agent Chat backend, and static dashboard host.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import ipaddress
@@ -14,6 +15,7 @@ import os
 import re
 import socket
 import time
+import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -41,6 +43,7 @@ from backend.router.proxy import build_openai_models_list, forward_inference
 from backend.router.settings_api import build_settings_router
 from backend.router.skills_api import build_skills_router
 from backend.router.telemetry import VERSION, ClusterState
+from backend.router.workspace_api import build_workspace_router
 from backend.shared.bench import (
     BenchReport,
     BenchRunRequest,
@@ -52,14 +55,19 @@ from backend.shared.engines import EngineStatus, get_engine_status
 from backend.shared.models import (
     AuthLoginRequest,
     AuthStatusResponse,
+    ClusterRollbackRequest,
+    ClusterUpdateJob,
+    ClusterUpdateRequest,
     ControlState,
     ControlUpdate,
     DashboardSnapshot,
     ModelActionRequest,
     NodeRegisterRequest,
     NodeStatus,
+    NodeUpdateRunResult,
     UiThemeConfig,
     UiThemeUpdate,
+    UpdateSummary,
     WorkspaceDirListing,
 )
 from backend.shared.secrets import (
@@ -68,7 +76,15 @@ from backend.shared.secrets import (
     verify_secret_hash,
 )
 from backend.shared.security import is_loopback_host, is_trusted_proxy
-from backend.shared.updater import DoctorReport, UpdateStatus, check_update, run_doctor
+from backend.shared.updater import (
+    DoctorReport,
+    UpdateStatus,
+    _restart_active_services,
+    check_update,
+    perform_rollback,
+    perform_update,
+    run_doctor,
+)
 
 _ROOT = default_data_root()
 DATA_DIR = Path(os.getenv("SPLITCH_DATA_DIR", str(_ROOT / "data")))
@@ -381,6 +397,13 @@ app.include_router(
         api_key_getter=lambda: ("1" if _auth_enabled() else ""),
     )
 )
+app.include_router(
+    build_workspace_router(
+        cluster,
+        internal_auth_headers_getter=_internal_loopback_auth_headers,
+        app_ref=app,
+    )
+)
 
 
 # ── OpenAI-compatible + FIM Inference API ────────────────────────────────────
@@ -511,7 +534,343 @@ async def get_system_engine(check_remote: bool = False) -> EngineStatus:
 
 @app.get("/api/system/update-status", response_model=UpdateStatus)
 async def get_system_update_status(fetch: bool = False) -> UpdateStatus:
-    return await asyncio.to_thread(check_update, fetch_remote=fetch)
+    res = await asyncio.to_thread(check_update, fetch_remote=fetch)
+    if fetch and not res.error:
+        prev_eng_avail = bool(
+            cluster.update_summary and cluster.update_summary.engine_update_available
+        )
+        prev_llama_tag = (
+            cluster.update_summary.latest_llama_tag if cluster.update_summary else ""
+        )
+        cluster.update_summary = UpdateSummary(
+            update_available=res.update_available,
+            behind_count=res.behind_count,
+            local_sha=res.local_sha,
+            remote_sha=res.remote_sha,
+            checked_at=time.time(),
+            engine_update_available=prev_eng_avail,
+            latest_llama_tag=prev_llama_tag,
+        )
+        await cluster.broadcast_snapshot()
+    return res
+
+
+_cluster_update_job: ClusterUpdateJob | None = None
+_cluster_update_task: asyncio.Task | None = None
+
+
+def _assert_ui_update_allowed(request: Request) -> None:
+    if _auth_enabled():
+        return
+    if os.getenv("SPLITCH_ALLOW_UI_UPDATE", "").strip().lower() in ("1", "true", "yes"):
+        return
+    if is_loopback_host(_client_ip(request)):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "UI-triggered cluster updates are disabled on unauthenticated LAN routers. "
+            "Enable SPLITCH_API_KEY, access from localhost, or set SPLITCH_ALLOW_UI_UPDATE=1."
+        ),
+    )
+
+
+def _is_colocated_agent(node: NodeStatus) -> bool:
+    host = (urlparse(node.agent_url).hostname or "").strip().lower()
+    return is_loopback_host(host)
+
+
+def _schedule_router_restart(delay_s: float = 1.5) -> None:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+
+    async def _do_restart() -> None:
+        await asyncio.sleep(delay_s)
+        with contextlib.suppress(OSError, RuntimeError):
+            await asyncio.to_thread(_restart_active_services)
+
+    asyncio.create_task(_do_restart())
+
+
+async def _call_worker_agent_system(
+    client: httpx.AsyncClient,
+    node: NodeStatus,
+    endpoint: Literal["/system/update", "/system/rollback"],
+    payload: dict,
+) -> dict:
+    resp = await client.post(
+        f"{node.agent_url}{endpoint}",
+        json=payload,
+        headers=cluster.agent_headers("POST", endpoint),
+        timeout=httpx.Timeout(300.0, connect=5.0),
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _run_cluster_update_job(job: ClusterUpdateJob, req: ClusterUpdateRequest) -> None:
+    online_nodes = [n for n in cluster.nodes.values() if n.online]
+    remote_workers = [n for n in online_nodes if not _is_colocated_agent(n)]
+    colocated_names = [n.display_name for n in online_nodes if _is_colocated_agent(n)]
+    router_label = (
+        f"Router (+ {', '.join(colocated_names)})" if colocated_names else "Router"
+    )
+
+    worker_entries: dict[str, NodeUpdateRunResult] = {
+        n.node_id: NodeUpdateRunResult(node_id=n.node_id, display_name=n.display_name)
+        for n in remote_workers
+    }
+    router_entry = NodeUpdateRunResult(node_id="router", display_name=router_label)
+    job.nodes = [*worker_entries.values(), router_entry]
+
+    ca_bundle = os.getenv("SPLITCH_CA_BUNDLE", "").strip() or config.tls.ca_bundle.strip()
+    verify: bool | str = ca_bundle if ca_bundle else True
+
+    async with httpx.AsyncClient(verify=verify) as client:
+
+        async def _update_worker(node: NodeStatus) -> None:
+            entry = worker_entries[node.node_id]
+            entry.status = "updating"
+            try:
+                data = await _call_worker_agent_system(
+                    client,
+                    node,
+                    "/system/update",
+                    {"with_engine": req.with_engine},
+                )
+                entry.ok = bool(data.get("ok"))
+                entry.updated = bool(data.get("updated"))
+                entry.rolled_back = bool(data.get("rolled_back"))
+                entry.previous_sha = str(data.get("previous_sha") or "")
+                entry.current_sha = str(data.get("current_sha") or "")
+                entry.steps = [str(s) for s in (data.get("steps") or [])]
+                entry.error = data.get("error")
+                if entry.ok:
+                    entry.status = "restarting" if entry.updated else "done"
+                else:
+                    entry.status = "rolled_back" if entry.rolled_back else "failed"
+            except (httpx.HTTPError, OSError, ValueError) as exc:
+                entry.ok = False
+                entry.status = "failed"
+                entry.error = str(exc)
+
+        async def _rollback_succeeded_workers() -> None:
+            to_revert = [
+                n
+                for n in remote_workers
+                if worker_entries[n.node_id].ok and worker_entries[n.node_id].updated
+            ]
+            if not to_revert:
+                return
+
+            async def _revert_one(node: NodeStatus) -> None:
+                entry = worker_entries[node.node_id]
+                try:
+                    data = await _call_worker_agent_system(
+                        client,
+                        node,
+                        "/system/rollback",
+                        {"to_sha": entry.previous_sha or None},
+                    )
+                    if data.get("ok"):
+                        entry.rolled_back = True
+                        entry.status = "rolled_back"
+                        entry.current_sha = str(data.get("current_sha") or entry.previous_sha)
+                        entry.steps.extend([str(s) for s in (data.get("steps") or [])])
+                        job.rolled_back = True
+                except (httpx.HTTPError, OSError, ValueError) as exc:
+                    entry.steps.append(f"Sibling rollback failed: {exc}")
+
+            await asyncio.gather(*(_revert_one(n) for n in to_revert))
+
+        if remote_workers:
+            await asyncio.gather(*(_update_worker(n) for n in remote_workers))
+
+        failed_workers = [e for e in worker_entries.values() if not e.ok]
+        if failed_workers:
+            router_entry.status = "failed"
+            router_entry.error = "Aborted before router update because a worker node failed"
+            if req.rollback_on_failure:
+                await _rollback_succeeded_workers()
+            job.status = "aborted"
+            job.error = "; ".join(
+                f"{e.display_name}: {e.error or 'update failed'}" for e in failed_workers
+            )
+            job.finished_at = time.time()
+            return
+
+        router_entry.status = "updating"
+        try:
+            res = await asyncio.to_thread(
+                perform_update,
+                restart_services=False,
+                with_engine=req.with_engine,
+            )
+            router_entry.ok = res.ok
+            router_entry.updated = res.updated or res.ui_rebuilt
+            router_entry.rolled_back = res.rolled_back
+            router_entry.previous_sha = res.previous_sha
+            router_entry.current_sha = res.current_sha
+            router_entry.steps = list(res.steps)
+            router_entry.error = res.error
+        except (OSError, RuntimeError, ValueError) as exc:
+            router_entry.ok = False
+            router_entry.error = str(exc)
+
+        if not router_entry.ok:
+            router_entry.status = "rolled_back" if router_entry.rolled_back else "failed"
+            if req.rollback_on_failure:
+                await _rollback_succeeded_workers()
+            job.status = "failed"
+            job.error = router_entry.error or "Router update failed"
+            job.finished_at = time.time()
+            return
+
+        if router_entry.updated:
+            router_entry.status = "restarting"
+            job.status = "restarting"
+            job.router_restarting = True
+            job.finished_at = time.time()
+            _schedule_router_restart(1.5)
+        else:
+            router_entry.status = "done"
+            job.status = "done"
+            job.finished_at = time.time()
+
+
+async def _run_cluster_rollback_job(
+    job: ClusterUpdateJob, req: ClusterRollbackRequest
+) -> None:
+    online_nodes = [n for n in cluster.nodes.values() if n.online]
+    remote_workers = [n for n in online_nodes if not _is_colocated_agent(n)]
+    colocated_names = [n.display_name for n in online_nodes if _is_colocated_agent(n)]
+    router_label = (
+        f"Router (+ {', '.join(colocated_names)})" if colocated_names else "Router"
+    )
+
+    worker_entries: dict[str, NodeUpdateRunResult] = {
+        n.node_id: NodeUpdateRunResult(node_id=n.node_id, display_name=n.display_name)
+        for n in remote_workers
+    }
+    router_entry = NodeUpdateRunResult(node_id="router", display_name=router_label)
+    job.nodes = [*worker_entries.values(), router_entry]
+
+    ca_bundle = os.getenv("SPLITCH_CA_BUNDLE", "").strip() or config.tls.ca_bundle.strip()
+    verify: bool | str = ca_bundle if ca_bundle else True
+
+    async with httpx.AsyncClient(verify=verify) as client:
+
+        async def _rb_worker(node: NodeStatus) -> None:
+            entry = worker_entries[node.node_id]
+            entry.status = "updating"
+            try:
+                data = await _call_worker_agent_system(
+                    client,
+                    node,
+                    "/system/rollback",
+                    {"to_sha": req.to_sha},
+                )
+                entry.ok = bool(data.get("ok"))
+                entry.updated = bool(data.get("updated"))
+                entry.rolled_back = bool(data.get("rolled_back"))
+                entry.previous_sha = str(data.get("previous_sha") or "")
+                entry.current_sha = str(data.get("current_sha") or "")
+                entry.steps = [str(s) for s in (data.get("steps") or [])]
+                entry.error = data.get("error")
+                entry.status = "rolled_back" if entry.ok else "failed"
+            except (httpx.HTTPError, OSError, ValueError) as exc:
+                entry.ok = False
+                entry.status = "failed"
+                entry.error = str(exc)
+
+        if remote_workers:
+            await asyncio.gather(*(_rb_worker(n) for n in remote_workers))
+
+    router_entry.status = "updating"
+    try:
+        res = await asyncio.to_thread(
+            perform_rollback,
+            to_sha=req.to_sha,
+            restart_services=False,
+        )
+        router_entry.ok = res.ok
+        router_entry.updated = res.updated
+        router_entry.rolled_back = res.rolled_back
+        router_entry.previous_sha = res.previous_sha
+        router_entry.current_sha = res.current_sha
+        router_entry.steps = list(res.steps)
+        router_entry.error = res.error
+        router_entry.status = "restarting" if (res.ok and res.updated) else ("rolled_back" if res.ok else "failed")
+    except (OSError, RuntimeError, ValueError) as exc:
+        router_entry.ok = False
+        router_entry.status = "failed"
+        router_entry.error = str(exc)
+
+    any_rolled_back = any(e.rolled_back for e in job.nodes)
+    any_failed = any(not e.ok for e in job.nodes)
+    job.rolled_back = any_rolled_back
+    if any_failed:
+        job.error = "; ".join(
+            f"{e.display_name}: {e.error or 'rollback failed'}"
+            for e in job.nodes
+            if not e.ok
+        )
+    if router_entry.ok and router_entry.updated:
+        job.status = "restarting"
+        job.router_restarting = True
+        job.finished_at = time.time()
+        _schedule_router_restart(1.5)
+    else:
+        job.status = "failed" if any_failed else "done"
+        job.finished_at = time.time()
+
+
+@app.post("/api/system/update-cluster", response_model=ClusterUpdateJob)
+async def start_cluster_update(
+    request: Request, req: ClusterUpdateRequest | None = None
+) -> ClusterUpdateJob:
+    global _cluster_update_job, _cluster_update_task
+    _assert_ui_update_allowed(request)
+    if _cluster_update_job and _cluster_update_job.status == "running":
+        raise HTTPException(status_code=409, detail="A cluster update or rollback is already in progress")
+    body = req or ClusterUpdateRequest()
+    job = ClusterUpdateJob(
+        id=uuid.uuid4().hex[:12],
+        action="update",
+        status="running",
+        started_at=time.time(),
+        with_engine=body.with_engine,
+    )
+    _cluster_update_job = job
+    _cluster_update_task = asyncio.create_task(_run_cluster_update_job(job, body))
+    return job
+
+
+@app.post("/api/system/rollback-cluster", response_model=ClusterUpdateJob)
+async def start_cluster_rollback(
+    request: Request, req: ClusterRollbackRequest | None = None
+) -> ClusterUpdateJob:
+    global _cluster_update_job, _cluster_update_task
+    _assert_ui_update_allowed(request)
+    if _cluster_update_job and _cluster_update_job.status == "running":
+        raise HTTPException(status_code=409, detail="A cluster update or rollback is already in progress")
+    body = req or ClusterRollbackRequest()
+    job = ClusterUpdateJob(
+        id=uuid.uuid4().hex[:12],
+        action="rollback",
+        status="running",
+        started_at=time.time(),
+    )
+    _cluster_update_job = job
+    _cluster_update_task = asyncio.create_task(_run_cluster_rollback_job(job, body))
+    return job
+
+
+@app.get("/api/system/update-cluster/status", response_model=ClusterUpdateJob)
+async def get_cluster_update_status() -> ClusterUpdateJob:
+    if _cluster_update_job is None:
+        return ClusterUpdateJob(id="", status="idle")
+    return _cluster_update_job
 
 
 @app.get("/api/bench/history", response_model=list[BenchReport])

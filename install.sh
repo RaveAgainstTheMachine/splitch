@@ -538,7 +538,7 @@ case "$SPLITCH_ENGINE" in
   none|skip|off)
     ok "Skipped inference engine install (--engine none)"
     ;;
-  llama.cpp|ollama)
+  llama.cpp|ollama|mlx-lm)
     log "Installing / updating inference engine ($SPLITCH_ENGINE, backend=$SPLITCH_ENGINE_BACKEND)..."
     SPLITCH_DATA_ROOT="$SPLITCH_DATA_ROOT" "$SPLITCH_HOME/.venv/bin/splitch" engine install "$SPLITCH_ENGINE" \
       --backend "$SPLITCH_ENGINE_BACKEND" \

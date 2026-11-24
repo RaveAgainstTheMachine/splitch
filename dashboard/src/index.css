@@ -4447,3 +4447,311 @@ input[type="checkbox"][switch]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
+
+/* ── Workspace File Tree & Git Review Explorer ────────────────────────────── */
+
+.sidebar-mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.2rem;
+  padding: 0.2rem;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.sidebar-mode-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  padding: 0.28rem 0.3rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar-mode-tab:hover {
+  color: var(--text);
+}
+
+.sidebar-mode-tab--active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.sidebar-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.25rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.ws-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-height: 0;
+  flex: 1;
+}
+
+.ws-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.ws-panel__ws-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.72rem;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-tree {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.ws-tree__empty {
+  font-size: 0.75rem;
+  padding: 0.5rem 0.4rem;
+}
+
+.ws-tree__row {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  border-radius: 5px;
+  padding-right: 0.2rem;
+}
+
+.ws-tree__row:hover {
+  background: var(--surface-2);
+}
+
+.ws-tree__btn {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.76rem;
+  padding: 0.24rem 0.2rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ws-tree__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-tree__spacer {
+  width: 12px;
+  flex-shrink: 0;
+}
+
+.ws-tree__icon-dir {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ws-tree__icon-file {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.ws-tree__attach {
+  opacity: 0;
+  padding: 0.15rem 0.25rem;
+}
+
+.ws-tree__row:hover .ws-tree__attach,
+.ws-tree__attach:focus-visible {
+  opacity: 1;
+}
+
+.git-badge {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 0 0.25rem;
+  flex-shrink: 0;
+}
+
+.git-badge--M {
+  color: #f59e0b;
+}
+
+.git-badge--A,
+.git-badge--U {
+  color: #22c55e;
+}
+
+.git-badge--D {
+  color: #ef4444;
+}
+
+.ws-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem 0.4rem;
+  font-size: 0.78rem;
+}
+
+.ws-git-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.76rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-git-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.ws-commit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.ws-commit-box textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 3.1rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.76rem;
+  font-family: inherit;
+}
+
+.ws-git-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.ws-git-section__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0.2rem 0.25rem;
+}
+
+.ws-viewer__path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.76rem;
+}
+
+.ws-viewer__body {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.ws-viewer__notice {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.ws-code-lines {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
+  line-height: 1.48;
+  padding: 0.4rem 0;
+}
+
+.ws-code-line {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0 0.75rem;
+  white-space: pre;
+}
+
+.ws-code-line__num {
+  color: var(--muted);
+  opacity: 0.65;
+  min-width: 2.5ch;
+  text-align: right;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.ws-code-line__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.ws-diff-line--add {
+  background: rgba(34, 197, 94, 0.14);
+  color: #4ade80;
+}
+
+.ws-diff-line--del {
+  background: rgba(239, 68, 68, 0.14);
+  color: #f87171;
+}
+
+.ws-diff-line--hunk {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--accent);
+}
+
+.ws-diff-line--meta {
+  color: var(--muted);
+  font-weight: 600;
+}

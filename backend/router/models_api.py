@@ -402,15 +402,17 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         sort: str = "downloads",
         direction: int = -1,
         limit: int = 18,
+        format: str = "gguf",
     ) -> list[HfRepoResult]:
         query = q.strip()
         if len(query) < 2:
             return []
         hf_sort = sort if sort in VALID_HF_SORTS else "downloads"
         hf_dir = 1 if direction == 1 else -1
+        hf_filter = "mlx" if format.strip().lower() == "mlx" else "gguf"
         params: list[tuple[str, str | int]] = [
             ("search", query),
-            ("filter", "gguf"),
+            ("filter", hf_filter),
             ("sort", hf_sort),
             ("direction", hf_dir),
             ("limit", min(limit, 30)),
@@ -499,6 +501,35 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
                 raise HTTPException(status_code=502, detail=f"HF details fetch failed: {exc}") from exc
 
         files = _build_gguf_file_list(entries, cluster)
+        if not files:
+            safe_bytes = sum(
+                int((e.get("lfs") or {}).get("size") or e.get("size") or 0)
+                for e in entries
+                if isinstance(e, dict)
+                and e.get("type") == "file"
+                and str(e.get("path") or "").lower().endswith(".safetensors")
+            )
+            has_cfg = any(
+                isinstance(e, dict) and str(e.get("path") or "") == "config.json"
+                for e in entries
+            )
+            if has_cfg and safe_bytes > 0:
+                size_gb = round(safe_bytes / (1024**3), 2)
+                fits_all = [
+                    nid
+                    for nid, node in cluster.nodes.items()
+                    if _node_budget_gb(node) >= size_gb
+                ]
+                files = [
+                    HfGgufFile(
+                        filename=repo_id.replace("/", "--"),
+                        size_bytes=safe_bytes,
+                        size_gb=size_gb,
+                        quant="MLX",
+                        fits_nodes=fits_all,
+                        fits_single_gpu_nodes=fits_all,
+                    )
+                ]
         description, truncated, fm_base = extract_hf_readme_description(raw_readme)
 
         card_data = meta.get("cardData") if isinstance(meta.get("cardData"), dict) else {}

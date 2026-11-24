@@ -43,6 +43,8 @@ LLM_PROCESS_TOKENS = (
     "exllama",
     "sd-server",
     "sd-cli",
+    "strata-server",
+    "strata_server",
 )
 
 PCI_VENDOR_MAP: dict[str, GpuVendor] = {
