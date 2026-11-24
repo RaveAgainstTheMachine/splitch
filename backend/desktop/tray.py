@@ -499,13 +499,15 @@ class TrayController:
 
     async def watch_status_loop(self) -> None:
         """Async WebSocket subscriber to `/ws/status` (auto-reconnects cleanly)."""
+        from urllib.parse import quote
+
         import websockets
         import websockets.exceptions
 
         ws_base = self.router_url.replace("https://", "wss://").replace("http://", "ws://")
         ws_url = f"{ws_base}/ws/status"
         if self.api_key:
-            ws_url = f"{ws_url}?token={self.api_key}"
+            ws_url = f"{ws_url}?token={quote(self.api_key, safe='')}"
 
         backoff = 1.5
         while not self._stop_event.is_set():
