@@ -70,12 +70,75 @@ if not (py_ver == proj_ver == dash_ver):
     )
     sys.exit(1)
 print(f"  ✓ SemVer 2.0.0 parity verified: v{py_ver}")
+
+def _parse_ver(v: str) -> tuple[int, int, int]:
+    core = v.lstrip("v").split("-", 1)[0].split("+", 1)[0]
+    parts = [int(x) for x in core.split(".")]
+    return (parts[0], parts[1], parts[2])
+
+tag_proc = subprocess.run(
+    ["git", "describe", "--tags", "--abbrev=0", "--match", "v[0-9]*.[0-9]*.[0-9]*"],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+if tag_proc.returncode == 0 and tag_proc.stdout.strip():
+    last_tag = tag_proc.stdout.strip()
+    tag_tuple = _parse_ver(last_tag)
+    cur_tuple = _parse_ver(py_ver)
+    subjects = subprocess.check_output(
+        ["git", "log", f"{last_tag}..HEAD", "--format=%s"], text=True
+    ).splitlines()
+    changed_since_tag = subprocess.check_output(
+        ["git", "diff", "--name-only", f"{last_tag}..HEAD"], text=True
+    ).splitlines()
+    dirty_files = subprocess.check_output(
+        ["git", "diff", "--name-only", "HEAD"], text=True
+    ).splitlines()
+    code_prefixes = ("backend/", "dashboard/src/", "install.sh", "install.ps1")
+    code_changed = any(
+        f.startswith(code_prefixes) for f in (*changed_since_tag, *dirty_files)
+    )
+    has_feat = any(re.match(r"^feat(\([^)]+\))?!?:", s) for s in subjects)
+    has_breaking = any(
+        re.match(r"^[a-z]+(\([^)]+\))?!:", s) or "BREAKING CHANGE" in s for s in subjects
+    )
+    if has_breaking and cur_tuple[0] == 0 and cur_tuple[:2] <= tag_tuple[:2]:
+        print(
+            f"[preflight] ERROR: Breaking change since {last_tag} requires a MINOR bump (0.x) "
+            f"from v{py_ver}. Run: ./scripts/bump-version.sh minor",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if has_breaking and cur_tuple[0] > 0 and cur_tuple[0] <= tag_tuple[0]:
+        print(
+            f"[preflight] ERROR: Breaking change since {last_tag} requires a MAJOR bump "
+            f"from v{py_ver}. Run: ./scripts/bump-version.sh major",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if has_feat and cur_tuple[:2] <= tag_tuple[:2]:
+        print(
+            f"[preflight] ERROR: Feature commit(s) since {last_tag} require a MINOR bump "
+            f"(still at v{py_ver}). Run: ./scripts/bump-version.sh minor",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if code_changed and cur_tuple <= tag_tuple:
+        print(
+            f"[preflight] ERROR: Code changes since {last_tag} require at least a PATCH bump "
+            f"(still at v{py_ver}). Run: ./scripts/bump-version.sh patch",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"  ✓ SemVer progression verified: {last_tag} -> v{py_ver}")
 PY
 
 echo "[preflight 2/5] Validating POSIX shell scripts..."
 sh -n install.sh
 sh -n scripts/preflight.sh
-echo "  ✓ install.sh and scripts/preflight.sh syntax valid"
+sh -n scripts/bump-version.sh
+echo "  ✓ install.sh, scripts/preflight.sh, and scripts/bump-version.sh syntax valid"
 
 echo "[preflight 3/5] Running Ruff linter..."
 uv run --no-sync ruff check backend tests
