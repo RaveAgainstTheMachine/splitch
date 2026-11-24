@@ -46,9 +46,12 @@ from backend.desktop.icons import (
 from backend.desktop.shortcuts import (
     DesktopConfig,
     copy_to_clipboard,
+    desktop_icons_in_sync,
+    desktop_shortcuts_installed,
     load_desktop_config,
     open_path_in_file_manager,
     read_live_pid,
+    resolve_desktop_api_key,
     restart_splitch_service,
     send_desktop_notification,
     set_tray_autostart,
@@ -79,18 +82,21 @@ class TrayMenuItem:
 class TrayController:
     """Shared live cluster state & menu model across all OS / compositor tray backends."""
 
-    def __init__(self, router_url: str | None = None) -> None:
+    def __init__(self, router_url: str | None = None, api_key: str | None = None) -> None:
         self.cfg: DesktopConfig = load_desktop_config()
         if router_url:
             self.cfg.router_url = router_url.rstrip("/")
             if not any(h in self.cfg.router_url for h in ("127.0.0.1", "localhost")):
                 self.cfg.mode = "remote"
         self.router_url: str = self.cfg.router_url.rstrip("/")
-        self.api_key: str = os.getenv("SPLITCH_API_KEY", "").strip()
+        self._explicit_api_key: str = (api_key or "").strip()
+        self.api_key: str = self._explicit_api_key or resolve_desktop_api_key()
         self.online: bool = False
+        self.auth_error: bool = False
         self.snapshot: dict[str, Any] = {}
         self.theme: dict[str, Any] = self.cfg.theme.model_dump()
         self._theme_tag: str = theme_tag(self.theme)
+        self._initial_sync_verified: bool = False
         self.update_note: str = ""
         self._notified_remote_sha: str = ""
         self.revision: int = 1
@@ -101,6 +107,12 @@ class TrayController:
         self._pixmap_cache: dict[tuple[StatusBadge, str], list[tuple[int, int, bytes]]] = {}
         self._desktop_sync_lock = threading.Lock()
         self._desktop_sync_timer: threading.Timer | None = None
+
+    def refresh_api_key(self) -> str:
+        """Reload desktop API key from env / SecretVault / tray.env so newly saved keys work without restart."""
+        if not self._explicit_api_key:
+            self.api_key = resolve_desktop_api_key()
+        return self.api_key
 
     def on_change(self, cb: Callable[[], None]) -> None:
         self._listeners.append(cb)
@@ -144,17 +156,36 @@ class TrayController:
         """Apply a fresh `/api/status` or `/ws/status` snapshot and react to theme changes."""
         self.snapshot = data
         self.online = True
+        self.auth_error = False
         raw_theme = data.get("theme")
         if isinstance(raw_theme, dict):
             new_tag = theme_tag(raw_theme)
+            needs_sync = False
             if new_tag != self._theme_tag:
                 self.theme = dict(raw_theme)
                 self._theme_tag = new_tag
                 self._pixmap_cache.clear()
                 with contextlib.suppress(OSError, ValueError):
-                    ensure_tray_icon_theme(default_data_root() / "icons", theme=self.theme)
-                if sync_desktop and not os.getenv("PYTEST_CURRENT_TEST"):
-                    self._schedule_desktop_icon_sync(dict(self.theme))
+                    ensure_tray_icon_theme(
+                        default_data_root() / "icons", theme=self.theme, prune=False
+                    )
+                needs_sync = True
+            elif not self._initial_sync_verified:
+                self.theme = dict(raw_theme)
+                if (
+                    sync_desktop
+                    and not os.getenv("PYTEST_CURRENT_TEST")
+                    and desktop_shortcuts_installed()
+                    and not desktop_icons_in_sync(raw_theme)
+                ):
+                    with contextlib.suppress(OSError, ValueError):
+                        ensure_tray_icon_theme(
+                            default_data_root() / "icons", theme=self.theme, prune=False
+                        )
+                    needs_sync = True
+            self._initial_sync_verified = True
+            if needs_sync and sync_desktop and not os.getenv("PYTEST_CURRENT_TEST"):
+                self._schedule_desktop_icon_sync(dict(self.theme))
         raw_upd = data.get("update_summary")
         if isinstance(raw_upd, dict):
             if raw_upd.get("update_available"):
@@ -214,6 +245,11 @@ class TrayController:
         online_nodes = [n for n in nodes if n.get("online")]
         ver = self.snapshot.get("version") or VERSION
         if not self.online:
+            if self.auth_error:
+                return (
+                    f"Splitch v{ver} — Auth Required",
+                    f"Router requires API key ({self.router_url}) — run: splitch desktop set-api-key",
+                )
             return f"Splitch v{ver} — Offline", f"Router unreachable ({self.router_url})"
 
         control = self.snapshot.get("control") or {}
@@ -372,6 +408,8 @@ class TrayController:
         title, _ = self.tooltip_summary()
         items.append(add(title, enabled=False))
         items.append(add(f"Endpoint: {self.router_url}/v1", enabled=False))
+        if self.auth_error:
+            items.append(add("  Auth needed: run `splitch desktop set-api-key`", enabled=False))
 
         nodes = self.snapshot.get("nodes") or []
         loaded_models: list[str] = []
@@ -482,6 +520,7 @@ class TrayController:
     # ── Live State Subscription (WebSocket with HTTP fallback) ───────────────
 
     def poll_once_sync(self) -> None:
+        self.refresh_api_key()
         try:
             r = httpx.get(
                 f"{self.router_url}/api/status",
@@ -491,10 +530,19 @@ class TrayController:
             if r.status_code == 200:
                 self.apply_snapshot(r.json())
                 return
+            if r.status_code in (401, 403):
+                changed = self.online or not self.auth_error
+                self.online = False
+                self.auth_error = True
+                if changed:
+                    self._notify_changed()
+                return
         except (httpx.HTTPError, ValueError):
             pass
-        if self.online:
-            self.online = False
+        changed = self.online or self.auth_error
+        self.online = False
+        self.auth_error = False
+        if changed:
             self._notify_changed()
 
     async def watch_status_loop(self) -> None:
@@ -505,12 +553,13 @@ class TrayController:
         import websockets.exceptions
 
         ws_base = self.router_url.replace("https://", "wss://").replace("http://", "ws://")
-        ws_url = f"{ws_base}/ws/status"
-        if self.api_key:
-            ws_url = f"{ws_url}?token={quote(self.api_key, safe='')}"
 
         backoff = 1.5
         while not self._stop_event.is_set():
+            key = self.refresh_api_key()
+            ws_url = f"{ws_base}/ws/status"
+            if key:
+                ws_url = f"{ws_url}?token={quote(key, safe='')}"
             try:
                 async with websockets.connect(
                     ws_url,
@@ -528,6 +577,15 @@ class TrayController:
                             continue
                         if isinstance(data, dict):
                             self.apply_snapshot(data)
+            except websockets.exceptions.ConnectionClosed as exc:
+                rcvd = getattr(exc, "rcvd", None)
+                if rcvd is not None and getattr(rcvd, "code", None) == 1008:
+                    changed = self.online or not self.auth_error
+                    self.online = False
+                    self.auth_error = True
+                    if changed:
+                        self._notify_changed()
+                logger.debug("Tray WebSocket closed (%s)", type(exc).__name__)
             except (
                 websockets.exceptions.WebSocketException,
                 OSError,
@@ -563,7 +621,9 @@ def _run_pystray_tray(ctrl: TrayController) -> None:
             # Keep cache bounded to current theme only
             if len(img_cache) > 8:
                 img_cache.clear()
-            img_cache[key] = Image.open(io.BytesIO(render_png_bytes(64, b, theme=ctrl.theme)))
+            img = Image.open(io.BytesIO(render_png_bytes(64, b, theme=ctrl.theme))).convert("RGBA")
+            img.load()
+            img_cache[key] = img
         return img_cache[key]
 
     def _to_pystray_items(items: list[TrayMenuItem]) -> list[Any]:
@@ -607,7 +667,7 @@ def _run_pystray_tray(ctrl: TrayController) -> None:
     def _sync_icon() -> None:
         title, _ = ctrl.tooltip_summary()
         icon.icon = _get_image()
-        icon.title = title
+        icon.title = title[:127]
         icon.menu = _build_menu()
         with contextlib.suppress(Exception):
             icon.update_menu()
@@ -623,7 +683,7 @@ def _run_pystray_tray(ctrl: TrayController) -> None:
     icon.run()
 
 
-def run_tray(router_url: str | None = None) -> int:
+def run_tray(router_url: str | None = None, api_key: str | None = None) -> int:
     """Entry point for `splitch tray` with single-instance lock & automatic compositor selection."""
     pid_file = default_data_root() / "tray.pid"
     existing = read_live_pid(pid_file)
@@ -632,7 +692,7 @@ def run_tray(router_url: str | None = None) -> int:
         return 0
 
     write_pid_file(pid_file, os.getpid())
-    ctrl = TrayController(router_url=router_url)
+    ctrl = TrayController(router_url=router_url, api_key=api_key)
     ctrl.poll_once_sync()
 
     try:

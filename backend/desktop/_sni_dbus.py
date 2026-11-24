@@ -58,9 +58,24 @@ async def run_linux_sni_tray(ctrl: "TrayController") -> bool:
     names = await _list_bus_names()
     has_watcher = any(w[0] in names for w in SNI_WATCHERS)
     if not has_watcher and os.getenv("DISPLAY") and not os.getenv("WAYLAND_DISPLAY"):
-        # Pure legacy X11 WM (i3bar, dwm, openbox/tint2, stalonetray) -> hand off to pystray XEmbed
-        bus.disconnect()
-        return False
+        # On SNI-capable X11 desktops (KDE/GNOME/XFCE/Cinnamon/MATE/LXQt/Budgie/Deepin),
+        # the panel watcher may still be starting during login autostart — wait briefly.
+        desktop = (os.getenv("XDG_CURRENT_DESKTOP", "") + " " + os.getenv("DESKTOP_SESSION", "")).lower()
+        sni_likely = any(
+            tok in desktop
+            for tok in ("kde", "plasma", "gnome", "xfce", "cinnamon", "mate", "lxqt", "budgie", "deepin", "unity", "cosmic")
+        )
+        if sni_likely:
+            for _ in range(3):
+                await asyncio.sleep(0.5)
+                names = await _list_bus_names()
+                if any(w[0] in names for w in SNI_WATCHERS):
+                    has_watcher = True
+                    break
+        if not has_watcher:
+            # Pure legacy X11 WM (i3bar, dwm, openbox/tint2, stalonetray) -> hand off to pystray XEmbed
+            bus.disconnect()
+            return False
 
     bus_name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
 
@@ -346,6 +361,8 @@ async def run_linux_sni_tray(ctrl: "TrayController") -> bool:
 
     def _push_updates() -> None:
         def _emit() -> None:
+            with contextlib.suppress(Exception):
+                sni_iface.emit_properties_changed({"IconName": ctrl.icon_name()})
             sni_iface.NewIcon()
             sni_iface.NewToolTip()
             menu_iface.refresh()

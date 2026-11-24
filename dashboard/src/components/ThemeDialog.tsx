@@ -38,8 +38,9 @@ export function AppearancePanel() {
   const [surface, setSurface] = useState<SurfacePreset>(initial.surface);
   const [osLight, setOsLight] = useState<boolean>(isOsLightMode);
   const [faviconUrl, setFaviconUrl] = useState<string>(() => syncFaviconFromTheme());
-  const [syncBadge, setSyncBadge] = useState<string | null>(null);
+  const [syncBadge, setSyncBadge] = useState<{ text: string; ok: boolean } | null>(null);
   const debounceTimerRef = useRef<number | null>(null);
+  const pendingThemeRef = useRef<UiThemeConfig | null>(null);
   const badgeTimerRef = useRef<number | null>(null);
 
   const scheduleRouterSync = (next: UiThemeConfig, debounced: boolean) => {
@@ -47,16 +48,24 @@ export function AppearancePanel() {
       window.clearTimeout(debounceTimerRef.current);
       debounceTimerRef.current = null;
     }
+    pendingThemeRef.current = next;
     const send = async () => {
+      pendingThemeRef.current = null;
       const saved = await pushThemeToRouter(next);
       if (saved) {
-        setSyncBadge("Icons synced");
-        if (badgeTimerRef.current !== null) window.clearTimeout(badgeTimerRef.current);
-        badgeTimerRef.current = window.setTimeout(() => setSyncBadge(null), 2200);
+        window.dispatchEvent(new CustomEvent<UiThemeConfig>(THEME_SYNC_EVENT, { detail: saved }));
+        setSyncBadge({ text: "Icons synced", ok: true });
+      } else {
+        setSyncBadge({ text: "Sync failed", ok: false });
       }
+      if (badgeTimerRef.current !== null) window.clearTimeout(badgeTimerRef.current);
+      badgeTimerRef.current = window.setTimeout(() => setSyncBadge(null), 2400);
     };
     if (debounced) {
-      debounceTimerRef.current = window.setTimeout(() => void send(), 180);
+      debounceTimerRef.current = window.setTimeout(() => {
+        debounceTimerRef.current = null;
+        void send();
+      }, 180);
     } else {
       void send();
     }
@@ -97,7 +106,15 @@ export function AppearancePanel() {
       window.removeEventListener("storage", onStorage);
       window.removeEventListener(THEME_SYNC_EVENT, onThemeSync);
       mq?.removeEventListener("change", onMedia);
-      if (debounceTimerRef.current !== null) window.clearTimeout(debounceTimerRef.current);
+      if (debounceTimerRef.current !== null) {
+        window.clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+        if (pendingThemeRef.current) {
+          const toFlush = pendingThemeRef.current;
+          pendingThemeRef.current = null;
+          void pushThemeToRouter(toFlush);
+        }
+      }
       if (badgeTimerRef.current !== null) window.clearTimeout(badgeTimerRef.current);
     };
   }, []);
@@ -144,7 +161,11 @@ export function AppearancePanel() {
           </div>
         </div>
         <div className="row-actions">
-          {syncBadge && <span className="pill pill--ok">{syncBadge}</span>}
+          {syncBadge && (
+            <span className={`pill ${syncBadge.ok ? "pill--ok" : "pill--warn"}`}>
+              {syncBadge.text}
+            </span>
+          )}
           <button type="button" className="btn btn--sm" onClick={resetAll}>
             <RotateCcw size={12} aria-hidden="true" /> Reset Defaults
           </button>

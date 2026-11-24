@@ -265,7 +265,7 @@ if ($Local) {
 Show-StepBar 3 $TotalSteps "Syncing Python environment"
 Push-Location $AppDir
 try {
-    if (-not $AgentOnly -and -not $NoDesktop) {
+    if (-not $NoDesktop -and ((-not $AgentOnly) -or (Test-Path (Join-Path $DataRoot "desktop.json")))) {
         & uv sync --python $Python --no-dev --extra desktop
     } else {
         & uv sync --python $Python --no-dev

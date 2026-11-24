@@ -1,5 +1,5 @@
 """
-Zero-dependency Splitch icon rasterizer (PNG, ARGB32 SNI Pixmap, Windows ICO, SVG).
+Zero-dependency Splitch icon rasterizer (PNG, ARGB32 SNI Pixmap, Windows ICO, macOS ICNS, SVG).
 
 Renders the Splitch sheared-S badge synchronized with the user's active Appearance
 theme (color scheme, surface preset, accent hex) and an optional live status dot
@@ -11,10 +11,14 @@ even when Pillow is absent.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import math
+import os
 import re
 import struct
+import sys
+import tempfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -389,14 +393,45 @@ def _png_chunk(tag: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
 
 
-def render_png_bytes(
+def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o644) -> None:
+    """Atomically write binary file via same-directory temp file + `os.replace`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+        if sys.platform != "win32":
+            with contextlib.suppress(OSError):
+                tmp_path.chmod(mode)
+        os.replace(tmp_path, path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
+
+
+def atomic_write_text(path: Path, text: str, *, mode: int = 0o644) -> None:
+    """Atomically write UTF-8 text file via same-directory temp file + `os.replace`."""
+    atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
+
+
+@functools.lru_cache(maxsize=96)
+def _render_png_cached(
     size: int,
-    status: StatusBadge = "plain",
-    *,
-    theme: Any = None,
+    status: StatusBadge,
+    is_light: bool,
+    accent_hex: str,
+    surface: str,
 ) -> bytes:
-    """Encode a valid RGBA PNG using pure Python stdlib (`zlib` + `struct`)."""
-    rgba = render_rgba_pixels(size, status, theme=theme)
+    theme_dict = {
+        "scheme": "light" if is_light else "dark",
+        "accent": accent_hex,
+        "surface": surface,
+        "resolved_light": is_light,
+    }
+    rgba = render_rgba_pixels(size, status, theme=theme_dict)
     stride = size * 4
     raw_rows = bytearray()
     for y in range(size):
@@ -412,9 +447,20 @@ def render_png_bytes(
     )
 
 
+def render_png_bytes(
+    size: int,
+    status: StatusBadge = "plain",
+    *,
+    theme: Any = None,
+) -> bytes:
+    """Encode a valid RGBA PNG using pure Python stdlib (`zlib` + `struct`), cached per palette."""
+    pal = resolve_icon_palette(theme)
+    return _render_png_cached(size, status, pal.is_light, pal.accent_hex, pal.surface)
+
+
 def render_ico_bytes(status: StatusBadge = "plain", *, theme: Any = None) -> bytes:
-    """Build a multi-resolution Windows `.ico` containing PNG-encoded 32x32 and 64x64 images."""
-    sizes = (32, 64)
+    """Build a multi-resolution Windows `.ico` (16/32/48/64/256px PNG-encoded frames for HiDPI)."""
+    sizes = (16, 32, 48, 64, 256)
     pngs = [render_png_bytes(s, status, theme=theme) for s in sizes]
     header = struct.pack("<HHH", 0, 1, len(sizes))
     offset = 6 + 16 * len(sizes)
@@ -435,6 +481,24 @@ def render_ico_bytes(status: StatusBadge = "plain", *, theme: Any = None) -> byt
         )
         offset += len(png)
     return header + bytes(entries) + b"".join(pngs)
+
+
+def render_icns_bytes(status: StatusBadge = "plain", *, theme: Any = None) -> bytes:
+    """Build a native Apple `.icns` container with multi-resolution PNG chunks (16–256px)."""
+    chunk_specs: tuple[tuple[bytes, int], ...] = (
+        (b"icp4", 16),
+        (b"icp5", 32),
+        (b"icp6", 64),
+        (b"ic07", 128),
+        (b"ic08", 256),
+    )
+    body = bytearray()
+    for tag_bytes, px in chunk_specs:
+        png = render_png_bytes(px, status, theme=theme)
+        body.extend(tag_bytes)
+        body.extend(struct.pack(">I", 8 + len(png)))
+        body.extend(png)
+    return b"icns" + struct.pack(">I", 8 + len(body)) + bytes(body)
 
 
 def render_svg_text(*, theme: Any = None) -> str:
@@ -481,10 +545,48 @@ def tray_icon_stem(status: StatusBadge, *, theme: Any = None) -> str:
     return f"splitch-{status}-{tag}"
 
 
-def ensure_tray_icon_theme(icons_dir: Path, *, theme: Any = None) -> Path:
+def prune_stale_icons(icons_dir: Path, *, keep_tag: str) -> list[Path]:
+    """Remove obsolete hashed `splitch-*-<oldtag>.png/.ico` files while keeping `keep_tag`."""
+    if not icons_dir.is_dir():
+        return []
+    keep = {
+        "splitch.png",
+        "splitch-256.png",
+        "splitch-ok.png",
+        "splitch-warn.png",
+        "splitch-offline.png",
+        "splitch.svg",
+        "splitch.ico",
+        f"splitch-{keep_tag}.png",
+        f"splitch-256-{keep_tag}.png",
+        f"splitch-ok-{keep_tag}.png",
+        f"splitch-warn-{keep_tag}.png",
+        f"splitch-offline-{keep_tag}.png",
+        f"splitch-{keep_tag}.ico",
+    }
+    removed: list[Path] = []
+    for entry in icons_dir.iterdir():
+        if (
+            entry.is_file()
+            and entry.name.startswith("splitch-")
+            and entry.suffix in (".png", ".ico")
+            and entry.name not in keep
+        ):
+            with contextlib.suppress(OSError):
+                entry.unlink()
+                removed.append(entry)
+    return removed
+
+
+def ensure_tray_icon_theme(
+    icons_dir: Path,
+    *,
+    theme: Any = None,
+    prune: bool = True,
+) -> Path:
     """
-    Materialize both canonical and cache-busted themed PNG/SVG icons for SNI
-    `IconThemePath` and desktop shortcuts, pruning stale hashed variants.
+    Atomically materialize both canonical and cache-busted themed PNG/SVG icons for SNI
+    `IconThemePath` and desktop shortcuts, optionally pruning stale hashed variants.
     """
     icons_dir.mkdir(parents=True, exist_ok=True)
     tag = theme_tag(theme)
@@ -504,24 +606,15 @@ def ensure_tray_icon_theme(icons_dir: Path, *, theme: Any = None) -> Path:
         f"splitch-offline-{tag}.png": (64, "offline"),
     }
 
-    # Render each unique (size, status) once and write both canonical + hashed copies
+    # Render each unique (size, status) once and atomically replace both canonical + hashed copies
     rendered: dict[tuple[int, StatusBadge], bytes] = {}
-    for fname, key in {**canonical, **hashed}.items():
+    for fname, key in {**hashed, **canonical}.items():
         if key not in rendered:
             rendered[key] = render_png_bytes(key[0], key[1], theme=theme)
-        (icons_dir / fname).write_bytes(rendered[key])
+        atomic_write_bytes(icons_dir / fname, rendered[key])
 
-    (icons_dir / "splitch.svg").write_text(render_svg_text(theme=theme), encoding="utf-8")
+    atomic_write_text(icons_dir / "splitch.svg", render_svg_text(theme=theme))
 
-    # Prune old hashed PNGs so icons_dir stays tidy across theme switches
-    keep = set(canonical) | set(hashed) | {"splitch.svg", "splitch.ico", f"splitch-{tag}.ico"}
-    for entry in icons_dir.iterdir():
-        if (
-            entry.is_file()
-            and entry.name.startswith("splitch-")
-            and entry.name.endswith(".png")
-            and entry.name not in keep
-        ):
-            with contextlib.suppress(OSError):
-                entry.unlink()
+    if prune:
+        prune_stale_icons(icons_dir, keep_tag=tag)
     return icons_dir

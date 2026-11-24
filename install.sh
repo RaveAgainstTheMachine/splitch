@@ -402,7 +402,7 @@ fi
 # ── 4. Sync Isolated Python Environment via uv ───────────────────────────────
 step_bar 3 "$TOTAL_STEPS" "Syncing Python environment"
 UV_DESKTOP_EXTRA=""
-if [ "$SPLITCH_AGENT_ONLY" != "1" ] && [ "$SPLITCH_NO_DESKTOP" != "1" ]; then
+if [ "$SPLITCH_NO_DESKTOP" != "1" ] && { [ "$SPLITCH_AGENT_ONLY" != "1" ] || [ -f "$SPLITCH_DATA_ROOT/desktop.json" ]; }; then
   if [ "$OS" = "darwin" ] || [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${XDG_CURRENT_DESKTOP:-}" ]; then
     UV_DESKTOP_EXTRA="--extra desktop"
   fi

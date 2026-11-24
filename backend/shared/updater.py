@@ -643,6 +643,36 @@ def check_update(
     return status
 
 
+def _should_include_desktop_extra(resolved: Path, meta: dict) -> bool:
+    """Preserve `--extra desktop` (dbus-next/pystray/pillow) during uv sync on desktop hosts."""
+    if os.getenv("SPLITCH_NO_DESKTOP", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    if meta.get("desktop_extra"):
+        return True
+    if (default_data_root() / "desktop.json").is_file():
+        return True
+    try:
+        from backend.desktop.shortcuts import desktop_shortcuts_installed
+
+        if desktop_shortcuts_installed():
+            return True
+    except (ImportError, OSError):
+        pass
+    venv_dir = resolved / ".venv"
+    if venv_dir.is_dir():
+        for pkg in ("dbus_next", "pystray"):
+            if any(venv_dir.glob(f"**/site-packages/{pkg}")):
+                return True
+    return False
+
+
+def _uv_sync_cmd(uv_bin: str, resolved: Path, meta: dict) -> list[str]:
+    cmd = [uv_bin, "sync"]
+    if _should_include_desktop_extra(resolved, meta):
+        cmd.extend(["--extra", "desktop"])
+    return cmd
+
+
 def _restart_active_services() -> list[str]:
     restarted: list[str] = []
     if sys.platform.startswith("linux") and shutil.which("systemctl"):
@@ -661,6 +691,33 @@ def _restart_active_services() -> list[str]:
                 rc2, _, _ = _run(["launchctl", "kickstart", "-k", target], timeout=10.0)
                 if rc2 == 0:
                     restarted.append(label)
+
+    # Also restart a running `splitch tray` process so it reloads the updated version & icon sync logic
+    if not os.getenv("PYTEST_CURRENT_TEST"):
+        try:
+            import signal as _signal
+
+            import psutil as _psutil
+
+            from backend.desktop.shortcuts import read_live_pid, start_tray_detached
+
+            pid_file = default_data_root() / "tray.pid"
+            tpid = read_live_pid(pid_file)
+            if tpid is not None and tpid != os.getpid():
+                try:
+                    proc = _psutil.Process(tpid)
+                    proc.send_signal(_signal.SIGTERM)
+                    proc.wait(timeout=3.0)
+                except (_psutil.Error, OSError):
+                    pass
+                try:
+                    pid_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                if start_tray_detached() is not None:
+                    restarted.append("splitch-tray")
+        except (ImportError, OSError):
+            pass
     return restarted
 
 
@@ -670,6 +727,7 @@ def _rollback_git(
     target_sha: str,
     *,
     sync_deps: bool = True,
+    meta: dict | None = None,
 ) -> tuple[bool, list[str], str | None]:
     steps: list[str] = []
     rc_rst, _, err_rst = _run([git_bin, "reset", "--hard", target_sha], cwd=resolved, timeout=30.0)
@@ -679,7 +737,11 @@ def _rollback_git(
     if sync_deps:
         uv_bin = shutil.which("uv")
         if uv_bin:
-            rc_uv, _, _ = _run([uv_bin, "sync"], cwd=resolved, timeout=180.0)
+            rc_uv, _, _ = _run(
+                _uv_sync_cmd(uv_bin, resolved, meta or read_install_meta()),
+                cwd=resolved,
+                timeout=180.0,
+            )
             if rc_uv == 0:
                 steps.append("Restored Python environment via uv sync")
     return True, steps, None
@@ -803,11 +865,14 @@ def perform_update(
     if sync_deps and (result.updated or force):
         uv_bin = shutil.which("uv")
         if uv_bin:
-            with step_ctx("Syncing Python environment (uv sync)"):
-                rc_uv, _, err_uv = _run([uv_bin, "sync"], cwd=resolved, timeout=180.0)
+            uv_cmd = _uv_sync_cmd(uv_bin, resolved, meta)
+            if "--extra" in uv_cmd:
+                meta["desktop_extra"] = True
+            with step_ctx(f"Syncing Python environment ({' '.join(uv_cmd[1:])})"):
+                rc_uv, _, err_uv = _run(uv_cmd, cwd=resolved, timeout=180.0)
             if rc_uv != 0:
                 return _fail_with_rollback(f"uv sync failed: {err_uv}")
-            result.steps.append("Synchronized Python environment via uv sync")
+            result.steps.append(f"Synchronized Python environment via uv {' '.join(uv_cmd[1:])}")
         else:
             result.steps.append("Skipped uv sync (uv not found on PATH)")
 

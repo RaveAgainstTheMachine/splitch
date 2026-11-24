@@ -32,7 +32,8 @@ import {
   hasLocalThemeOverride,
   pushThemeToRouter,
   readLocalTheme,
-  syncFaviconFromTheme
+  syncFaviconFromTheme,
+  THEME_SYNC_EVENT
 } from "./utils/favicon";
 import type {
   AuthStatusResponse,
@@ -337,12 +338,33 @@ export default function App() {
     };
   }, []);
 
+  // Track local Appearance commits so an in-flight older WS snapshot cannot revert a user pick
+  const localThemeEditAtRef = useRef<number>(0);
+  useEffect(() => {
+    const onThemeSync = (e: Event) => {
+      const detail = (e as CustomEvent<DashboardSnapshot["theme"]>).detail;
+      if (!detail) return;
+      if (detail.updated_at && detail.updated_at > lastRemoteThemeTsRef.current) {
+        lastRemoteThemeTsRef.current = detail.updated_at;
+      } else if (!detail.updated_at) {
+        localThemeEditAtRef.current = Date.now();
+      }
+    };
+    window.addEventListener(THEME_SYNC_EVENT, onThemeSync);
+    return () => window.removeEventListener(THEME_SYNC_EVENT, onThemeSync);
+  }, []);
+
   // Synchronize shared Appearance theme between router snapshots & browser DOM/favicon
   useEffect(() => {
     const remote = snapshot?.theme;
     if (!remote) return;
     const ts = remote.updated_at ?? 0;
     if (ts > 0 && ts > lastRemoteThemeTsRef.current) {
+      if (Date.now() - localThemeEditAtRef.current < 1500 && lastRemoteThemeTsRef.current === 0) {
+        // Wait for our in-flight PATCH response rather than reverting to an older initial snapshot
+        lastRemoteThemeTsRef.current = ts;
+        return;
+      }
       lastRemoteThemeTsRef.current = ts;
       applyThemeToDom(remote);
     } else if (ts === 0 && !initialLocalThemePushedRef.current && hasLocalThemeOverride()) {

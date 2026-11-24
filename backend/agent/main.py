@@ -95,6 +95,7 @@ from backend.shared.models import (
     StartMediaEngineRequest,
     ToolExecRequest,
     ToolExecResponse,
+    UiThemeConfig,
     WorkspaceDirListing,
     WorkspaceFileContent,
     WorkspaceTreeListing,
@@ -1670,6 +1671,31 @@ async def agent_system_update(req: AgentUpdateRequest | None = None) -> UpdateRe
     if res.ok and (res.updated or res.ui_rebuilt):
         _schedule_delayed_restart(1.5)
     return res
+
+
+@app.post("/desktop/sync-theme")
+async def agent_sync_desktop_theme(theme: UiThemeConfig) -> dict:
+    """
+    Signed router -> agent theme push so worker nodes sync desktop/app-menu icons
+    even when the system tray is closed or unauthenticated.
+    """
+    if os.getenv("SPLITCH_NO_DESKTOP", "").strip().lower() in ("1", "true", "yes"):
+        return {"ok": True, "synced": False, "reason": "desktop_disabled"}
+
+    def _do_sync() -> dict:
+        from backend.desktop.shortcuts import desktop_shortcuts_installed, sync_desktop_icons
+
+        if not desktop_shortcuts_installed():
+            return {"ok": True, "synced": False, "reason": "no_shortcuts_installed"}
+        res = sync_desktop_icons(theme)
+        return {
+            "ok": True,
+            "synced": True,
+            "tag": res["tag"],
+            "updated_paths": res["updated_paths"],
+        }
+
+    return await asyncio.to_thread(_do_sync)
 
 
 @app.post("/system/rollback", response_model=UpdateResult)

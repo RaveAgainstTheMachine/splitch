@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from backend.desktop.icons import (
     ensure_tray_icon_theme,
     render_argb32_pixmap,
+    render_icns_bytes,
     render_ico_bytes,
     render_png_bytes,
     render_svg_text,
@@ -17,14 +18,20 @@ from backend.desktop.icons import (
 )
 from backend.desktop.shortcuts import (
     DesktopConfig,
+    _sync_macos_app_bundle_icon,
+    clear_desktop_api_key,
+    desktop_icons_in_sync,
     install_desktop_integration,
     load_desktop_config,
+    resolve_desktop_api_key,
+    save_desktop_api_key,
     set_tray_autostart,
     sync_desktop_icons,
     uninstall_desktop_integration,
 )
 from backend.desktop.tray import TrayController
 from backend.router import app as router_app_mod
+from backend.shared.updater import _uv_sync_cmd
 from backend.version import __version__ as VERSION
 
 
@@ -353,3 +360,184 @@ def test_tray_watch_status_loop_reconnects_after_websocket_close(monkeypatch, tm
     assert attempts == 2
     assert ctrl.theme["accent"] == "#22d3ee"
     assert ctrl.theme["surface"] == "oled"
+
+
+def test_render_icns_bytes_and_macos_app_bundle_sync(tmp_path: Path) -> None:
+    import struct
+
+    cyan = {"scheme": "dark", "accent": "#22d3ee", "surface": "oled"}
+    rose = {"scheme": "light", "accent": "#fb7185", "surface": "default"}
+
+    icns_cyan = render_icns_bytes("plain", theme=cyan)
+    icns_rose = render_icns_bytes("plain", theme=rose)
+    assert icns_cyan[:4] == b"icns"
+    total_len = struct.unpack(">I", icns_cyan[4:8])[0]
+    assert total_len == len(icns_cyan)
+    assert icns_cyan != icns_rose
+
+    # Walk ICNS chunk headers and ensure all embedded PNGs are valid
+    pos = 8
+    tags: list[bytes] = []
+    while pos < len(icns_cyan):
+        ctag = icns_cyan[pos : pos + 4]
+        clen = struct.unpack(">I", icns_cyan[pos + 4 : pos + 8])[0]
+        payload = icns_cyan[pos + 8 : pos + clen]
+        assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+        tags.append(ctag)
+        pos += clen
+    assert tags == [b"icp4", b"icp5", b"icp6", b"ic07", b"ic08"]
+
+    # Syncing a macOS .app bundle writes cache-busted .icns, updates Info.plist, and prunes old .icns
+    app_dir = tmp_path / "Splitch.app"
+    (app_dir / "Contents" / "Resources").mkdir(parents=True)
+    tag1 = theme_tag(cyan)
+    tag2 = theme_tag(rose)
+    _sync_macos_app_bundle_icon(app_dir, cyan, refresh_caches=False)
+    assert (app_dir / "Contents" / "Resources" / f"splitch-{tag1}.icns").is_file()
+    plist_txt = (app_dir / "Contents" / "Info.plist").read_text(encoding="utf-8")
+    assert f"<string>splitch-{tag1}.icns</string>" in plist_txt
+
+    _sync_macos_app_bundle_icon(app_dir, rose, refresh_caches=False)
+    assert (app_dir / "Contents" / "Resources" / f"splitch-{tag2}.icns").is_file()
+    assert not (app_dir / "Contents" / "Resources" / f"splitch-{tag1}.icns").exists()
+    plist_txt2 = (app_dir / "Contents" / "Info.plist").read_text(encoding="utf-8")
+    assert f"<string>splitch-{tag2}.icns</string>" in plist_txt2
+
+
+def test_desktop_api_key_resolution_precedence_and_vault(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path / "splitch-data"))
+    monkeypatch.delenv("SPLITCH_API_KEY", raising=False)
+    # Force file-backed master key in tmp_path instead of host keyring
+    monkeypatch.setattr("backend.shared.secrets._try_keyring_master_key", lambda: None)
+
+    assert resolve_desktop_api_key() == ""
+
+    # 1. Env file fallback preserves symbols like @, &, %, $
+    tray_env = tmp_path / ".config" / "splitch" / "tray.env"
+    tray_env.parent.mkdir(parents=True, exist_ok=True)
+    special_key = "@abc&123%$xyz!"
+    tray_env.write_text(f"export SPLITCH_API_KEY='{special_key}'\n", encoding="utf-8")
+    assert resolve_desktop_api_key() == special_key
+
+    # 2. Encrypted vault overrides tray.env
+    vault_key = "vault&secret%$99"
+    ref = save_desktop_api_key(vault_key)
+    assert ref == "vault:desktop_api_key"
+    assert resolve_desktop_api_key() == vault_key
+
+    # 3. Explicit env var overrides vault
+    monkeypatch.setenv("SPLITCH_API_KEY", "env-override-key")
+    assert resolve_desktop_api_key() == "env-override-key"
+    monkeypatch.delenv("SPLITCH_API_KEY", raising=False)
+
+    # 4. Clearing vault falls back cleanly to tray.env
+    assert clear_desktop_api_key() is True
+    assert resolve_desktop_api_key() == special_key
+
+
+def test_tray_auth_error_state_and_auto_recovery(tmp_path: Path, monkeypatch) -> None:
+    import httpx
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path / "splitch-data"))
+    monkeypatch.delenv("SPLITCH_API_KEY", raising=False)
+    monkeypatch.setattr("backend.shared.secrets._try_keyring_master_key", lambda: None)
+
+    expected_key = "s3cr3t&key%with$symbols"
+
+    def _fake_get(url: str, headers: dict | None = None, timeout: float = 3.0):
+        auth = (headers or {}).get("Authorization", "")
+        if auth != f"Bearer {expected_key}":
+            return httpx.Response(401, json={"detail": "Unauthorized"})
+        return httpx.Response(
+            200,
+            json={
+                "version": VERSION,
+                "control": {"gaming_mode": False, "force_node": "auto"},
+                "nodes": [],
+                "theme": {"scheme": "dark", "accent": "#22d3ee", "surface": "oled"},
+            },
+        )
+
+    monkeypatch.setattr(httpx, "get", _fake_get)
+    ctrl = TrayController(router_url="http://127.0.0.1:8080")
+    ctrl.poll_once_sync()
+    assert ctrl.online is False
+    assert ctrl.auth_error is True
+    title, desc = ctrl.tooltip_summary()
+    assert "Auth Required" in title
+    assert "splitch desktop set-api-key" in desc
+    assert any("set-api-key" in m.label for m in ctrl.build_menu())
+
+    # Saving key into encrypted vault lets running tray auto-recover on next poll without restart
+    save_desktop_api_key(expected_key)
+    ctrl.poll_once_sync()
+    assert ctrl.online is True
+    assert ctrl.auth_error is False
+    assert ctrl.theme["accent"] == "#22d3ee"
+
+
+def test_agent_desktop_sync_theme_endpoint(tmp_path: Path, monkeypatch) -> None:
+    from backend.agent import main as agent_mod
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path / "splitch-data"))
+    monkeypatch.delenv("SPLITCH_NO_DESKTOP", raising=False)
+    monkeypatch.setattr(agent_mod, "AGENT_TOKEN", "")
+    monkeypatch.setattr(agent_mod, "ROUTER_PUBLIC_KEY", None)
+    (tmp_path / "Desktop").mkdir()
+
+    client = TestClient(agent_mod.app)
+    # Without installed shortcuts, endpoint returns synced=False safely
+    r0 = client.post(
+        "/desktop/sync-theme",
+        json={"scheme": "dark", "accent": "#22d3ee", "surface": "oled", "resolved_light": False},
+    )
+    assert r0.status_code == 200
+    assert r0.json()["synced"] is False
+
+    # After desktop shortcuts are installed, signed router push syncs them immediately
+    if sys.platform.startswith("linux"):
+        install_desktop_integration(
+            desktop_icon=True,
+            autostart=False,
+            splitch_bin="/usr/local/bin/splitch",
+        )
+        r1 = client.post(
+            "/desktop/sync-theme",
+            json={"scheme": "dark", "accent": "#34d399", "surface": "slate", "resolved_light": False},
+        )
+        assert r1.status_code == 200
+        body = r1.json()
+        assert body["synced"] is True
+        expected_tag = theme_tag({"scheme": "dark", "accent": "#34d399", "surface": "slate"})
+        assert body["tag"] == expected_tag
+        assert desktop_icons_in_sync({"scheme": "dark", "accent": "#34d399", "surface": "slate"})
+
+        # Mutating .desktop to stale icon makes desktop_icons_in_sync return False (triggers self-heal)
+        desk = tmp_path / "Desktop" / "splitch.desktop"
+        desk.write_text(desk.read_text(encoding="utf-8").replace(expected_tag, "deadbeef"), encoding="utf-8")
+        assert not desktop_icons_in_sync({"scheme": "dark", "accent": "#34d399", "surface": "slate"})
+
+
+def test_updater_preserves_desktop_extra(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path / "splitch-data"))
+    monkeypatch.delenv("SPLITCH_NO_DESKTOP", raising=False)
+
+    assert _uv_sync_cmd("uv", tmp_path, {}) == ["uv", "sync"]
+
+    (tmp_path / "splitch-data").mkdir(parents=True)
+    (tmp_path / "splitch-data" / "desktop.json").write_text("{}", encoding="utf-8")
+    assert _uv_sync_cmd("uv", tmp_path, {}) == ["uv", "sync", "--extra", "desktop"]
+
+    monkeypatch.setenv("SPLITCH_NO_DESKTOP", "1")
+    assert _uv_sync_cmd("uv", tmp_path, {"desktop_extra": True}) == ["uv", "sync"]

@@ -366,6 +366,7 @@ class ClusterState:
 
     async def _poll_single(self, node: NodeStatus) -> None:
         assert self._poll_client is not None
+        was_online = node.online
         t0 = time.perf_counter()
         try:
             resp = await self._poll_client.get(
@@ -377,6 +378,15 @@ class ClusterState:
             node.online = True
             node.telemetry = telemetry
             node.latency_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            if (
+                not was_online
+                and self.theme.updated_at > 0
+                and not os.getenv("PYTEST_CURRENT_TEST")
+                and os.getenv("SPLITCH_SYNC_DESKTOP_ON_ROUTER", "1") != "0"
+            ):
+                asyncio.create_task(
+                    self._push_theme_to_node(node, self.theme.model_dump(mode="json"))
+                )
             if telemetry.models:
                 await self.auto_heal_aliases_for_node(node)
             if node.in_flight > 0:
@@ -429,6 +439,24 @@ class ClusterState:
             update_summary=self.update_summary,
         )
 
+    async def _push_theme_to_node(
+        self, node: NodeStatus, theme_payload: dict[str, Any]
+    ) -> bool:
+        """Best-effort signed push of active UI theme to a worker node's desktop icons."""
+        client = self._poll_client
+        if client is None or not node.online:
+            return False
+        try:
+            resp = await client.post(
+                f"{node.agent_url}/desktop/sync-theme",
+                json=theme_payload,
+                headers=self.agent_headers("POST", "/desktop/sync-theme"),
+                timeout=8.0,
+            )
+            return resp.status_code == 200
+        except (httpx.HTTPError, OSError):
+            return False
+
     async def update_theme(self, update: UiThemeUpdate) -> UiThemeConfig:
         if update.accent is not None:
             raw = update.accent.strip()
@@ -444,7 +472,9 @@ class ClusterState:
         self.theme.updated_at = time.time()
         await self._persist_ui_theme()
         await self.broadcast_snapshot()
-        # Best-effort local desktop icon sync when router runs on a desktop host with shortcuts
+        # Best-effort dual-path icon sync:
+        # 1) Local host shortcuts (without fragile DISPLAY env gating under systemd/launchd)
+        # 2) Signed push to all online agents so remote PCs/Macs/Windows sync even without tray
         if (
             not os.getenv("PYTEST_CURRENT_TEST")
             and os.getenv("SPLITCH_SYNC_DESKTOP_ON_ROUTER", "1") != "0"
@@ -454,15 +484,21 @@ class ClusterState:
             def _sync_local_host_icons() -> None:
                 from backend.desktop.shortcuts import (
                     desktop_shortcuts_installed,
-                    is_desktop_applicable,
                     sync_desktop_icons,
                 )
 
-                if is_desktop_applicable() and desktop_shortcuts_installed():
+                if (
+                    os.getenv("SPLITCH_NO_DESKTOP", "").strip().lower() not in ("1", "true", "yes")
+                    and desktop_shortcuts_installed()
+                ):
                     with contextlib.suppress(OSError, RuntimeError, ValueError):
                         sync_desktop_icons(theme_copy)
 
             asyncio.create_task(asyncio.to_thread(_sync_local_host_icons))
+            theme_json = theme_copy.model_dump(mode="json")
+            for node in list(self.nodes.values()):
+                if node.online:
+                    asyncio.create_task(self._push_theme_to_node(node, theme_json))
         return self.theme
 
     async def update_control(

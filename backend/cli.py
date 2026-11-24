@@ -31,11 +31,14 @@ import httpx
 import uvicorn
 
 from backend.desktop.shortcuts import (
+    clear_desktop_api_key,
     desktop_integration_status,
     install_desktop_integration,
     is_desktop_applicable,
     launch_splitch_gui,
     load_desktop_config,
+    resolve_desktop_api_key,
+    save_desktop_api_key,
     send_desktop_notification,
     stop_splitch_graceful,
     sync_desktop_icons,
@@ -548,7 +551,7 @@ def _cmd_launch(args: argparse.Namespace) -> int:
 
 
 def _cmd_tray(args: argparse.Namespace) -> int:
-    return run_tray(router_url=args.url)
+    return run_tray(router_url=args.url, api_key=getattr(args, "api_key", None))
 
 
 def _cmd_stop(args: argparse.Namespace) -> int:
@@ -571,10 +574,30 @@ def _cmd_desktop(args: argparse.Namespace) -> int:
             router_url=args.url,
             mode=args.mode,
             local_service=args.service,
+            api_key=getattr(args, "api_key", None),
         )
         print(f"[splitch] Desktop integration installed ({res['platform']}):")
         for p in res["installed_paths"]:
             print(f"  ✓ {p}")
+        return 0
+
+    if args.desktop_cmd == "set-api-key":
+        if getattr(args, "clear", False):
+            removed = clear_desktop_api_key()
+            print(
+                "[splitch] Removed stored desktop API key from encrypted vault."
+                if removed
+                else "[splitch] No stored desktop API key found in vault."
+            )
+            return 0
+        raw_val = getattr(args, "value", None)
+        if raw_val is None:
+            raw_val = getpass.getpass("Enter router SPLITCH_API_KEY (saved encrypted in local vault): ")
+        if not raw_val.strip():
+            print("[splitch] Error: API key cannot be empty (pass --clear to remove).", file=sys.stderr)
+            return 1
+        ref = save_desktop_api_key(raw_val)
+        print(f"[splitch] Stored desktop API key securely ({ref}). Running tray will pick it up automatically.")
         return 0
 
     if args.desktop_cmd == "uninstall":
@@ -600,12 +623,17 @@ def _cmd_desktop(args: argparse.Namespace) -> int:
             theme_payload = cur
         else:
             target_url = (args.url or load_desktop_config().router_url or "http://127.0.0.1:8080").rstrip("/")
-            api_key = os.getenv("SPLITCH_API_KEY", "").strip()
+            api_key = resolve_desktop_api_key()
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
             try:
                 r = httpx.get(f"{target_url}/api/theme", headers=headers, timeout=3.0)
                 if r.status_code == 200:
                     theme_payload = r.json()
+                elif r.status_code in (401, 403):
+                    print(
+                        "[splitch] Router rejected /api/theme (auth required) — run: splitch desktop set-api-key",
+                        file=sys.stderr,
+                    )
             except (httpx.HTTPError, ValueError):
                 pass
         res = sync_desktop_icons(theme_payload)
@@ -640,6 +668,8 @@ def _cmd_desktop(args: argparse.Namespace) -> int:
     print(f"  App Menu entry:   {st['app_menu_installed']}")
     print(f"  Desktop shortcut: {st['desktop_icon_installed']}")
     print(f"  System tray:      {'running (PID ' + str(st['tray_pid']) + ')' if st['tray_running'] else 'stopped'}")
+    print(f"  API key stored:   {st['api_key_configured']}")
+    print(f"  Icon theme tag:   {st['theme_tag']} ({'in sync' if st['icons_in_sync'] else 'needs sync'})")
     print(f"  Target router:    {st['config']['router_url']} ({st['config']['mode']} mode)")
     return 0
 
@@ -1152,6 +1182,7 @@ def main() -> None:
 
     p_tray = sub.add_parser("tray", help="Run Splitch cross-compositor system tray icon")
     p_tray.add_argument("--url", default=None, help="Target Splitch router URL override")
+    p_tray.add_argument("--api-key", default=None, help="Optional SPLITCH_API_KEY override")
     p_tray.set_defaults(func=_cmd_tray)
 
     p_stop = sub.add_parser("stop", help="Gracefully stop managed local Splitch services and tray")
@@ -1167,8 +1198,21 @@ def main() -> None:
     p_di.add_argument("--url", default=None, help="Router URL for desktop launcher & tray")
     p_di.add_argument("--mode", choices=["local", "remote"], default=None)
     p_di.add_argument("--service", default=None, help="Local systemd user service to manage in remote mode")
+    p_di.add_argument(
+        "--api-key",
+        default=None,
+        help="Store router SPLITCH_API_KEY in local encrypted vault for tray & icon sync",
+    )
     p_di.add_argument("--force", action="store_true", help="Install even if no desktop session env detected")
     p_di.set_defaults(func=_cmd_desktop)
+
+    p_dak = desk_sub.add_parser(
+        "set-api-key",
+        help="Store (or clear) the router SPLITCH_API_KEY in local encrypted vault for tray & desktop sync",
+    )
+    p_dak.add_argument("--value", default=None, help="API key value (prompts securely if omitted)")
+    p_dak.add_argument("--clear", action="store_true", help="Remove stored desktop API key from vault")
+    p_dak.set_defaults(func=_cmd_desktop)
 
     p_du = desk_sub.add_parser("uninstall", help="Remove Splitch desktop shortcuts, icons & autostart")
     p_du.set_defaults(func=_cmd_desktop)
