@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -74,6 +75,7 @@ class UpdateStatus(BaseModel):
     branch: str = ""
     local_sha: str = ""
     remote_sha: str = ""
+    remote_version: str = ""
     dirty: bool = False
     behind_count: int = 0
     ahead_count: int = 0
@@ -626,6 +628,11 @@ def check_update(
             status.update_available = status.behind_count > 0
 
     if status.behind_count > 0:
+        rc_rv, rv_out, _ = _run([git_bin, "show", f"{ref}:backend/version.py"], cwd=resolved)
+        if rc_rv == 0 and rv_out:
+            m_rv = re.search(r'__version__\s*=\s*"([^"]+)"', rv_out)
+            if m_rv:
+                status.remote_version = m_rv.group(1).strip()
         _, log_out, _ = _run(
             [git_bin, "log", "--oneline", "-n", "10", f"HEAD..{ref}"],
             cwd=resolved,

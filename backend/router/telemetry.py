@@ -281,6 +281,7 @@ class ClusterState:
             behind_count=int(up_status.behind_count) if up_status else 0,
             local_sha=(up_status.local_sha if up_status else "") or "",
             remote_sha=(up_status.remote_sha if up_status else "") or "",
+            remote_version=(up_status.remote_version if up_status else "") or "",
             checked_at=time.time(),
             engine_update_available=bool(eng_status and eng_status.update_available),
             latest_llama_tag=(eng_status.latest_llama_tag if eng_status else "") or "",

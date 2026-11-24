@@ -300,7 +300,9 @@ export function SecuritySystemPane({
                 {updateStatus.error
                   ? updateStatus.error
                   : updateStatus.update_available
-                    ? `${updateStatus.behind_count} commit(s) available`
+                    ? `${
+                        updateStatus.remote_version ? `→ v${updateStatus.remote_version} · ` : ""
+                      }${updateStatus.behind_count} commit(s) available`
                     : "Up to date"}
               </span>
             </div>

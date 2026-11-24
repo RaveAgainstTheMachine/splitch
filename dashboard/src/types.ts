@@ -137,6 +137,7 @@ export interface UpdateSummary {
   behind_count: number;
   local_sha: string;
   remote_sha: string;
+  remote_version?: string;
   checked_at: number;
   engine_update_available: boolean;
   latest_llama_tag: string;
@@ -601,6 +602,7 @@ export interface UpdateStatus {
   branch: string;
   local_sha: string;
   remote_sha: string;
+  remote_version?: string;
   dirty: boolean;
   behind_count: number;
   ahead_count: number;

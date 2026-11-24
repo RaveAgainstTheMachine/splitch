@@ -168,6 +168,7 @@ class UpdateSummary(BaseModel):
     behind_count: int = 0
     local_sha: str = ""
     remote_sha: str = ""
+    remote_version: str = ""
     checked_at: float = 0.0
     engine_update_available: bool = False
     latest_llama_tag: str = ""

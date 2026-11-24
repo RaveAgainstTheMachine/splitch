@@ -445,6 +445,11 @@ export default function App() {
           <h1>
             <SplitchWordmark />
           </h1>
+          {snapshot?.version && (
+            <span className="pill" title={`Running Splitch v${snapshot.version}`}>
+              v{snapshot.version}
+            </span>
+          )}
         </div>
 
         <div
@@ -496,7 +501,11 @@ export default function App() {
               title={`Splitch update available (${snapshot.update_summary.behind_count} commit${snapshot.update_summary.behind_count === 1 ? "" : "s"} behind)`}
             >
               <Download size={12} aria-hidden="true" />
-              <span>Update</span>
+              <span>
+                {snapshot.update_summary.remote_version
+                  ? `Update → v${snapshot.update_summary.remote_version}`
+                  : "Update"}
+              </span>
             </button>
           )}
           <button

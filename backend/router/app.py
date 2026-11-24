@@ -547,6 +547,7 @@ async def get_system_update_status(fetch: bool = False) -> UpdateStatus:
             behind_count=res.behind_count,
             local_sha=res.local_sha,
             remote_sha=res.remote_sha,
+            remote_version=res.remote_version,
             checked_at=time.time(),
             engine_update_available=prev_eng_avail,
             latest_llama_tag=prev_llama_tag,
