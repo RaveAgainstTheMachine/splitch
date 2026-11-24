@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.10.3] - 2026-11-24
+
+### MCP Discovery
+- **Combined Official Registry + npm Search & Smart Query Normalization (`mcp_api.py`, `McpTab.tsx`):** Defaulted MCP discovery to `All (Official + npm)`, stripped trailing filler `mcp` and auto-hyphenated multi-word queries for `registry.modelcontextprotocol.io` (e.g. `reverse engineer anything` → `reverse-engineer-anything`), stopped duplicating `mcp` in npm queries, and ranked results by name/description token relevance + local `stdio` priority.
+
 ## [0.10.2] - 2026-11-22
 
 ### Smart Alias Management

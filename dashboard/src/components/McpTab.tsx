@@ -293,7 +293,7 @@ export function McpTab({
 
   // Live MCP Registry / npm Discovery state
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchSource, setSearchSource] = useState<"official" | "npm">("official");
+  const [searchSource, setSearchSource] = useState<"all" | "official" | "npm">("all");
   const [searching, setSearching] = useState(false);
   const [searchResults, setSearchResults] = useState<McpRegistryResult[]>([]);
 
@@ -768,8 +768,9 @@ export function McpTab({
           <select
             aria-label="MCP search source"
             value={searchSource}
-            onChange={(e) => setSearchSource(e.target.value as "official" | "npm")}
+            onChange={(e) => setSearchSource(e.target.value as "all" | "official" | "npm")}
           >
+            <option value="all">All (Official + npm)</option>
             <option value="official">Official MCP Registry</option>
             <option value="npm">npm Packages</option>
           </select>
@@ -783,7 +784,11 @@ export function McpTab({
           <div className="hf-results">
             <div className="hf-results__meta muted">
               {searchResults.length} MCP servers from{" "}
-              {searchSource === "official" ? "registry.modelcontextprotocol.io" : "npm"}
+              {searchSource === "all"
+                ? "Official Registry + npm"
+                : searchSource === "official"
+                  ? "registry.modelcontextprotocol.io"
+                  : "npm"}
             </div>
             <div className="hf-grid">
               {searchResults.map((item) => {

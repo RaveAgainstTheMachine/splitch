@@ -388,6 +388,16 @@ def test_mcp_registry_and_skills_path_parsers() -> None:
     assert res is not None
     assert res.id == "cool-db"
     assert res.command == "npx"
+
+    from backend.router.mcp_api import _official_registry_query_variants
+
+    assert _official_registry_query_variants("rea mcp") == ["rea", "rea-mcp"]
+    assert "reverse-engineer-anything" in _official_registry_query_variants(
+        "reverse engineer anything"
+    )
+    assert "reverse-engineer-anything" in _official_registry_query_variants(
+        "reverse engineer anything mcp"
+    )
     assert res.args == ["-y", "@example/cool-db-mcp"]
     assert res.env_vars[0].name == "DB_URL" and res.env_vars[0].is_required is True
 
