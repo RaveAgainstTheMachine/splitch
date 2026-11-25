@@ -999,6 +999,10 @@ export function MediaTab({ onError, onConfirm }: Props) {
                       </span>
                       <strong>
                         {d.percent}% ({(d.downloaded_bytes / 1024 ** 3).toFixed(2)} GB)
+                        {(d.speed_bytes_per_sec ?? 0) > 0 &&
+                          ((d.speed_bytes_per_sec ?? 0) >= 1024 * 1024
+                            ? ` · ${((d.speed_bytes_per_sec ?? 0) / (1024 * 1024)).toFixed(1)} MB/s`
+                            : ` · ${Math.round((d.speed_bytes_per_sec ?? 0) / 1024)} KB/s`)}
                       </strong>
                     </div>
                     <progress

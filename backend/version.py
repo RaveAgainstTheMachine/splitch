@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-__version__ = "0.23.5"
+__version__ = "0.24.0"
 
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"

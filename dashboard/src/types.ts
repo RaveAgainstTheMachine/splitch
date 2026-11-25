@@ -175,6 +175,7 @@ export interface DownloadJob {
   downloaded_bytes: number;
   total_bytes: number;
   percent: number;
+  speed_bytes_per_sec?: number;
   error: string | null;
 }
 

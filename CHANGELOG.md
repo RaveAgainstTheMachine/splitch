@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.24.0] - 2026-11-25
+
+### Live Model Download Speeds (`MB/s` / `KB/s`)
+- **Agent Speed Tracker (`backend/shared/models.py`, `backend/agent/main.py`):** Added `speed_bytes_per_sec` to `DownloadJob` and EMA-smoothed `_DownloadSpeedTracker` across `_run_hf_download` (GGUF/Media) and `_run_hf_mlx_download` (MLX).
+- **Dashboard Progress UI (`dashboard/src/types.ts`, `ModelsTab.tsx`, `MediaTab.tsx`):** Displays live transfer rates (`MB/s` / `KB/s`) in the expanded Downloads dock, collapsed summary badge, and Media Studio progress rows.
+
 ## [0.23.5] - 2026-11-25
 
 ### Settings CA Bundle Download, Windows Doctor Fix & Chromium E2E Hardening

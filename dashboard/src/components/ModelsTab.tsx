@@ -1708,6 +1708,16 @@ export function ModelsTab({
                     activeDownloads.reduce((sum, d) => sum + d.percent, 0) / activeDownloads.length
                   )}
                   %
+                  {(() => {
+                    const totalSpeed = activeDownloads.reduce(
+                      (sum, d) => sum + (d.speed_bytes_per_sec ?? 0),
+                      0
+                    );
+                    if (totalSpeed <= 0) return "";
+                    return totalSpeed >= 1024 * 1024
+                      ? ` · ${(totalSpeed / (1024 * 1024)).toFixed(1)} MB/s`
+                      : ` · ${Math.round(totalSpeed / 1024)} KB/s`;
+                  })()}
                 </span>
               )}
               {downloadsOpen ? (
@@ -1754,6 +1764,14 @@ export function ModelsTab({
                               <span className="muted">
                                 ({(d.downloaded_bytes / 1024 ** 3).toFixed(2)} /{" "}
                                 {(d.total_bytes / 1024 ** 3).toFixed(2)} GB)
+                                {(d.speed_bytes_per_sec ?? 0) > 0 && (
+                                  <>
+                                    {" · "}
+                                    {(d.speed_bytes_per_sec ?? 0) >= 1024 * 1024
+                                      ? `${((d.speed_bytes_per_sec ?? 0) / (1024 * 1024)).toFixed(1)} MB/s`
+                                      : `${Math.round((d.speed_bytes_per_sec ?? 0) / 1024)} KB/s`}
+                                  </>
+                                )}
                               </span>
                             </>
                           ) : (

@@ -831,6 +831,34 @@ async def _refresh_engine_model_index(expected_stem: str | None = None) -> None:
             break
 
 
+class _DownloadSpeedTracker:
+    """Compute smoothed bytes/sec across chunked downloads."""
+
+    def __init__(self) -> None:
+        now = time.monotonic()
+        self._start = now
+        self._last_tick = now
+        self._window_bytes = 0
+
+    def record(self, job: DownloadJob, chunk_len: int) -> None:
+        self._window_bytes += chunk_len
+        now = time.monotonic()
+        dt = now - self._last_tick
+        if dt >= 0.4:
+            instant = self._window_bytes / dt
+            job.speed_bytes_per_sec = round(
+                instant
+                if job.speed_bytes_per_sec <= 0.0
+                else (job.speed_bytes_per_sec * 0.4 + instant * 0.6),
+                1,
+            )
+            self._last_tick = now
+            self._window_bytes = 0
+        elif job.speed_bytes_per_sec <= 0.0:
+            elapsed = max(0.05, now - self._start)
+            job.speed_bytes_per_sec = round(job.downloaded_bytes / elapsed, 1)
+
+
 async def _run_hf_download(job: DownloadJob, *, hf_token_override: str = "") -> None:
     root = Path(STORAGE_PATH)
     root.mkdir(parents=True, exist_ok=True)
@@ -843,6 +871,7 @@ async def _run_hf_download(job: DownloadJob, *, hf_token_override: str = "") -> 
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
 
+    tracker = _DownloadSpeedTracker()
     try:
         async with (
             httpx.AsyncClient(
@@ -859,16 +888,19 @@ async def _run_hf_download(job: DownloadJob, *, hf_token_override: str = "") -> 
                         continue
                     await asyncio.to_thread(f.write, chunk)
                     job.downloaded_bytes += len(chunk)
+                    tracker.record(job, len(chunk))
                     if job.total_bytes > 0:
                         job.percent = round((job.downloaded_bytes / job.total_bytes) * 100.0, 1)
         part.replace(dest)
         job.percent = 100.0
+        job.speed_bytes_per_sec = 0.0
         job.status = "completed"
         if safe_name.lower().endswith(".gguf"):
             asyncio.create_task(_refresh_engine_model_index(expected_stem=dest.stem))
         else:
             asyncio.create_task(state.poll_once())
     except (httpx.HTTPError, OSError) as exc:
+        job.speed_bytes_per_sec = 0.0
         job.status = "failed"
         job.error = str(exc)
         with contextlib.suppress(OSError):
@@ -887,6 +919,7 @@ async def _run_hf_mlx_download(job: DownloadJob, *, hf_token_override: str = "")
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
 
+    tracker = _DownloadSpeedTracker()
     try:
         async with httpx.AsyncClient(
             follow_redirects=True,
@@ -938,6 +971,7 @@ async def _run_hf_mlx_download(job: DownloadJob, *, hf_token_override: str = "")
                                 continue
                             await asyncio.to_thread(f.write, chunk)
                             job.downloaded_bytes += len(chunk)
+                            tracker.record(job, len(chunk))
                             if job.total_bytes > 0:
                                 job.percent = min(
                                     99.9,
@@ -948,9 +982,11 @@ async def _run_hf_mlx_download(job: DownloadJob, *, hf_token_override: str = "")
             await asyncio.to_thread(shutil.rmtree, dest_dir)
         tmp_dir.replace(dest_dir)
         job.percent = 100.0
+        job.speed_bytes_per_sec = 0.0
         job.status = "completed"
         asyncio.create_task(state.poll_once())
     except (httpx.HTTPError, OSError, TypeError, ValueError) as exc:
+        job.speed_bytes_per_sec = 0.0
         job.status = "failed"
         job.error = str(exc)
         with contextlib.suppress(OSError):
