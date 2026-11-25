@@ -175,6 +175,8 @@ def _run_cmd(
         return 127, "", f"{cmd[0]}: command not found"
     except subprocess.TimeoutExpired:
         return 124, "", f"Timed out after {timeout:.0f}s"
+    except OSError as exc:
+        return 126, "", str(exc)
 
 
 def _norm_os(raw: str | None = None) -> str:

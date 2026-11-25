@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.23.5] - 2026-11-25
+
+### Settings CA Bundle Download, Windows Doctor Fix & Chromium E2E Hardening
+- **Settings TLS CA Bundle (`backend/router/settings_api.py`, `dashboard/src/components/settings/SecuritySystemPane.tsx`):** `POST /api/system/tls/self-signed` now mirrors the public cert into `cluster-ca.pem`, and added `GET /api/system/tls/ca-bundle` + **Download Cluster CA (.pem)** button in **Settings → Security & System**.
+- **Windows `OSError` Guard (`backend/shared/engines.py`):** `_run_cmd()` now catches `OSError` (e.g. `[WinError 193]`) cleanly so invalid binaries never crash `splitch doctor` on Windows.
+- **Headless Chromium CI Hardening (`tests/test_ui_e2e.py`):** Set `DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null`, added headless stability flags, and raised CDP startup timeout to 35s.
+
 ## [0.23.4] - 2026-11-25
 
 ### Doctor & CLI Desktop CA Bundle Verification

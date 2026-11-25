@@ -289,6 +289,31 @@ export function SecuritySystemPane({
           >
             {tlsBusy ? "Generating…" : "Generate Self-Signed TLS Cert"}
           </button>
+          <button
+            type="button"
+            className="btn btn--sm btn--ghost"
+            disabled={tlsBusy}
+            onClick={async () => {
+              onLocalError?.(null);
+              try {
+                const res = await fetch("/api/system/tls/ca-bundle");
+                const body = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+                const blob = new Blob([String(body.pem || "")], { type: "application/x-pem-file" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = String(body.filename || "cluster-ca.pem");
+                a.click();
+                URL.revokeObjectURL(url);
+                onSavedNotice?.(`Downloaded ${body.filename || "cluster-ca.pem"}`);
+              } catch (err) {
+                onLocalError?.(err instanceof Error ? err.message : "Failed to download CA bundle");
+              }
+            }}
+          >
+            Download Cluster CA (.pem)
+          </button>
           <button type="submit" className="btn btn--accent" disabled={saving}>
             <Save size={13} aria-hidden="true" />
             {saving ? "Saving…" : "Save Security Settings"}

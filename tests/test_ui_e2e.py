@@ -162,15 +162,21 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
         chrome_profile = tmp_path / "chrome"
         chrome_log = tmp_path / "chrome.err.log"
         chrome_log_fh = chrome_log.open("wb")
-        chrome_env = {k: v for k, v in os.environ.items() if k != "DBUS_SESSION_BUS_ADDRESS"}
+        chrome_env = dict(os.environ)
+        chrome_env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/dev/null"
         chrome = await asyncio.create_subprocess_exec(
             str(CHROMIUM_BIN),
             "--headless=new",
             "--no-sandbox",
             "--disable-gpu",
             "--disable-dev-shm-usage",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-default-apps",
             "--no-first-run",
+            "--no-default-browser-check",
             "--disable-extensions",
+            "--mute-audio",
             "--remote-allow-origins=*",
             f"--remote-debugging-port={cdp_port}",
             f"--user-data-dir={chrome_profile}",
@@ -183,7 +189,7 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
 
         try:
             ws_url = ""
-            cdp_deadline = time.monotonic() + 20.0
+            cdp_deadline = time.monotonic() + 35.0
             while time.monotonic() < cdp_deadline:
                 if chrome.returncode is not None:
                     break

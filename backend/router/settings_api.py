@@ -447,6 +447,16 @@ def build_settings_router(
             cert_path, key_path = await asyncio.to_thread(generate_self_signed_cert)
         except RuntimeError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        # Mirror public cert into cluster-ca.pem so local tray/launcher/doctor trust it
+        try:
+            ca_bundle = cert_path.parent / "cluster-ca.pem"
+            cert_pem = cert_path.read_text(encoding="utf-8").strip()
+            existing = ca_bundle.read_text(encoding="utf-8") if ca_bundle.is_file() else ""
+            if cert_pem and cert_pem not in existing:
+                combined = (existing.rstrip() + "\n" + cert_pem + "\n").lstrip()
+                ca_bundle.write_text(combined, encoding="utf-8")
+        except OSError:
+            pass
         cluster.config.tls.self_signed = True
         cluster.config.tls.certfile = str(cert_path)
         cluster.config.tls.keyfile = str(key_path)
@@ -456,6 +466,19 @@ def build_settings_router(
             "keyfile": str(key_path),
             "note": "Restart router with --ssl-self-signed (or SPLITCH_TLS_SELF_SIGNED=1) to serve HTTPS directly.",
         }
+
+    @router.get("/system/tls/ca-bundle")
+    async def download_tls_ca_bundle() -> dict:
+        """Return public cluster CA / router cert PEM (never private keys) for remote desktop clients."""
+        from backend.router.config import default_data_root
+
+        certs_dir = default_data_root() / "certs"
+        for name in ("cluster-ca.pem", "ca.crt", "splitch-selfsigned.crt"):
+            cand = certs_dir / name
+            if cand.is_file():
+                pem = await asyncio.to_thread(cand.read_text, "utf-8")
+                return {"filename": name, "pem": pem}
+        raise HTTPException(status_code=404, detail="No TLS CA bundle or certificate found on router")
 
     @router.post("/clients/probe", response_model=ClientProbeResponse)
     async def probe_client_protocol(
