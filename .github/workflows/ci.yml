@@ -86,11 +86,10 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
-      - name: Ensure Chromium is available
-        run: |
-          if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y chromium-browser
-          fi
+      - name: Set up Chrome for UI E2E
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
 
       - name: Run Headless Chromium UI E2E tests
         run: uv run --no-sync pytest tests/test_ui_e2e.py -q

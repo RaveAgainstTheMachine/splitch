@@ -2250,7 +2250,8 @@ async def write_workspace_agents_md(req: AgentsMdWriteRequest) -> AgentsMdPayloa
         target = (ws / "AGENTS.md").resolve()
         if not target.is_relative_to(ws):
             raise HTTPException(status_code=400, detail="Invalid AGENTS.md path")
-        target.write_text(req.content, encoding="utf-8")
+        with target.open("w", encoding="utf-8", newline="\n") as fh:
+            fh.write(req.content)
         return AgentsMdPayload(content=req.content, exists=True, path="AGENTS.md")
 
     return await asyncio.to_thread(_write)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import socket
 import time
@@ -161,6 +162,7 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
         chrome_profile = tmp_path / "chrome"
         chrome_log = tmp_path / "chrome.err.log"
         chrome_log_fh = chrome_log.open("wb")
+        chrome_env = {k: v for k, v in os.environ.items() if k != "DBUS_SESSION_BUS_ADDRESS"}
         chrome = await asyncio.create_subprocess_exec(
             str(CHROMIUM_BIN),
             "--headless=new",
@@ -174,6 +176,7 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
             f"--user-data-dir={chrome_profile}",
             "--window-size=1280,900",
             "about:blank",
+            env=chrome_env,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=chrome_log_fh,
         )

@@ -1123,37 +1123,40 @@ async def serve_favicon():
 # ── Static Dashboard Serving (built Vite bundle) ─────────────────────────────
 
 _DIST_DIR = Path(__file__).resolve().parents[2] / "dashboard" / "dist"
+_PUBLIC_DIR = Path(__file__).resolve().parents[2] / "dashboard" / "public"
 if _DIST_DIR.exists():
     _assets = _DIST_DIR / "assets"
     if _assets.exists():
         app.mount("/assets", StaticFiles(directory=str(_assets)), name="assets")
 
-    _icons = _DIST_DIR / "icons"
-    if _icons.exists():
-        app.mount("/icons", StaticFiles(directory=str(_icons)), name="pwa_icons")
-
     @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     async def serve_dashboard():
         return FileResponse(str(_DIST_DIR / "index.html"))
 
-    for _route_path, _file_name, _media_type in (
-        ("/theme-init.js", "theme-init.js", "application/javascript"),
-        ("/manifest.webmanifest", "manifest.webmanifest", "application/manifest+json"),
-        ("/sw.js", "sw.js", "application/javascript"),
-        ("/favicon.svg", "favicon.svg", "image/svg+xml"),
-    ):
-        _static_file = _DIST_DIR / _file_name
-        if _static_file.exists():
+_icons = _DIST_DIR / "icons" if (_DIST_DIR / "icons").exists() else _PUBLIC_DIR / "icons"
+if _icons.exists():
+    app.mount("/icons", StaticFiles(directory=str(_icons)), name="pwa_icons")
 
-            def _make_static_handler(target: Path, mime: str):
-                async def _serve_static():
-                    return FileResponse(str(target), media_type=mime)
+for _route_path, _file_name, _media_type in (
+    ("/theme-init.js", "theme-init.js", "application/javascript"),
+    ("/manifest.webmanifest", "manifest.webmanifest", "application/manifest+json"),
+    ("/sw.js", "sw.js", "application/javascript"),
+    ("/favicon.svg", "favicon.svg", "image/svg+xml"),
+):
+    _static_file = (
+        _DIST_DIR / _file_name if (_DIST_DIR / _file_name).exists() else _PUBLIC_DIR / _file_name
+    )
+    if _static_file.exists():
 
-                return _serve_static
+        def _make_static_handler(target: Path, mime: str):
+            async def _serve_static():
+                return FileResponse(str(target), media_type=mime)
 
-            app.add_api_route(
-                _route_path,
-                _make_static_handler(_static_file, _media_type),
-                methods=["GET", "HEAD"],
-                include_in_schema=False,
-            )
+            return _serve_static
+
+        app.add_api_route(
+            _route_path,
+            _make_static_handler(_static_file, _media_type),
+            methods=["GET", "HEAD"],
+            include_in_schema=False,
+        )

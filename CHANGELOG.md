@@ -3,6 +3,14 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.18.3] - 2026-11-25
+
+### CI & Cross-Platform Fixes (macOS, Windows & Headless Chrome)
+- **PWA Static Fallback (`backend/router/app.py`):** Fallback to `dashboard/public/` for `/manifest.webmanifest`, `/sw.js`, `/favicon.svg`, and `/icons/*` when `dashboard/dist/` is not pre-built (cross-platform CI runners).
+- **macOS App-Mode Precedence (`backend/desktop/shortcuts.py`):** Prefer user-local `~/Applications` before `/Applications` when probing macOS Chromium `.app` bundles.
+- **Windows LF Preservation (`backend/agent/main.py`):** Write `AGENTS.md` with explicit `newline="\n"`.
+- **Headless Chrome UI E2E (`.github/workflows/ci.yml`, `tests/test_ui_e2e.py`):** Use `browser-actions/setup-chrome@v1` instead of Ubuntu snap `chromium-browser` and strip `DBUS_SESSION_BUS_ADDRESS` from the Chromium subprocess environment.
+
 ## [0.18.2] - 2026-11-25
 
 ### Docs, Wiki & Preflight Parity Gate

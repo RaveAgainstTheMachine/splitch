@@ -1210,7 +1210,7 @@ def _launch_chromium_app(url: str) -> bool:
             "Chromium.app",
             "Vivaldi.app",
         )
-        roots = (Path("/Applications"), Path.home() / "Applications")
+        roots = (Path.home() / "Applications", Path("/Applications"))
         for root in roots:
             for app_name in app_names:
                 candidate = root / app_name
