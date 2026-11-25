@@ -895,6 +895,22 @@ def perform_update(
         return result
 
     if status.update_available:
+        if os.getenv("SPLITCH_REQUIRE_SIGNED_UPDATES", "").strip().lower() in ("1", "true", "yes"):
+            target_ref = f"{remote_name}/{status.branch}"
+            with step_ctx(f"Verifying commit signature on {target_ref}"):
+                rc_sig, _, err_sig = _run(
+                    [git_bin, "verify-commit", target_ref],
+                    cwd=resolved,
+                    timeout=10.0,
+                )
+            if rc_sig != 0:
+                result.ok = False
+                result.error = (
+                    f"Signed update verification failed (SPLITCH_REQUIRE_SIGNED_UPDATES=1) "
+                    f"for {target_ref}: {err_sig or 'missing or untrusted signature'}"
+                )
+                return result
+
         rc_diff, diff_out, _ = _run(
             [git_bin, "diff", "--name-only", f"HEAD..{remote_name}/{status.branch}"],
             cwd=resolved,

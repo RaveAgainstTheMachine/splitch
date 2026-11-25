@@ -35,6 +35,13 @@
 2. **Automatic GPU Yielding When Gaming:** Live GPU telemetry (`nvidia-smi pmon`, ROCm, Vulkan, Apple Silicon) detects 3D games or creative workloads, yields the busy GPU, and transparently fails over active requests to your standby node.
 3. **One Unified Endpoint for Every Tool:** Exposes OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), Embeddings (`/v1/embeddings`), FIM (`/infill`), and Images/Videos (`/v1/images/generations`) over **`llama-server`**, **Apple Silicon `mlx-lm`**, **Strata (Sparse MoE)**, **Ollama**, **LM Studio**, **vLLM**, **`sd-server`**, and **ComfyUI** — plus a built-in **Agent Chat IDE** (with **Workspace File Tree**, **Git Review & AI Commit**, and **Artifact Preview**), **Media Studio**, **MCP/Skills control plane**, **UI Cluster Update & Rollback**, **Vault-Backed Cross-OS Tray/Desktop Icon Sync**, and **Benchmark harness**.
 
+### Feature Maturity (What Works Today)
+
+| Status | Capabilities |
+| :--- | :--- |
+| **Core / Stable** | OpenAI `/v1/chat/completions` & `/v1/responses`, Anthropic `/v1/messages`, GPU Auto-Yield & failover, `llama-server` & `mlx-lm` management, `hf_xet` + HTTP model pulls, Agent Chat with `bwrap`/Seatbelt sandboxed tools, AES-GCM vault & Ed25519 signing |
+| **Beta / Experimental** | Multi-node Swarm orchestration, Strata Sparse MoE streaming, Media Studio (`sd-server` / ComfyUI), MCP/Skills auto-discovery (`suggest_mcp` / `suggest_skill`), cross-OS tray & live theme icon sync |
+
 ---
 
 <a id="screenshots"></a>
@@ -150,12 +157,19 @@
 One command installs or updates Splitch — verifying SHA-256 checksums for pinned `uv` and Node.js archives, syncing Python 3.12, installing a hardware-matched `llama.cpp` binary, and registering the `splitch` CLI:
 
 ```bash
-# macOS & Linux
+# macOS & Linux (quick install from main)
 curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | sh
 
+# Inspect-first & pinned release tag (recommended for production/shared hosts)
+curl -fsSLO https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/v0.25.3/install.sh
+less install.sh
+SPLITCH_REF=v0.25.3 sh install.sh
+
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/v0.25.3/install.ps1 | iex
 ```
+
+> **Supply-chain note:** Set `SPLITCH_REQUIRE_SIGNED_UPDATES=1` to require `git verify-commit` signature verification before `splitch update` fast-forwards any node.
 
 Start the local router + agent + dashboard on `http://127.0.0.1:8080` (auto-mints an ephemeral Ed25519 keypair for local router ↔ agent signing):
 

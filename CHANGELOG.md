@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.25.3] - 2026-11-25
+
+### Supply-Chain Hardening & Feature Maturity Docs
+- **Signed Update Gate (`backend/shared/updater.py`):** Added `SPLITCH_REQUIRE_SIGNED_UPDATES=1` to require `git verify-commit` signature verification before `perform_update()` fast-forwards any node.
+- **Documentation Clarity (`README.md`):** Added a **Feature Maturity (What Works Today)** table (Core/Stable vs Beta/Experimental) and inspect-before-run pinned-tag installation instructions.
+
 ## [0.25.2] - 2026-11-25
 
 ### Security Hardening (DNS Rebinding, Nonce Replay & Body Binding)

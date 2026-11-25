@@ -369,6 +369,73 @@ def test_updater_auto_rollback_on_sync_failure_and_manual_rollback(
     assert not (clone / "BROKEN.txt").exists()
 
 
+def test_perform_update_requires_signed_commit_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path / "data_root"))
+    monkeypatch.setenv("SPLITCH_REQUIRE_SIGNED_UPDATES", "1")
+
+    origin = tmp_path / "origin.git"
+    work = tmp_path / "work"
+    clone = tmp_path / "clone"
+
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Splitch Test",
+        "GIT_AUTHOR_EMAIL": "test@splitch.local",
+        "GIT_COMMITTER_NAME": "Splitch Test",
+        "GIT_COMMITTER_EMAIL": "test@splitch.local",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+
+    def git(*args: str, cwd: Path) -> str:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            env=git_env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return proc.stdout.strip()
+
+    origin.mkdir()
+    git("init", "--bare", "--initial-branch=main", cwd=origin)
+    work.mkdir()
+    git("init", "--initial-branch=main", cwd=work)
+    git("remote", "add", "origin", str(origin), cwd=work)
+    (work / "pyproject.toml").write_text('[project]\nname = "splitch"\n', encoding="utf-8")
+    git("add", "pyproject.toml", cwd=work)
+    git("-c", "commit.gpgsign=false", "commit", "-m", "chore: initial commit", cwd=work)
+    git("push", "-u", "origin", "main", cwd=work)
+
+    git("clone", "--branch", "main", str(origin), str(clone), cwd=tmp_path)
+    old_full_sha = git("rev-parse", "HEAD", cwd=clone)
+    old_short_sha = git("rev-parse", "--short", "HEAD", cwd=clone)
+
+    # Push an unsigned update commit to the bare remote
+    (work / "UNSIGNED.txt").write_text("unsigned update\n", encoding="utf-8")
+    git("add", "UNSIGNED.txt", cwd=work)
+    git("-c", "commit.gpgsign=false", "commit", "-m", "feat: unsigned update", cwd=work)
+    git("push", "origin", "main", cwd=work)
+
+    res = perform_update(
+        app_dir=clone,
+        branch="main",
+        agent_only=True,
+        restart_services=False,
+        sync_deps=False,
+    )
+    assert res.ok is False
+    assert "Signed update verification failed" in (res.error or "")
+    assert res.updated is False
+    assert res.previous_sha == old_short_sha
+    assert res.current_sha == old_short_sha
+    assert git("rev-parse", "HEAD", cwd=clone) == old_full_sha
+    assert not (clone / "UNSIGNED.txt").exists()
+
+
 def test_install_sh_syntax_and_local_install_uninstall(tmp_path: Path) -> None:
     install_sh = REPO_ROOT / "install.sh"
     assert install_sh.exists()
