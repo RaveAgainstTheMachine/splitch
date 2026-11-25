@@ -28,6 +28,11 @@ poll_interval_s = 3.0              # Telemetry poll cadence per node
 max_traces = 120                   # In-memory routing trace ring buffer
 auto_heavy_char_threshold = 12000  # Prompt length above which `auto` prefers `heavy`
 state_file = ".splitch_state.json" # Persisted Gaming Mode & force_node state
+public_url = ""                    # Optional reverse-proxy external URL
+approval_policy = "ask"            # "ask" | "auto_edits" | "turbo_safe" | "full_auto"
+max_agent_steps = 8                # Max tool-calling rounds per user turn (1..32)
+auto_compact_threshold = 0.80      # Context utilization ratio triggering auto-compaction
+thinking_display = "collapsed"     # "collapsed" | "expanded" | "hidden"
 
 [guards]
 # Yield discrete-GPU nodes automatically when non-LLM VRAM (games, Blender, etc.) exceeds this

@@ -3,6 +3,33 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.18.2] - 2026-11-25
+
+### Docs, Wiki & Preflight Parity Gate
+- **Preflight Docs & Examples Gate (`scripts/preflight.sh`):** Added automated checks validating `splitch.example.toml` against `SplitchConfig`, verifying `AGENTS.md` and `CHANGELOG.md` version parity, and checking internal `README.md`/`docs/wiki/` links.
+- **Full Documentation & Example Sync:** Updated `CHANGELOG.md`, `splitch.example.toml`, and `docs/wiki/` (`Agent-Chat-Guide.md`, `API-Reference.md`, `Configuration-and-Routing.md`, `Models-MCP-and-Skills.md`) for `v0.14.0`–`v0.18.2`.
+
+## [0.18.1] - 2026-11-25
+- Removed all pill-shaped (`border-radius: 999px`) UI rules in `dashboard/src/index.css` in favor of sharp `4px`/`6px` corners and added a `preflight.sh` guard banning `999px`/`9999px`/`rounded-full`.
+
+## [0.18.0] - 2026-11-25
+- **Antigravity-Inspired Agent & Chat Settings (`AgentChatSettingsPane.tsx`, `chat_api.py`, `workspace_api.py`):** Added **Agent & Chat** settings tab with tiered `approval_policy` (`ask`/`auto_edits`/`turbo_safe`/`full_auto`), `shell_allowlist`/`shell_denylist` (denylist always prompts), `max_agent_steps`, `auto_compact_threshold` slider, `thinking_display` (`collapsed`/`expanded`/`hidden`), background `completion_notifications`, `GET/PUT /api/chat/rules` (global rules + named personas), and workspace `AGENTS.md` viewer/editor (`GET/PUT /api/nodes/{id}/workspace/agents-md`).
+
+## [0.17.0] - 2026-11-25
+- **Settings & Sampling Overhaul (`settings_api.py`, `ChatComposer.tsx`, `NodesProvisionPane.tsx`, `SecuritySystemPane.tsx`):** Added write-only Vault secret editors (`HF_TOKEN`, `brave_api_key`, `tavily_api_key`), `web_search_provider` selector, live `PATCH /api/nodes/{id}` node editor, `GET/PATCH /api/desktop/config`, self-signed TLS generator (`POST /api/system/tls/self-signed`), **Sampling & Reasoning** popover (`Coding`/`Balanced`/`Creative`/`Reasoning` presets + `top_p`/`top_k`/`min_p`/`repeat_penalty`/`max_tokens`/`seed`/`stop`/`reasoning_effort`/`enable_thinking`), `llama-server` runtime drop-in tuning (`/engine/runtime-config`), and safe cache cleanup (`/files/storage/clean-cache`).
+
+## [0.16.0] - 2026-11-25
+- **Dynamic Hugging Face Strata Search (`models_api.py`, `ModelsTab.tsx`, `StrataPane.tsx`):** Replaced hardcoded UI catalog with live `GET /api/models/search?format=strata` (`filter=strata`) + `.strata`/`.gguf` file inspection, VRAM+RAM+SSD streaming fit budget, and `.strata` pull support.
+
+## [0.15.0] - 2026-11-25
+- Expanded backend `STRATA_CATALOG` with 10 larger official packs (`Gyro-S/M`, `Unsloth UD-IQ4_XS`–`Q8_0`, `NVFP4`, `Hy4-Flash SQ-96/128`) up to 188 GB.
+
+## [0.14.0] - 2026-11-25
+- **PWA & Chromeless App-Mode Launcher (`manifest.webmanifest`, `sw.js`, `shortcuts.py`, `cli.py`):** Added installable PWA manifest + pass-through service worker and `open_url_in_app_mode()` (`firefoxpwa` → Chromium `--app=` → browser fallback) with `splitch launch --app | --browser`.
+
+## [0.13.1] - 2026-11-25
+- Added multi-GPU `yield_gpu_indices`, `media_url`, `mlx-lm`, `Strata`, and `image`/`video` alias examples to `splitch.example.toml` and `Configuration-and-Routing.md`.
+
 ## [0.13.0] - 2026-11-25
 
 ### Strata Sparse-MoE Engine Phase 2 (Managed Install, Sidecar Proxy, 4-Tier Fit & Quick Tune)

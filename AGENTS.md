@@ -1,6 +1,6 @@
 # AGENTS.md — Splitch Engineering & Agent Harness Guide
 
-This repository contains **Splitch** (`v0.18.1`), a multi-node local AI orchestrator, OpenAI/Anthropic-compatible gateway, 3-column Agent Chat IDE, and Media Studio.
+This repository contains **Splitch** (`v0.18.2`), a multi-node local AI orchestrator, OpenAI/Anthropic-compatible gateway, 3-column Agent Chat IDE, and Media Studio.
 
 ## 1. Mandatory Pre-Flight Harness
 
@@ -12,10 +12,12 @@ Before committing, opening a PR, or deploying, run the workspace pre-flight veri
 
 `scripts/preflight.sh` enforces:
 1. **Public-Repo Zero-Leak & Strict SemVer 2.0.0 Gate:** Scans all tracked files (`git ls-files`) for personal LAN IPs, private usernames, local mount paths, and secret tokens, asserts strict SemVer parity across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json`, and **enforces SemVer progression** against the latest `vX.Y.Z` git tag (`feat:` → `MINOR` bump, `fix:`/code changes → `PATCH` bump). Use `./scripts/bump-version.sh patch|minor|major` to bump all manifests atomically.
-2. **POSIX Installer Syntax:** Validates `sh -n install.sh` and `sh -n scripts/preflight.sh`.
-3. **Python Static Analysis:** Runs `uv run --no-sync ruff check backend tests`.
-4. **Frontend Type & Bundle Check:** Runs `(cd dashboard && npm run build)` (`tsc -b && vite build`).
-5. **Automated Test Suite:** Runs `uv run --no-sync pytest -q` across unit, integration, and headless Chromium E2E tests.
+1b. **Docs, Wiki & Example Parity Gate:** Validates `splitch.example.toml` against `SplitchConfig`, asserts `AGENTS.md` and `CHANGELOG.md` match the current `vX.Y.Z` version, and checks all internal Markdown links in `README.md`, `AGENTS.md`, and `docs/wiki/*.md`.
+2. **POSIX Installer Syntax:** Validates `sh -n install.sh`, `sh -n scripts/preflight.sh`, and `sh -n scripts/bump-version.sh`.
+3. **Anti-Internal-Mock Gate:** Bans `unittest.mock` / internal `backend.*` `monkeypatch` in `tests/`.
+4. **Python Static Analysis:** Runs `uv run --no-sync ruff check backend tests`.
+5. **Frontend Type, Anti-Pill & Bundle Check:** Bans `999px`/`9999px`/`rounded-full` in `dashboard/src/` and runs `(cd dashboard && npm run build)` (`tsc -b && vite build`).
+6. **Automated Test Suite:** Runs `uv run --no-sync pytest -q` across unit, integration, and headless Chromium E2E tests.
 
 ## 2. Architecture & Cross-Boundary Schema Invariants
 

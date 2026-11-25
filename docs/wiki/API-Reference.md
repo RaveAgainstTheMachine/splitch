@@ -280,4 +280,20 @@ Authenticated with `SPLITCH_AGENT_TOKEN` when configured:
 
 ---
 
+## 11. Settings, Vault Secrets, Engine Tuning, Cache & Agent Rules
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `POST` / `DELETE` | `/api/settings/secrets` | Write-only AES-256-GCM Vault storage/removal for `hf_token`, `brave_api_key`, `tavily_api_key`. |
+| `GET` / `PATCH` | `/api/desktop/config` | Read or update `DesktopConfig` (`launch_mode`, `auto_tray`, `autostart`, `desktop_icon`). |
+| `POST` | `/api/system/tls/self-signed` | Generate SAN ECDSA self-signed TLS cert & key in `SPLITCH_DATA_ROOT/certs`. |
+| `PATCH` | `/api/nodes/{node_id}` | Live-edit node display name, role, GPU yield settings, or URLs (persists across restarts). |
+| `GET` / `POST` | `/api/nodes/{node_id}/engine-config` | Read or update managed `llama-server` runtime flags via systemd drop-in / launchd plist. |
+| `GET` | `/api/nodes/{node_id}/storage/usage` | Inspect node model, cache, partial download, and free disk usage. |
+| `POST` | `/api/nodes/{node_id}/storage/clean-cache` | Safely delete incomplete `.part` pulls and HF/llama cache blobs without touching completed models. |
+| `GET` / `PUT` | `/api/chat/rules` | Read or save `global_rules` (injected into all chat turns) and reusable `PromptPersona` presets. |
+| `GET` / `PUT` | `/api/nodes/{node_id}/workspace/agents-md` | Read or write sandboxed `AGENTS.md` inside the target node's workspace. |
+
+---
+
 Next: **[Security & Troubleshooting →](Security-and-Troubleshooting.md)**

@@ -8,6 +8,15 @@ poll_interval_s = 3.0
 max_traces = 120
 auto_heavy_char_threshold = 12000
 state_file = ".splitch_state.json"
+public_url = ""
+# Agent & Chat defaults (also editable live in Settings -> Agent & Chat)
+approval_policy = "ask"              # "ask" | "auto_edits" | "turbo_safe" | "full_auto"
+shell_allowlist = ["pytest", "ruff", "git status", "git diff", "git log", "rg", "ls", "cat"]
+shell_denylist = ["rm -rf", "sudo", "git push", "mkfs", "dd if=", "chmod -R 777"]
+max_agent_steps = 8
+auto_compact_threshold = 0.80
+thinking_display = "collapsed"       # "collapsed" | "expanded" | "hidden"
+completion_notifications = false
 
 [guards]
 # Automatically yield discrete-GPU nodes when non-LLM apps (games, renders) exceed this VRAM

@@ -14,8 +14,9 @@ Every control in the chat toolbar is immediately clickable **before** sending yo
 - **Tools Node:** Select which tools-enabled compute node executes workspace tools (`Auto` selects the first online tools-enabled node).
 - **Workspace Subpath + Browse:** Scope agent filesystem & shell commands to a specific subfolder inside the node's `SPLITCH_WORKSPACE_ROOT`. Click **Browse** to navigate directories visually without typing paths manually.
 - **Tools:** Enable native tool calling (`list_dir`, `read_file`, `grep_search`, `write_file`, `run_command`).
-- **Auto-Approve:** When OFF (default), mutating tools (`write_file`, `run_command`) pause execution and display an inline **Allow / Deny** card with a unified diff or exact command preview before running.
-- **Context (Sliders icon):** Configure a per-chat **System Prompt**, and assign **Skills** & **MCP Servers** across 3 scopes:
+- **Auto-Approve & Tiered Approval Policies:** When **Auto-Approve** is OFF (default), mutating tools pause according to **Settings → Agent & Chat → Approval Policy** (`ask`, `auto_edits`, `turbo_safe` with `shell_allowlist`, or `full_auto`). Commands matching `shell_denylist` (e.g. `rm -rf`, `sudo`, `git push`) **always** force an interactive **Allow / Deny** prompt.
+- **Sampling & Reasoning Popover:** Click **Sampling** in the composer bar to apply 1-click presets (**Coding**, **Balanced**, **Creative**, **Reasoning**) or tune `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `max_tokens`, `seed`, `stop`, `reasoning_effort`, and `enable_thinking`.
+- **Context (Sliders icon):** Configure a per-chat **System Prompt** (or apply a saved **Prompt Persona**), inspect/edit the project's **`AGENTS.md`**, and assign **Skills** & **MCP Servers** across 3 scopes:
   - **This Chat** — active only in the current conversation.
   - **Project (`<workspace_subpath>`)** — automatically active in every conversation using that project workspace folder.
   - **Global (All Chats)** — automatically active across all conversations in Splitch.

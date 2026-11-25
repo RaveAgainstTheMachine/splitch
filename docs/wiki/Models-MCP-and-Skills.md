@@ -92,6 +92,10 @@ description: Strict security, concurrency, and test-coverage reviewer for pull r
 - Click **Sync All Nodes** to push enabled skills across every online node (manifest-tracked so removed/disabled skills are cleanly pruned without touching unmanaged files).
 - Inside **Agent Chat → Settings**, check any skills to inject their instructions directly into that conversation's system prompt.
 
+### Dynamic Hugging Face Search (GGUF, MLX & Strata) + Safe Cache Cleanup
+- Switch Format between **GGUF**, **MLX**, and **Strata (Sparse MoE)** in **Models & Aliases** to dynamically query Hugging Face (`filter=gguf|mlx|strata`), sort by downloads/likes/recency, filter by per-node VRAM/RAM/SSD fit, and pull `.gguf`, MLX, or `.strata` files directly to any node (gated repos use vaulted `HF_TOKEN` from **Settings → Routing & Guards**).
+- Manage per-node `llama-server` runtime flags (`--ctx-size`, KV quant, `--flash-attn`, `--parallel`) and clean incomplete `.part`/cache files safely in **Settings → Install Nodes → Engine & Cache**.
+
 ---
 
 Next: **[API Reference →](API-Reference.md)**

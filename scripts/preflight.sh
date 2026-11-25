@@ -134,6 +134,45 @@ if tag_proc.returncode == 0 and tag_proc.stdout.strip():
     print(f"  ✓ SemVer progression verified: {last_tag} -> v{py_ver}")
 PY
 
+echo "[preflight 1b/6] Verifying docs, wiki, and splitch.example.toml parity..."
+uv run --no-sync python - <<'PY'
+import re, sys, tomllib
+from pathlib import Path
+from backend.router.config import SplitchConfig
+from backend.version import __version__ as ver
+
+raw_toml = tomllib.loads(Path("splitch.example.toml").read_text(encoding="utf-8"))
+SplitchConfig.model_validate(raw_toml)
+
+agents_txt = Path("AGENTS.md").read_text(encoding="utf-8")
+if f"v{ver}" not in agents_txt:
+    print(f"[preflight] ERROR: AGENTS.md does not reference current version v{ver}", file=sys.stderr)
+    sys.exit(1)
+
+changelog_txt = Path("CHANGELOG.md").read_text(encoding="utf-8")
+if f"## [{ver}]" not in changelog_txt:
+    print(f"[preflight] ERROR: CHANGELOG.md missing release heading '## [{ver}]'", file=sys.stderr)
+    sys.exit(1)
+
+broken: list[str] = []
+doc_files = [Path("README.md"), Path("AGENTS.md"), *sorted(Path("docs/wiki").glob("*.md"))]
+link_re = re.compile(r"\[[^\]]+\]\(([^)#]+)(?:#[^)]*)?\)")
+for doc in doc_files:
+    text = doc.read_text(encoding="utf-8")
+    for target in link_re.findall(text):
+        t = target.strip()
+        if not t or "://" in t or t.startswith("mailto:"):
+            continue
+        resolved = (doc.parent / t).resolve()
+        if not resolved.exists():
+            broken.append(f"  {doc}: broken link -> {t}")
+if broken:
+    print("[preflight] ERROR: Broken documentation link(s) detected:", file=sys.stderr)
+    print("\n".join(broken), file=sys.stderr)
+    sys.exit(1)
+print(f"  ✓ splitch.example.toml valid, AGENTS.md/CHANGELOG.md match v{ver}, 0 broken doc links")
+PY
+
 echo "[preflight 2/6] Validating POSIX shell scripts..."
 sh -n install.sh
 sh -n scripts/preflight.sh
