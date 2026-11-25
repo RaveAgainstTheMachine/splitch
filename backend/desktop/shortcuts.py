@@ -22,6 +22,7 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 import psutil
@@ -140,6 +141,7 @@ class DesktopConfig(BaseModel):
     autostart: bool = False
     desktop_icon: bool = True
     local_service: str = ""
+    launch_mode: Literal["app", "browser", "firefoxpwa"] = "app"
     theme: UiThemeConfig = Field(default_factory=UiThemeConfig)
 
 
@@ -1134,6 +1136,119 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
+def _spawn_detached(cmd: list[str]) -> bool:
+    """Spawn a GUI/browser process detached from the current terminal/tray."""
+    kwargs: dict[str, Any] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform != "win32":
+        kwargs["start_new_session"] = True
+    try:
+        subprocess.Popen(cmd, **kwargs)
+        return True
+    except OSError:
+        return False
+
+
+def _find_firefoxpwa_site_id(url: str) -> str | None:
+    """Return installed PWAsForFirefox site ID matching `url` origin, if any."""
+    ffpwa = shutil.which("firefoxpwa")
+    if not ffpwa:
+        return None
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}".lower() if parsed.netloc else url.lower()
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        res = subprocess.run(
+            [ffpwa, "site", "list"],
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+            check=False,
+        )
+        if res.returncode != 0:
+            return None
+        for line in res.stdout.splitlines():
+            if origin in line.lower() or (parsed.netloc and parsed.netloc.lower() in line.lower()):
+                # `firefoxpwa site list` lines include a 26-char ULID identifier.
+                m = re.search(r"\b([0-9A-HJKMNP-TV-Z]{26})\b", line)
+                if m:
+                    return m.group(1)
+    return None
+
+
+def _launch_firefoxpwa(url: str) -> bool:
+    site_id = _find_firefoxpwa_site_id(url)
+    ffpwa = shutil.which("firefoxpwa")
+    if not site_id or not ffpwa:
+        return False
+    return _spawn_detached([ffpwa, "site", "launch", site_id])
+
+
+def _launch_chromium_app(url: str) -> bool:
+    """Launch `url` in a chromeless Chromium-family `--app=` window."""
+    if sys.platform.startswith("linux"):
+        for binary in (
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+            "brave-browser",
+            "microsoft-edge",
+            "vivaldi",
+        ):
+            exe = shutil.which(binary)
+            if exe and _spawn_detached([exe, f"--app={url}", "--class=splitch"]):
+                return True
+        return False
+
+    if sys.platform == "darwin" and shutil.which("open"):
+        app_names = (
+            "Google Chrome.app",
+            "Brave Browser.app",
+            "Microsoft Edge.app",
+            "Chromium.app",
+            "Vivaldi.app",
+        )
+        roots = (Path("/Applications"), Path.home() / "Applications")
+        for root in roots:
+            for app_name in app_names:
+                candidate = root / app_name
+                if candidate.exists() and _spawn_detached(
+                    ["open", "-na", str(candidate), "--args", f"--app={url}"]
+                ):
+                    return True
+        return False
+
+    if sys.platform == "win32":
+        for binary in ("msedge", "chrome", "brave"):
+            exe = shutil.which(binary)
+            if exe and _spawn_detached([exe, f"--app={url}"]):
+                return True
+        win_candidates = (
+            Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft/Edge/Application/msedge.exe",
+            Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
+        )
+        for candidate in win_candidates:
+            if candidate.is_file() and _spawn_detached([str(candidate), f"--app={url}"]):
+                return True
+    return False
+
+
+def open_url_in_app_mode(
+    url: str,
+    *,
+    mode: Literal["auto", "app", "browser", "firefoxpwa"] = "auto",
+) -> bool:
+    """Open Splitch in chromeless PWA/app window, falling back to default browser."""
+    if mode == "browser":
+        return open_url_in_browser(url)
+    if mode == "firefoxpwa":
+        return _launch_firefoxpwa(url) or _launch_chromium_app(url) or open_url_in_browser(url)
+    return _launch_firefoxpwa(url) or _launch_chromium_app(url) or open_url_in_browser(url)
+
+
 def open_url_in_browser(url: str) -> bool:
     if sys.platform.startswith("linux") and shutil.which("xdg-open"):
         with contextlib.suppress(OSError):
@@ -1281,8 +1396,9 @@ def launch_splitch_gui(
     router_url: str | None = None,
     start_tray: bool = True,
     open_browser: bool = True,
+    launch_mode: Literal["auto", "app", "browser", "firefoxpwa"] | None = None,
 ) -> tuple[bool, str]:
-    """Start Splitch if not running, launch system tray, and open Web UI in default browser."""
+    """Start Splitch if not running, launch system tray, and open Web UI (app-mode by default)."""
     cfg = load_desktop_config()
     if router_url:
         cfg.router_url = router_url.rstrip("/")
@@ -1293,7 +1409,8 @@ def launch_splitch_gui(
     if start_tray and cfg.auto_tray and is_desktop_applicable():
         start_tray_detached(cfg.router_url)
     if open_browser:
-        open_url_in_browser(cfg.router_url)
+        effective_mode = launch_mode or cfg.launch_mode
+        open_url_in_app_mode(cfg.router_url, mode=effective_mode)
     if not ok:
         send_desktop_notification("Splitch", msg)
     return ok, msg

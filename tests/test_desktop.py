@@ -22,9 +22,12 @@ from backend.desktop.shortcuts import (
     clear_desktop_api_key,
     desktop_icons_in_sync,
     install_desktop_integration,
+    launch_splitch_gui,
     load_desktop_config,
+    open_url_in_app_mode,
     resolve_desktop_api_key,
     save_desktop_api_key,
+    save_desktop_config,
     set_tray_autostart,
     sync_desktop_icons,
     uninstall_desktop_integration,
@@ -541,3 +544,209 @@ def test_updater_preserves_desktop_extra(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setenv("SPLITCH_NO_DESKTOP", "1")
     assert _uv_sync_cmd("uv", tmp_path, {"desktop_extra": True}) == ["uv", "sync"]
+
+
+def test_pwa_static_assets_and_router_serving() -> None:
+    """Router serves manifest.webmanifest, sw.js, and PWA icons with expected headers and content."""
+    client = TestClient(router_app_mod.app)
+
+    manifest_res = client.get("/manifest.webmanifest")
+    assert manifest_res.status_code == 200
+    assert "manifest+json" in manifest_res.headers.get("content-type", "")
+    manifest = manifest_res.json()
+    assert manifest["display"] == "standalone"
+    assert manifest["start_url"] == "/"
+    icon_srcs = {item["src"] for item in manifest.get("icons", [])}
+    assert {"/icons/icon-192.png", "/icons/icon-512.png", "/favicon.svg"}.issubset(icon_srcs)
+
+    sw_res = client.get("/sw.js")
+    assert sw_res.status_code == 200
+    assert "javascript" in sw_res.headers.get("content-type", "")
+    sw_body = sw_res.text
+    for bypass_prefix in ("/v1/", "/api/", "/health", "/metrics"):
+        assert bypass_prefix in sw_body
+
+    for icon_path in ("/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png"):
+        icon_res = client.get(icon_path)
+        assert icon_res.status_code == 200
+        assert icon_res.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+    fav_res = client.get("/favicon.svg")
+    assert fav_res.status_code == 200
+    assert "<svg" in fav_res.text
+
+
+def test_desktop_config_launch_mode_validation() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    cfg = DesktopConfig()
+    assert cfg.launch_mode == "app"
+
+    for valid in ("app", "browser", "firefoxpwa"):
+        assert DesktopConfig(launch_mode=valid).launch_mode == valid  # type: ignore[arg-type]
+
+    with pytest.raises(ValidationError):
+        DesktopConfig(launch_mode="kiosk")  # type: ignore[arg-type]
+
+
+def test_open_url_in_app_mode_cross_platform_and_fallbacks(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+    import subprocess
+    import webbrowser
+
+    url = "http://127.0.0.1:8080"
+    spawned: list[list[str]] = []
+    opened_web: list[str] = []
+
+    def _fake_popen(cmd, **_kwargs):
+        spawned.append(list(cmd))
+
+        class _Proc:
+            pid = 4242
+
+        return _Proc()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(webbrowser, "open", lambda target: opened_web.append(target) or True)
+
+    # 1. mode="browser" never uses --app= or firefoxpwa
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in ("firefoxpwa", "google-chrome", "xdg-open") else None,
+    )
+    assert open_url_in_app_mode(url, mode="browser") is True
+    assert spawned[-1] == ["xdg-open", url]
+
+    # 2. mode="auto" / "app" prefers firefoxpwa when matching origin + 26-char ULID exists
+    ulid = "01JABCDEFGHJKMNPQRSTVWXYZ0"
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=f"Splitch ({ulid}) - http://127.0.0.1:8080/\n",
+            stderr="",
+        ),
+    )
+    assert open_url_in_app_mode(url, mode="app") is True
+    assert spawned[-1] == ["/usr/bin/firefoxpwa", "site", "launch", ulid]
+
+    # 3. Non-matching firefoxpwa site falls back to Linux Chromium --app= with --class=splitch
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=f"OtherApp ({ulid}) - http://example.com/\n",
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in ("firefoxpwa", "chromium", "xdg-open") else None,
+    )
+    assert open_url_in_app_mode(url, mode="auto") is True
+    assert spawned[-1] == ["/usr/bin/chromium", f"--app={url}", "--class=splitch"]
+
+    # 4. macOS launches `open -na <App> --args --app=<url>`
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    chrome_app = tmp_path / "Applications" / "Google Chrome.app"
+    chrome_app.mkdir(parents=True)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/open" if name == "open" else None)
+    assert open_url_in_app_mode(url, mode="app") is True
+    assert spawned[-1] == ["open", "-na", str(chrome_app), "--args", f"--app={url}"]
+
+    # 5. Windows launches `[exe, f"--app={url}"]`
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: r"C:\Program Files\Microsoft\Edge\msedge.exe" if name == "msedge" else None,
+    )
+    assert open_url_in_app_mode(url, mode="app") is True
+    assert spawned[-1] == [r"C:\Program Files\Microsoft\Edge\msedge.exe", f"--app={url}"]
+
+    # 6. Neither firefoxpwa nor Chromium found -> falls back to open_url_in_browser
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    assert open_url_in_app_mode(url, mode="app") is True
+    assert opened_web[-1] == url
+
+
+def test_launch_splitch_gui_and_cli_launch_flags(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+    import subprocess
+
+    import httpx
+    import pytest
+
+    from backend import cli as cli_mod
+
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path / "splitch-data"))
+    monkeypatch.setenv("SPLITCH_NO_DESKTOP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    spawned: list[list[str]] = []
+
+    def _fake_popen(cmd, **_kwargs):
+        spawned.append(list(cmd))
+
+        class _Proc:
+            pid = 5151
+
+        return _Proc()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *_args, **_kwargs: httpx.Response(200, json={"status": "ok"}),
+    )
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in ("google-chrome", "xdg-open") else None,
+    )
+
+    save_desktop_config(DesktopConfig(router_url="http://127.0.0.1:8080", launch_mode="browser"))
+
+    # Uses cfg.launch_mode when launch_mode=None
+    ok, _ = launch_splitch_gui(start_tray=False, open_browser=True, launch_mode=None)
+    assert ok is True
+    assert spawned[-1] == ["xdg-open", "http://127.0.0.1:8080"]
+
+    # Explicit launch_mode="app" overrides cfg.launch_mode
+    ok, _ = launch_splitch_gui(start_tray=False, open_browser=True, launch_mode="app")
+    assert ok is True
+    assert spawned[-1] == ["/usr/bin/google-chrome", "--app=http://127.0.0.1:8080", "--class=splitch"]
+
+    # CLI: --app and --browser are mutually exclusive
+    monkeypatch.setattr(sys, "argv", ["splitch", "launch", "--app", "--browser"])
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.main()
+    assert exc_info.value.code != 0
+
+    # CLI: --browser passes launch_mode="browser" through
+    monkeypatch.setattr(
+        sys, "argv", ["splitch", "launch", "--browser", "--no-tray", "--url", "http://127.0.0.1:8080"]
+    )
+    with pytest.raises(SystemExit) as exc_browser:
+        cli_mod.main()
+    assert exc_browser.value.code == 0
+    assert spawned[-1] == ["xdg-open", "http://127.0.0.1:8080"]
+
+    # CLI: --app passes launch_mode="app" through
+    monkeypatch.setattr(
+        sys, "argv", ["splitch", "launch", "--app", "--no-tray", "--url", "http://127.0.0.1:8080"]
+    )
+    with pytest.raises(SystemExit) as exc_app:
+        cli_mod.main()
+    assert exc_app.value.code == 0
+    assert spawned[-1] == ["/usr/bin/google-chrome", "--app=http://127.0.0.1:8080", "--class=splitch"]

@@ -1029,13 +1029,32 @@ if _DIST_DIR.exists():
     if _assets.exists():
         app.mount("/assets", StaticFiles(directory=str(_assets)), name="assets")
 
+    _icons = _DIST_DIR / "icons"
+    if _icons.exists():
+        app.mount("/icons", StaticFiles(directory=str(_icons)), name="pwa_icons")
+
     @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
     async def serve_dashboard():
         return FileResponse(str(_DIST_DIR / "index.html"))
 
-    _theme_init = _DIST_DIR / "theme-init.js"
-    if _theme_init.exists():
+    for _route_path, _file_name, _media_type in (
+        ("/theme-init.js", "theme-init.js", "application/javascript"),
+        ("/manifest.webmanifest", "manifest.webmanifest", "application/manifest+json"),
+        ("/sw.js", "sw.js", "application/javascript"),
+        ("/favicon.svg", "favicon.svg", "image/svg+xml"),
+    ):
+        _static_file = _DIST_DIR / _file_name
+        if _static_file.exists():
 
-        @app.api_route("/theme-init.js", methods=["GET", "HEAD"], include_in_schema=False)
-        async def serve_theme_init():
-            return FileResponse(str(_theme_init), media_type="application/javascript")
+            def _make_static_handler(target: Path, mime: str):
+                async def _serve_static():
+                    return FileResponse(str(target), media_type=mime)
+
+                return _serve_static
+
+            app.add_api_route(
+                _route_path,
+                _make_static_handler(_static_file, _media_type),
+                methods=["GET", "HEAD"],
+                include_in_schema=False,
+            )

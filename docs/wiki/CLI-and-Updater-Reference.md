@@ -187,11 +187,11 @@ splitch update --branch main --force     # override branch or bypass dirty-tree 
 
 ### `splitch launch`, `splitch tray`, `splitch stop` & `splitch desktop` — Desktop Launcher & Universal System Tray
 
-Splitch includes native OS desktop integration and a zero-polling (`/ws/status` WebSocket) system tray across Linux (StatusNotifierItem + `com.canonical.dbusmenu` for Wayland/X11 compositors + `pystray` XEmbed fallback), macOS (`NSStatusBar`), and Windows (`Shell_NotifyIcon`):
+Splitch includes native OS desktop integration and a zero-polling (`/ws/status` WebSocket) system tray across Linux (StatusNotifierItem + `com.canonical.dbusmenu` for Wayland/X11 compositors + `pystray` XEmbed fallback), macOS (`NSStatusBar`), and Windows (`Shell_NotifyIcon`). The dashboard also ships a Web App Manifest (`/manifest.webmanifest`), pass-through service worker (`/sw.js`), and chromeless app-mode launcher (`firefoxpwa` if configured on Linux/macOS, Chromium/Chrome/Brave/Edge `--app=` with `StartupWMClass=splitch`, or standard browser fallback via `--browser`; Windows Firefox 143+ supports native Taskbar Tabs install directly):
 
 ```bash
-# Start Splitch if offline (systemd user service or detached router), start system tray, and open Web UI
-splitch launch [--url http://localhost:8080] [--no-tray] [--no-browser]
+# Start Splitch if offline (systemd user service or detached router), start system tray, and open Web UI (chromeless PWA/app window by default)
+splitch launch [--url http://localhost:8080] [--no-tray] [--no-browser] [--app | --browser]
 
 # Run the system tray icon daemon (accepts optional --api-key)
 splitch tray [--url http://localhost:8080] [--api-key KEY]

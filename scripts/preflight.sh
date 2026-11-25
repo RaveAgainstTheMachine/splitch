@@ -161,17 +161,26 @@ allowed_attr_re = re.compile(
     r"(?:API_KEY|API_KEY_HASH|SESSION_SECRET|AGENT_TOKEN|ROUTER_PUBLIC_KEY|"
     r"ALLOW_UNAUTH_TOOLS|WORKSPACE_ROOT|ENABLE_TOOLS|STORAGE_PATH|ENGINE_URL|"
     r"data_dir|trusted_proxies|login_max_attempts|login_window_s|"
-    r"httpx|websockets|subprocess|socket|Path|sys|platform|asyncio\.sleep|shutil)"
+    r"httpx|websockets|subprocess|socket|Path|sys|platform|asyncio\.sleep|shutil|webbrowser)"
 )
 cur_file = ""
-for raw in diff_proc.stdout.splitlines():
+diff_lines = diff_proc.stdout.splitlines()
+i = 0
+while i < len(diff_lines):
+    raw = diff_lines[i]
     if raw.startswith("+++ b/"):
         cur_file = raw[6:]
     elif raw.startswith("+") and not raw.startswith("+++"):
         line = raw[1:]
-        if "monkeypatch.setattr(" in line and "# allow-mock:" not in line:
-            if not allowed_attr_re.search(line):
-                bad.append(f"  {cur_file}: disallowed internal mock in new test: {line.strip()}")
+        if "monkeypatch.setattr(" in line:
+            stmt = line
+            j = i + 1
+            while ")" not in stmt and j < len(diff_lines) and j < i + 6 and diff_lines[j].startswith("+"):
+                stmt += " " + diff_lines[j][1:].strip()
+                j += 1
+            if "# allow-mock:" not in stmt and not allowed_attr_re.search(stmt):
+                bad.append(f"  {cur_file}: disallowed internal mock in new test: {stmt.strip()}")
+    i += 1
 
 if bad:
     print("[preflight] ERROR: Forbidden internal mock(s) detected in tests/:", file=sys.stderr)

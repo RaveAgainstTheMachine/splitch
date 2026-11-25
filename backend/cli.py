@@ -541,10 +541,16 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
 
 def _cmd_launch(args: argparse.Namespace) -> int:
+    launch_mode = None
+    if getattr(args, "browser", False):
+        launch_mode = "browser"
+    elif getattr(args, "app", False):
+        launch_mode = "app"
     ok, msg = launch_splitch_gui(
         router_url=args.url,
         start_tray=not bool(args.no_tray),
         open_browser=not bool(args.no_browser),
+        launch_mode=launch_mode,
     )
     print(f"[splitch] {msg}")
     return 0 if ok else 1
@@ -1178,6 +1184,9 @@ def main() -> None:
     p_launch.add_argument("--url", default=None, help="Target Splitch router URL override")
     p_launch.add_argument("--no-tray", action="store_true", help="Do not launch system tray icon")
     p_launch.add_argument("--no-browser", action="store_true", help="Start services/tray without opening browser")
+    p_launch_mode = p_launch.add_mutually_exclusive_group()
+    p_launch_mode.add_argument("--app", action="store_true", help="Open in chromeless PWA/app window (default)")
+    p_launch_mode.add_argument("--browser", action="store_true", help="Open in a standard browser tab")
     p_launch.set_defaults(func=_cmd_launch)
 
     p_tray = sub.add_parser("tray", help="Run Splitch cross-compositor system tray icon")
