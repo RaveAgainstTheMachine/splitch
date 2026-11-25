@@ -35,3 +35,11 @@ Before committing, opening a PR, or deploying, run the workspace pre-flight veri
 ## 3. Browser Support Policy
 
 - **Browser Support:** Allow Newly Available web platform features (`<dialog closedby="any">`, Popover API, `<input type="checkbox" switch>`, CSS `light-dark()`, CSS Grid Subgrid, container scroll-state queries) with the progressive-enhancement polyfills bundled in `dashboard/src/main.tsx`.
+
+## 4. Independent Verification & Anti-Mock Policy
+
+- **Role-Split Verification:** The agent implementing a feature or fix must **not** be the sole author of its acceptance tests. Invoke an independent verifier subagent (`invoke_subagent`) given only the specification/requirements and the code diff to write adversarial & edge-case tests and verify at least one failure-injection check (deliberately break an invariant and confirm the test fails).
+- **Zero Internal Mocks (`preflight.sh` enforced):**
+  - `unittest.mock` (`Mock`, `MagicMock`, `AsyncMock`, `patch`) is forbidden in `tests/`.
+  - `monkeypatch.setattr` on internal `backend.*` functions/methods is forbidden in new/modified tests; test against real `TestClient`, loopback HTTP/WebSocket servers, SQLite WAL databases, and headless Chromium E2E (`tests/test_ui_e2e.py`).
+  - Only runtime config/auth constants (e.g. `API_KEY`, `WORKSPACE_ROOT`, `STORAGE_PATH`, `AGENT_TOKEN`) and true external network/OS boundaries (`httpx`, `websockets`, `subprocess`, `Path.home`, `sys.platform`) may be stubbed.

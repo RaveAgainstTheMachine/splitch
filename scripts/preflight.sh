@@ -134,26 +134,66 @@ if tag_proc.returncode == 0 and tag_proc.stdout.strip():
     print(f"  ✓ SemVer progression verified: {last_tag} -> v{py_ver}")
 PY
 
-echo "[preflight 2/5] Validating POSIX shell scripts..."
+echo "[preflight 2/6] Validating POSIX shell scripts..."
 sh -n install.sh
 sh -n scripts/preflight.sh
 sh -n scripts/bump-version.sh
 echo "  ✓ install.sh, scripts/preflight.sh, and scripts/bump-version.sh syntax valid"
 
-echo "[preflight 3/5] Running Ruff linter..."
+echo "[preflight 3/6] Enforcing anti-internal-mock gate on tests/..."
+python3 - <<'PY'
+import re, subprocess, sys
+from pathlib import Path
+
+bad: list[str] = []
+for p in sorted(Path("tests").glob("test_*.py")):
+    for idx, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+        if re.search(r"\b(unittest\.mock|MagicMock|AsyncMock)\b", line):
+            bad.append(f"  {p}:{idx}: forbidden unittest.mock usage: {line.strip()}")
+
+diff_proc = subprocess.run(
+    ["git", "diff", "-U0", "HEAD", "--", "tests/"],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+allowed_attr_re = re.compile(
+    r"(?:API_KEY|API_KEY_HASH|SESSION_SECRET|AGENT_TOKEN|ROUTER_PUBLIC_KEY|"
+    r"ALLOW_UNAUTH_TOOLS|WORKSPACE_ROOT|ENABLE_TOOLS|STORAGE_PATH|ENGINE_URL|"
+    r"data_dir|trusted_proxies|login_max_attempts|login_window_s|"
+    r"httpx|websockets|subprocess|socket|Path|sys|platform|asyncio\.sleep|shutil)"
+)
+cur_file = ""
+for raw in diff_proc.stdout.splitlines():
+    if raw.startswith("+++ b/"):
+        cur_file = raw[6:]
+    elif raw.startswith("+") and not raw.startswith("+++"):
+        line = raw[1:]
+        if "monkeypatch.setattr(" in line and "# allow-mock:" not in line:
+            if not allowed_attr_re.search(line):
+                bad.append(f"  {cur_file}: disallowed internal mock in new test: {line.strip()}")
+
+if bad:
+    print("[preflight] ERROR: Forbidden internal mock(s) detected in tests/:", file=sys.stderr)
+    print("\n".join(bad), file=sys.stderr)
+    sys.exit(1)
+print("  ✓ 0 forbidden internal mocks in tests/")
+PY
+
+echo "[preflight 4/6] Running Ruff linter..."
 uv run --no-sync ruff check backend tests
 echo "  ✓ ruff check passed"
 
 if [ "$QUICK" = "0" ]; then
-  echo "[preflight 4/5] Building frontend TypeScript & Vite bundle..."
+  echo "[preflight 5/6] Building frontend TypeScript & Vite bundle..."
   (cd dashboard && npm run build >/dev/null)
   echo "  ✓ dashboard build passed"
 
-  echo "[preflight 5/5] Running full pytest suite..."
+  echo "[preflight 6/6] Running full pytest suite..."
   uv run --no-sync pytest -q
 else
-  echo "[preflight 4/5] Skipped dashboard build (--quick)"
-  echo "[preflight 5/5] Running fast unit/API pytest suite (--quick)..."
+  echo "[preflight 5/6] Skipped dashboard build (--quick)"
+  echo "[preflight 6/6] Running fast unit/API pytest suite (--quick)..."
   uv run --no-sync pytest --ignore=tests/test_ui_e2e.py -q
 fi
 
