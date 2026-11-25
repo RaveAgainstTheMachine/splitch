@@ -46,15 +46,16 @@ id = "gpu-rig"
 display_name = "GPU Workstation"
 role = "gpu"                       # "gpu" | "unified" | "cpu"
 yield_on_gaming = true             # Auto-evict GPU models & fail over when game VRAM/load triggers
+# yield_gpu_indices = [0]          # Optional: monitor only specific GPU indices on multi-GPU rigs
 agent_url = "http://192.168.1.50:8090"
-engine_url = "http://192.168.1.50:8081"
+engine_url = "http://192.168.1.50:8081" # Primary engine; managed Strata sidecar (:8085) is auto-proxied via agent_url
 media_url = ""                     # Optional override (auto-detects sd-server :8082 / ComfyUI :8188)
 storage_path = "/srv/models"
 
 [[nodes]]
 id = "always-on"
 display_name = "Always-On Mac Mini"
-role = "unified"
+role = "unified"                   # Supports llama-server, managed mlx-lm (:8081), or Strata
 yield_on_gaming = false
 agent_url = "http://127.0.0.1:8090"
 engine_url = "http://127.0.0.1:8081"
@@ -62,7 +63,7 @@ storage_path = "/Volumes/Models"
 
 [[aliases]]
 alias = "heavy"
-task_kind = "code"                 # "code" | "chat" | "fim" | "embed"
+task_kind = "code"                 # "code" | "chat" | "fim" | "embed" | "image" | "video"
 primary_node = "gpu-rig"
 primary_model = "qwen3-coder-30b-a3b"
 fallback_node = "always-on"
@@ -72,7 +73,7 @@ fallback_model = "qwen3-8b-fast"
 alias = "fast"
 task_kind = "chat"
 primary_node = "always-on"
-primary_model = "qwen3-8b-fast"
+primary_model = "qwen3-8b-fast"    # Or MLX repo ID e.g. "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
 fallback_node = "gpu-rig"
 fallback_model = "qwen3-coder-30b-a3b"
 
@@ -83,6 +84,21 @@ primary_node = "always-on"
 primary_model = "bge-small-en-v1.5"
 fallback_node = "gpu-rig"
 fallback_model = "bge-small-en-v1.5"
+
+# Optional: Strata Sparse-MoE sidecar (:8085) & Media Studio aliases
+# [[aliases]]
+# alias = "moe"
+# task_kind = "chat"
+# primary_node = "gpu-rig"
+# primary_model = "Qwen3.8-Flash-Next-IQ2_XS"
+# fallback_node = "always-on"
+# fallback_model = "qwen3-8b-fast"
+#
+# [[aliases]]
+# alias = "image-fast"
+# task_kind = "image"
+# primary_node = "gpu-rig"
+# primary_model = "z_image_turbo-Q4_K_M.gguf"
 ```
 
 ---
@@ -124,10 +140,10 @@ Splitch prevents local LLM workloads from stuttering games or crashing CUDA out-
 
 ### Automatic Detection + Auto-VRAM Eviction
 On discrete-GPU nodes (`role = "gpu"`, `yield_on_gaming = true`), `splitch-agent` inspects live GPU processes every poll interval (`nvidia-smi pmon` on NVIDIA, `rocm-smi` on AMD):
-- Processes matching known LLM / diffusion engines (`llama-server`, `ollama`, `vllm`, `sd-server`, `sd-cli`) are counted as AI VRAM.
+- Processes matching known LLM / diffusion engines (`llama-server`, `ollama`, `vllm`, `strata-server`, `sd-server`, `sd-cli`) are counted as AI VRAM.
 - All other GPU consumers (Steam games, Blender, DaVinci Resolve, OBS, etc.) count toward `non_llm_vram_mb`.
 - Whenever any guard trips (`non_llm_vram_mb >= non_llm_vram_threshold_mb` or `gpu_util_percent >= max_external_gpu_util_percent` with `0` in-flight requests):
-  1. **Auto-VRAM Eviction (`auto_evict_on_yield = true`):** Splitch immediately calls `POST /models/unload` on loaded LLM models on that GPU node to hand 100% of VRAM back to your game.
+  1. **Auto-VRAM Eviction (`auto_evict_on_yield = true`):** Splitch immediately calls `POST /models/unload` on loaded LLM models (and `POST /strata/stop` if the managed Strata sidecar is active) on that GPU node to hand 100% of VRAM back to your game.
   2. **60-Second Cooldown Hold (`yield_cooldown_s = 60.0`):** Keeps the GPU node yielded (`COOLDOWN`) during brief menu/loading-screen VRAM dips so a 20 GB LLM never reloads mid-game.
   3. **Transparent Failover:** Incoming requests transparently route to your standby node (`always-on`).
 - To manually pin all traffic to a specific node anytime, pick it in **Overview → Routing Target** (`Auto Split`, `PC`, `Mac Mini`), or use `POST /api/control {"force_node": "<id>"}`.

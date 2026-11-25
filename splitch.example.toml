@@ -44,11 +44,14 @@ id = "gpu-rig"
 display_name = "GPU Workstation"
 role = "gpu"
 yield_on_gaming = true
+# yield_gpu_indices = [0]            # Optional: only monitor specific GPU indices for Gaming Yield (e.g. [0] if GPU 1 is headless compute)
 agent_url = "http://192.168.1.50:8090"
-engine_url = "http://192.168.1.50:8081"
+engine_url = "http://192.168.1.50:8081" # Or point to external Strata (:8081); managed Strata sidecar (:8085) is auto-proxied via agent_url
+media_url = ""                       # Optional override (auto-detects sd-server :8082 / ComfyUI :8188)
 storage_path = "/path/to/models"
 
 # Example Node 2: Always-on low-power host (Apple Silicon Mac, mini-PC, or home server)
+# Works with llama-server, managed Apple Silicon mlx-lm (`splitch-mlx-server --port 8081`), or Ollama.
 [[nodes]]
 id = "always-on"
 display_name = "Always-On Node"
@@ -71,7 +74,7 @@ fallback_model = "fast-small"
 alias = "fast"
 task_kind = "chat"
 primary_node = "always-on"
-primary_model = "fast-small"
+primary_model = "fast-small"       # Or an Apple Silicon MLX repo ID e.g. "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
 fallback_node = "gpu-rig"
 fallback_model = "coder-heavy"
 
@@ -82,3 +85,25 @@ primary_node = "always-on"
 primary_model = "embed-bge"
 fallback_node = "gpu-rig"
 fallback_model = "embed-bge"
+
+# Optional: route an alias directly to a managed Strata Sparse-MoE sidecar model (:8085)
+# [[aliases]]
+# alias = "moe"
+# task_kind = "chat"
+# primary_node = "gpu-rig"
+# primary_model = "Qwen3.8-Flash-Next-IQ2_XS"
+# fallback_node = "always-on"
+# fallback_model = "fast-small"
+
+# Optional: Media Studio aliases for Image (sd-server / ComfyUI) and Video (sd-cli / ComfyUI)
+# [[aliases]]
+# alias = "image-fast"
+# task_kind = "image"
+# primary_node = "gpu-rig"
+# primary_model = "z_image_turbo-Q4_K_M.gguf"
+#
+# [[aliases]]
+# alias = "video-wan"
+# task_kind = "video"
+# primary_node = "gpu-rig"
+# primary_model = "wan2.1_t2v_1.3B_bf16.safetensors"
