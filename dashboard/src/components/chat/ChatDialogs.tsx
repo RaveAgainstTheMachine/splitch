@@ -1,10 +1,13 @@
+import { useEffect, useState } from "react";
 import type React from "react";
 import {
   AlertTriangle,
   ArrowUp,
   BookOpen,
+  FileText,
   Folder,
   Minimize2,
+  Save,
   ShieldAlert,
   ShieldCheck,
   Wrench
@@ -12,9 +15,12 @@ import {
 import { ContextRing } from "../ContextRing";
 import { classifyClientMcpEgress } from "../McpTab";
 import type {
+  AgentsMdPayload,
+  ChatRulesConfig,
   ConversationSummary,
   McpServerConfig,
   NodeStatus,
+  PromptPersona,
   ScopedExtensionsConfig,
   SkillItem,
   WorkspaceDirListing
@@ -37,6 +43,8 @@ export interface ContextMemoryDialogProps {
   contextScopeTarget: "chat" | "workspace" | "global";
   selectScopeTarget: (target: "chat" | "workspace" | "global") => void;
   activeWorkspaceKey: string;
+  execNode?: string;
+  workspaceSubpath?: string;
   skills: SkillItem[];
   scopedConfig: ScopedExtensionsConfig;
   settingsSkills: string[];
@@ -63,6 +71,8 @@ export function ContextMemoryDialog({
   contextScopeTarget,
   selectScopeTarget,
   activeWorkspaceKey,
+  execNode = "",
+  workspaceSubpath = "",
   skills,
   scopedConfig,
   settingsSkills,
@@ -72,6 +82,63 @@ export function ContextMemoryDialog({
   setSettingsMcps,
   toggleSelection
 }: ContextMemoryDialogProps) {
+  const [personas, setPersonas] = useState<PromptPersona[]>([]);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [agentsMd, setAgentsMd] = useState("");
+  const [agentsExists, setAgentsExists] = useState(false);
+  const [agentsBusy, setAgentsBusy] = useState(false);
+  const [agentsNotice, setAgentsNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch("/api/chat/rules");
+        if (res.ok) {
+          const data = (await res.json()) as ChatRulesConfig;
+          setPersonas(data.personas ?? []);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, []);
+
+  const loadAgentsMd = async () => {
+    if (!execNode) return;
+    setAgentsBusy(true);
+    setAgentsNotice(null);
+    try {
+      const res = await fetch(
+        `/api/nodes/${encodeURIComponent(execNode)}/workspace/agents-md?subpath=${encodeURIComponent(workspaceSubpath)}`
+      );
+      if (res.ok) {
+        const data = (await res.json()) as AgentsMdPayload;
+        setAgentsMd(data.content);
+        setAgentsExists(data.exists);
+      }
+    } finally {
+      setAgentsBusy(false);
+    }
+  };
+
+  const saveAgentsMd = async () => {
+    if (!execNode) return;
+    setAgentsBusy(true);
+    setAgentsNotice(null);
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(execNode)}/workspace/agents-md`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subpath: workspaceSubpath, content: agentsMd })
+      });
+      if (res.ok) {
+        setAgentsExists(true);
+        setAgentsNotice("Saved AGENTS.md");
+      }
+    } finally {
+      setAgentsBusy(false);
+    }
+  };
   return (
     <dialog
       ref={dialogRef}
@@ -112,6 +179,25 @@ export function ContextMemoryDialog({
         </div>
       </div>
       <form className="modal-form" onSubmit={saveContextSettings}>
+        {personas.length > 0 && (
+          <label>
+            Prompt Persona Preset
+            <select
+              value=""
+              onChange={(e) => {
+                const found = personas.find((p) => p.id === e.target.value);
+                if (found) setSettingsPrompt(found.prompt);
+              }}
+            >
+              <option value="">Apply saved persona…</option>
+              {personas.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           System Prompt
           <textarea
@@ -121,6 +207,53 @@ export function ContextMemoryDialog({
             placeholder="Optional system prompt…"
           />
         </label>
+
+        {execNode && (
+          <div className="context-section">
+            <div className="panel-head">
+              <span className="muted" style={{ fontSize: "0.78rem" }}>
+                <FileText size={12} aria-hidden="true" /> Project <code>AGENTS.md</code>
+                {agentsExists ? "" : " (optional)"}
+              </span>
+              <div className="row-actions">
+                <button
+                  type="button"
+                  className="btn btn--sm"
+                  onClick={() => {
+                    const next = !agentsOpen;
+                    setAgentsOpen(next);
+                    if (next) void loadAgentsMd();
+                  }}
+                >
+                  {agentsOpen ? "Hide AGENTS.md" : "Edit AGENTS.md"}
+                </button>
+              </div>
+            </div>
+            {agentsOpen && (
+              <div className="settings-stack" style={{ marginTop: "0.45rem" }}>
+                <textarea
+                  rows={5}
+                  value={agentsMd}
+                  onChange={(e) => setAgentsMd(e.target.value)}
+                  placeholder="# Workspace Instructions&#10;..."
+                />
+                <div className="row-actions">
+                  {agentsNotice && <span className="pill pill--ok">{agentsNotice}</span>}
+                  <button
+                    type="button"
+                    className="btn btn--sm btn--accent"
+                    style={{ marginInlineStart: "auto" }}
+                    disabled={agentsBusy}
+                    onClick={() => void saveAgentsMd()}
+                  >
+                    <Save size={11} aria-hidden="true" />{" "}
+                    {agentsBusy ? "Saving…" : "Save AGENTS.md"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="context-section">
           <div className="panel-head">

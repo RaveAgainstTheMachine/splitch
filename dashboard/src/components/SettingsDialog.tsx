@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useState } from "react";
 import { Check, Copy, Play, Save, Send, X } from "lucide-react";
 import { useDialogLightDismiss } from "./ModelsTab";
 import { AppearancePanel } from "./ThemeDialog";
+import { AgentChatSettingsPane } from "./settings/AgentChatSettingsPane";
 import { BenchmarksPane } from "./settings/BenchmarksPane";
 import {
   buildClientSnippets,
@@ -136,7 +137,14 @@ export function SettingsDialog({
           trusted_proxies: settings.trusted_proxies,
           allowed_origins,
           login_max_attempts: settings.login_max_attempts,
-          login_window_s: settings.login_window_s
+          login_window_s: settings.login_window_s,
+          approval_policy: settings.approval_policy,
+          shell_allowlist: settings.shell_allowlist,
+          shell_denylist: settings.shell_denylist,
+          max_agent_steps: settings.max_agent_steps,
+          auto_compact_threshold: settings.auto_compact_threshold,
+          thinking_display: settings.thinking_display,
+          completion_notifications: settings.completion_notifications
         })
       });
       if (!res.ok) {
@@ -360,6 +368,17 @@ export function SettingsDialog({
           </nav>
 
           <div className="settings-pane" role="tabpanel">
+            {activeTab === "agent" && settings && (
+              <AgentChatSettingsPane
+                settings={settings}
+                setSettings={setSettings}
+                saving={saving}
+                saveSettings={saveSettings}
+                onSavedNotice={showSavedNotice}
+                onLocalError={setLocalError}
+              />
+            )}
+
             {activeTab === "clients" && (
               <div className="settings-stack">
                 <div className="two-col">

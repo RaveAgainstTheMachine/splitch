@@ -10,6 +10,8 @@ from fastapi import APIRouter, FastAPI, HTTPException
 
 from backend.router.telemetry import ClusterState
 from backend.shared.models import (
+    AgentsMdPayload,
+    AgentsMdWriteRequest,
     GitActionResponse,
     GitCommitMessageRequest,
     GitCommitMessageResponse,
@@ -92,6 +94,34 @@ def build_workspace_router(
             params={"subpath": subpath, "path": path},
         )
         return WorkspaceFileContent.model_validate(data)
+
+    @router.get("/workspace/agents-md", response_model=AgentsMdPayload)
+    async def get_workspace_agents_md(node_id: str, subpath: str = "") -> AgentsMdPayload:
+        try:
+            data = await _proxy_agent(
+                node_id,
+                "GET",
+                "/workspace/file",
+                params={"subpath": subpath, "path": "AGENTS.md"},
+            )
+            file_obj = WorkspaceFileContent.model_validate(data)
+            return AgentsMdPayload(content=file_obj.content, exists=True, path="AGENTS.md")
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return AgentsMdPayload(content="", exists=False, path="AGENTS.md")
+            raise
+
+    @router.put("/workspace/agents-md", response_model=AgentsMdPayload)
+    async def put_workspace_agents_md(
+        node_id: str, req: AgentsMdWriteRequest
+    ) -> AgentsMdPayload:
+        data = await _proxy_agent(
+            node_id,
+            "POST",
+            "/workspace/agents-md",
+            json_body=req.model_dump(),
+        )
+        return AgentsMdPayload.model_validate(data)
 
     @router.get("/git/status", response_model=GitStatusResponse)
     async def proxy_git_status(node_id: str, subpath: str = "") -> GitStatusResponse:

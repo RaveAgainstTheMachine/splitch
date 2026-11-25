@@ -79,6 +79,30 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [compacting, setCompacting] = useState(false);
   const [compactNotice, setCompactNotice] = useState<string | null>(null);
+  const [thinkingDisplay, setThinkingDisplay] = useState<"collapsed" | "expanded" | "hidden">(
+    "collapsed"
+  );
+  const [completionNotifications, setCompletionNotifications] = useState(false);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch("/api/settings");
+        if (res.ok) {
+          const s = (await res.json()) as {
+            thinking_display?: "collapsed" | "expanded" | "hidden";
+            completion_notifications?: boolean;
+          };
+          if (s.thinking_display) setThinkingDisplay(s.thinking_display);
+          if (typeof s.completion_notifications === "boolean") {
+            setCompletionNotifications(s.completion_notifications);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  }, []);
 
   // Context & Skills/MCP settings modal state
   const [settingsPrompt, setSettingsPrompt] = useState("");
@@ -1164,6 +1188,15 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
 
       await loadMessages(targetId);
       await loadConversations(false);
+      if (
+        completionNotifications &&
+        typeof document !== "undefined" &&
+        document.hidden &&
+        typeof Notification !== "undefined" &&
+        Notification.permission === "granted"
+      ) {
+        new Notification("Splitch", { body: "Agent response finished" });
+      }
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         if (activeDraft) {
@@ -1642,6 +1675,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           copiedMsgId={copiedMsgId}
           toolResultsByCallId={toolResultsByCallId}
           pendingApprovals={pendingApprovals}
+          thinkingDisplay={thinkingDisplay}
           inspectedArtifact={inspectedArtifact}
           markdownComponents={markdownComponents}
           threadRef={threadRef}
@@ -1745,6 +1779,8 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
         contextScopeTarget={contextScopeTarget}
         selectScopeTarget={selectScopeTarget}
         activeWorkspaceKey={activeWorkspaceKey}
+        execNode={effectiveConfig.exec_node || snapshot?.nodes.find((n) => n.online)?.node_id || ""}
+        workspaceSubpath={effectiveConfig.workspace_subpath}
         skills={skills}
         scopedConfig={scopedConfig}
         settingsSkills={settingsSkills}

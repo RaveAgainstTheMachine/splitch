@@ -495,6 +495,26 @@ export interface PendingApproval {
 
 // ── Settings, Connect Clients & Node Provisioning ────────────────────────────
 
+export type ApprovalPolicy = "ask" | "auto_edits" | "turbo_safe" | "full_auto";
+export type ThinkingDisplay = "collapsed" | "expanded" | "hidden";
+
+export interface PromptPersona {
+  id: string;
+  name: string;
+  prompt: string;
+}
+
+export interface ChatRulesConfig {
+  global_rules: string;
+  personas: PromptPersona[];
+}
+
+export interface AgentsMdPayload {
+  content: string;
+  exists: boolean;
+  path: string;
+}
+
 export interface RuntimeSettings {
   non_llm_vram_threshold_mb: number;
   min_vram_free_mb: number;
@@ -519,6 +539,13 @@ export interface RuntimeSettings {
   login_max_attempts: number;
   login_window_s: number;
   remote_provision_enabled: boolean;
+  approval_policy: ApprovalPolicy;
+  shell_allowlist: string[];
+  shell_denylist: string[];
+  max_agent_steps: number;
+  auto_compact_threshold: number;
+  thinking_display: ThinkingDisplay;
+  completion_notifications: boolean;
 }
 
 export interface DesktopConfigView {

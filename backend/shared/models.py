@@ -747,6 +747,51 @@ class OpenAIVideoRequest(BaseModel):
 # ── Runtime Settings, Client Connect & Node Provisioning Schemas ─────────────
 
 
+ApprovalPolicy = Literal["ask", "auto_edits", "turbo_safe", "full_auto"]
+ThinkingDisplay = Literal["collapsed", "expanded", "hidden"]
+
+DEFAULT_SHELL_ALLOWLIST: tuple[str, ...] = (
+    "pytest",
+    "ruff",
+    "git status",
+    "git diff",
+    "git log",
+    "rg",
+    "ls",
+    "cat",
+)
+DEFAULT_SHELL_DENYLIST: tuple[str, ...] = (
+    "rm -rf",
+    "sudo",
+    "git push",
+    "mkfs",
+    "dd if=",
+    "chmod -R 777",
+)
+
+
+class PromptPersona(BaseModel):
+    id: str = Field(..., min_length=1, max_length=64)
+    name: str = Field(..., min_length=1, max_length=80)
+    prompt: str = Field(default="", max_length=16000)
+
+
+class ChatRulesConfig(BaseModel):
+    global_rules: str = Field(default="", max_length=16000)
+    personas: list[PromptPersona] = Field(default_factory=list)
+
+
+class AgentsMdPayload(BaseModel):
+    content: str = ""
+    exists: bool = True
+    path: str = "AGENTS.md"
+
+
+class AgentsMdWriteRequest(BaseModel):
+    subpath: str = ""
+    content: str = Field(default="", max_length=256000)
+
+
 class RuntimeSettings(BaseModel):
     non_llm_vram_threshold_mb: float = 4096.0
     min_vram_free_mb: float = 4096.0
@@ -771,6 +816,13 @@ class RuntimeSettings(BaseModel):
     login_max_attempts: int = 10
     login_window_s: float = 60.0
     remote_provision_enabled: bool = False
+    approval_policy: ApprovalPolicy = "ask"
+    shell_allowlist: list[str] = Field(default_factory=lambda: list(DEFAULT_SHELL_ALLOWLIST))
+    shell_denylist: list[str] = Field(default_factory=lambda: list(DEFAULT_SHELL_DENYLIST))
+    max_agent_steps: int = 8
+    auto_compact_threshold: float = 0.80
+    thinking_display: ThinkingDisplay = "collapsed"
+    completion_notifications: bool = False
 
 
 class RuntimeSettingsPatch(BaseModel):
@@ -790,6 +842,13 @@ class RuntimeSettingsPatch(BaseModel):
     allowed_origins: list[str] | None = None
     login_max_attempts: int | None = Field(default=None, ge=1, le=100)
     login_window_s: float | None = Field(default=None, ge=5.0, le=3600.0)
+    approval_policy: ApprovalPolicy | None = None
+    shell_allowlist: list[str] | None = None
+    shell_denylist: list[str] | None = None
+    max_agent_steps: int | None = Field(default=None, ge=1, le=32)
+    auto_compact_threshold: float | None = Field(default=None, ge=0.50, le=0.95)
+    thinking_display: ThinkingDisplay | None = None
+    completion_notifications: bool | None = None
 
 
 SecretKeyName = Literal["brave_api_key", "tavily_api_key", "hf_token"]

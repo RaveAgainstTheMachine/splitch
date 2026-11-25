@@ -74,6 +74,8 @@ from backend.shared.gpu_probe import (
 )
 from backend.shared.models import (
     AgentRollbackRequest,
+    AgentsMdPayload,
+    AgentsMdWriteRequest,
     AgentUpdateRequest,
     ClientConfigSyncRequest,
     DownloadJob,
@@ -2234,6 +2236,24 @@ async def get_workspace_tree(subpath: str = "", dir_path: str = "") -> Workspace
 async def get_workspace_file(subpath: str = "", path: str = "") -> WorkspaceFileContent:
     _require_tools_enabled()
     return await asyncio.to_thread(read_workspace_file, WORKSPACE_ROOT, subpath, path)
+
+
+@app.post("/workspace/agents-md", response_model=AgentsMdPayload)
+async def write_workspace_agents_md(req: AgentsMdWriteRequest) -> AgentsMdPayload:
+    _require_tools_enabled()
+
+    def _write() -> AgentsMdPayload:
+        base = Path(WORKSPACE_ROOT).expanduser().resolve()
+        ws = (base / req.subpath).resolve() if req.subpath.strip() else base
+        if not ws.is_relative_to(base) or not ws.is_dir():
+            raise HTTPException(status_code=400, detail="Invalid workspace subpath")
+        target = (ws / "AGENTS.md").resolve()
+        if not target.is_relative_to(ws):
+            raise HTTPException(status_code=400, detail="Invalid AGENTS.md path")
+        target.write_text(req.content, encoding="utf-8")
+        return AgentsMdPayload(content=req.content, exists=True, path="AGENTS.md")
+
+    return await asyncio.to_thread(_write)
 
 
 @app.get("/workspace/git/status", response_model=GitStatusResponse)

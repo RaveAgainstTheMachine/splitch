@@ -29,6 +29,7 @@ import type {
   NodeStatus,
   PendingApproval
 } from "../../types";
+import type { ThinkingDisplay } from "../../types";
 
 export interface ChatMessageListProps {
   activeId: string | null;
@@ -40,6 +41,7 @@ export interface ChatMessageListProps {
   copiedMsgId: string | null;
   toolResultsByCallId: Record<string, ChatMessageRecord>;
   pendingApprovals: Record<string, PendingApproval>;
+  thinkingDisplay?: ThinkingDisplay;
   inspectedArtifact: InspectedArtifact | null;
   markdownComponents: Components;
   threadRef: React.RefObject<HTMLDivElement | null>;
@@ -108,6 +110,7 @@ export function ChatMessageList({
   copiedMsgId,
   toolResultsByCallId,
   pendingApprovals,
+  thinkingDisplay = "collapsed",
   inspectedArtifact,
   markdownComponents,
   threadRef,
@@ -185,10 +188,13 @@ export function ChatMessageList({
                     </div>
                   )}
 
-                  {isAssistant && msg.reasoning && (
+                  {isAssistant && msg.reasoning && thinkingDisplay !== "hidden" && (
                     <details
                       className="chat-disclosure chat-disclosure--pill"
-                      open={streaming && isLatest && !msg.content}
+                      open={
+                        thinkingDisplay === "expanded" ||
+                        (streaming && isLatest && !msg.content)
+                      }
                     >
                       <summary>
                         <Brain size={12} aria-hidden="true" />

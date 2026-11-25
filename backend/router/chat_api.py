@@ -42,6 +42,7 @@ from backend.router.web_search import WEB_TOOLS_SCHEMA, execute_web_fetch, execu
 from backend.shared.models import (
     ApprovalDecision,
     ChatMessageRecord,
+    ChatRulesConfig,
     ChatSendRequest,
     CompactResponse,
     ConversationBulkRequest,
@@ -62,6 +63,50 @@ from backend.shared.security import sign_tool_approval
 
 def _sse(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+
+
+def _matches_cmd_prefix_or_pattern(cmd: str, entries: list[str], *, anywhere: bool) -> bool:
+    low = cmd.strip().lower()
+    if not low:
+        return False
+    for pat in entries:
+        p = pat.strip().lower()
+        if not p:
+            continue
+        if anywhere:
+            if p in low:
+                return True
+        elif low == p or low.startswith((f"{p} ", f"{p}\t")):
+            return True
+    return False
+
+
+def _requires_tool_approval(
+    tool_name: str,
+    parsed_args: dict[str, Any],
+    *,
+    is_external_mcp: bool,
+    conv_auto_approve: bool,
+    router_cfg: Any,
+) -> bool:
+    """Evaluate tiered approval policy + shell allow/denylist (denylist always wins)."""
+    policy = getattr(router_cfg, "approval_policy", "ask")
+    if is_external_mcp:
+        return not (conv_auto_approve or policy == "full_auto")
+    if tool_name not in APPROVAL_REQUIRED_TOOLS:
+        return False
+    if tool_name == "run_command":
+        cmd_str = str(parsed_args.get("command") or "")
+        denylist = list(getattr(router_cfg, "shell_denylist", []) or [])
+        if _matches_cmd_prefix_or_pattern(cmd_str, denylist, anywhere=True):
+            return True
+        if conv_auto_approve or policy == "full_auto":
+            return False
+        if policy == "turbo_safe":
+            allowlist = list(getattr(router_cfg, "shell_allowlist", []) or [])
+            return not _matches_cmd_prefix_or_pattern(cmd_str, allowlist, anywhere=False)
+        return True
+    return not (conv_auto_approve or policy in ("auto_edits", "turbo_safe", "full_auto"))
 
 
 def build_chat_router(
@@ -139,6 +184,31 @@ def build_chat_router(
     @router.get("/scopes", response_model=ScopedExtensionsConfig)
     async def get_scopes() -> ScopedExtensionsConfig:
         return await asyncio.to_thread(_load_scopes)
+
+    def _rules_file() -> Path:
+        return data_dir / "rules.json"
+
+    def _load_rules() -> ChatRulesConfig:
+        p = _rules_file()
+        if not p.exists():
+            return ChatRulesConfig()
+        try:
+            return ChatRulesConfig.model_validate(json.loads(p.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            return ChatRulesConfig()
+
+    def _save_rules(cfg: ChatRulesConfig) -> ChatRulesConfig:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        _rules_file().write_text(cfg.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        return cfg
+
+    @router.get("/rules", response_model=ChatRulesConfig)
+    async def get_chat_rules() -> ChatRulesConfig:
+        return await asyncio.to_thread(_load_rules)
+
+    @router.put("/rules", response_model=ChatRulesConfig)
+    async def put_chat_rules(cfg: ChatRulesConfig) -> ChatRulesConfig:
+        return await asyncio.to_thread(_save_rules, cfg)
 
     @router.put("/scopes/global", response_model=ScopedExtensionsConfig)
     async def update_global_scope(rule: ScopeRule) -> ScopedExtensionsConfig:
@@ -439,11 +509,14 @@ def build_chat_router(
         async def _event_stream() -> AsyncGenerator[bytes, None]:
             yield _sse("user_saved", user_msg.model_dump())
 
-            # Assemble system prompt + injected skills + MCP tools
+            # Assemble system prompt + global rules + injected skills + MCP tools
             sys_parts = [
                 "You are Splitch, a precise local AI engineering assistant.",
                 "Be concise, accurate, and use tools directly when inspecting or modifying workspace files.",
             ]
+            rules_cfg = await asyncio.to_thread(_load_rules)
+            if rules_cfg.global_rules.strip():
+                sys_parts.append(f"Global User Rules:\n{rules_cfg.global_rules.strip()}")
             if conv.system_prompt.strip():
                 sys_parts.append(conv.system_prompt.strip())
 
@@ -481,10 +554,11 @@ def build_chat_router(
             est_active_tokens = _estimate_msgs_tokens(
                 active_conv.compacted_summary, "\n\n".join(sys_parts), uncompacted_msgs
             )
+            compact_threshold = max(0.50, min(0.95, float(cluster.config.router.auto_compact_threshold)))
             if (
                 active_conv.auto_compact
                 and ctx_budget > 0
-                and (est_active_tokens / ctx_budget) >= 0.80
+                and (est_active_tokens / ctx_budget) >= compact_threshold
                 and len(uncompacted_msgs) > 7
             ):
                 yield _sse(
@@ -551,7 +625,7 @@ def build_chat_router(
                         }
                     )
 
-            max_rounds = 8
+            max_rounds = max(1, min(32, int(cluster.config.router.max_agent_steps)))
             for _round in range(max_rounds):
                 req_body: dict[str, Any] = {
                     "model": conv.model,
@@ -800,9 +874,13 @@ def build_chat_router(
                             is_external_mcp = True
                             external_mcp_target = _m_srv.egress_target or _m_srv.url or _m_srv.id
 
-                    needs_approval = (
-                        t_name in APPROVAL_REQUIRED_TOOLS or is_external_mcp
-                    ) and (not conv.auto_approve)
+                    needs_approval = _requires_tool_approval(
+                        t_name,
+                        parsed_args,
+                        is_external_mcp=is_external_mcp,
+                        conv_auto_approve=conv.auto_approve,
+                        router_cfg=cluster.config.router,
+                    )
                     approved = True
                     if needs_approval:
                         approval_id = uuid.uuid4().hex[:10]

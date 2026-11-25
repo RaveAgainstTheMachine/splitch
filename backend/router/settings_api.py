@@ -158,6 +158,20 @@ def apply_persisted_settings(cluster: ClusterState, data_dir: Path) -> None:
         s.login_max_attempts = max(1, min(100, raw["login_max_attempts"]))
     if isinstance(raw.get("login_window_s"), (int, float)):
         s.login_window_s = max(5.0, min(3600.0, float(raw["login_window_s"])))
+    if raw.get("approval_policy") in ("ask", "auto_edits", "turbo_safe", "full_auto"):
+        r.approval_policy = raw["approval_policy"]
+    if isinstance(raw.get("shell_allowlist"), list):
+        r.shell_allowlist = [str(x).strip() for x in raw["shell_allowlist"] if str(x).strip()]
+    if isinstance(raw.get("shell_denylist"), list):
+        r.shell_denylist = [str(x).strip() for x in raw["shell_denylist"] if str(x).strip()]
+    if isinstance(raw.get("max_agent_steps"), int):
+        r.max_agent_steps = max(1, min(32, raw["max_agent_steps"]))
+    if isinstance(raw.get("auto_compact_threshold"), (int, float)):
+        r.auto_compact_threshold = max(0.50, min(0.95, float(raw["auto_compact_threshold"])))
+    if raw.get("thinking_display") in ("collapsed", "expanded", "hidden"):
+        r.thinking_display = raw["thinking_display"]
+    if isinstance(raw.get("completion_notifications"), bool):
+        r.completion_notifications = raw["completion_notifications"]
 
 
 def build_settings_router(
@@ -223,6 +237,13 @@ def build_settings_router(
             login_max_attempts=cluster.config.security.login_max_attempts,
             login_window_s=cluster.config.security.login_window_s,
             remote_provision_enabled=remote_prov,
+            approval_policy=cluster.config.router.approval_policy,
+            shell_allowlist=list(cluster.config.router.shell_allowlist),
+            shell_denylist=list(cluster.config.router.shell_denylist),
+            max_agent_steps=cluster.config.router.max_agent_steps,
+            auto_compact_threshold=cluster.config.router.auto_compact_threshold,
+            thinking_display=cluster.config.router.thinking_display,
+            completion_notifications=cluster.config.router.completion_notifications,
         )
 
     def _write_settings(payload: dict) -> None:
@@ -294,6 +315,20 @@ def build_settings_router(
             s.login_max_attempts = patch.login_max_attempts
         if patch.login_window_s is not None:
             s.login_window_s = patch.login_window_s
+        if patch.approval_policy is not None:
+            r.approval_policy = patch.approval_policy
+        if patch.shell_allowlist is not None:
+            r.shell_allowlist = [x.strip() for x in patch.shell_allowlist if x.strip()]
+        if patch.shell_denylist is not None:
+            r.shell_denylist = [x.strip() for x in patch.shell_denylist if x.strip()]
+        if patch.max_agent_steps is not None:
+            r.max_agent_steps = patch.max_agent_steps
+        if patch.auto_compact_threshold is not None:
+            r.auto_compact_threshold = patch.auto_compact_threshold
+        if patch.thinking_display is not None:
+            r.thinking_display = patch.thinking_display
+        if patch.completion_notifications is not None:
+            r.completion_notifications = patch.completion_notifications
 
         current = _current_settings()
         persist_dict = {
@@ -313,6 +348,13 @@ def build_settings_router(
             "allowed_origins": current.allowed_origins,
             "login_max_attempts": current.login_max_attempts,
             "login_window_s": current.login_window_s,
+            "approval_policy": current.approval_policy,
+            "shell_allowlist": current.shell_allowlist,
+            "shell_denylist": current.shell_denylist,
+            "max_agent_steps": current.max_agent_steps,
+            "auto_compact_threshold": current.auto_compact_threshold,
+            "thinking_display": current.thinking_display,
+            "completion_notifications": current.completion_notifications,
         }
         await asyncio.to_thread(_write_settings, persist_dict)
         await cluster.broadcast_snapshot()

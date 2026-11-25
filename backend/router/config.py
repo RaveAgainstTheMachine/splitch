@@ -12,7 +12,15 @@ from pathlib import Path
 
 from pydantic import AliasChoices, BaseModel, Field, ValidationError
 
-from backend.shared.models import AliasConfig, ControlState, NodeRole
+from backend.shared.models import (
+    DEFAULT_SHELL_ALLOWLIST,
+    DEFAULT_SHELL_DENYLIST,
+    AliasConfig,
+    ApprovalPolicy,
+    ControlState,
+    NodeRole,
+    ThinkingDisplay,
+)
 
 
 class NodeConfig(BaseModel):
@@ -49,6 +57,13 @@ class RouterSettings(BaseModel):
     auto_heavy_char_threshold: int = 12000
     state_file: str = ".splitch_state.json"
     public_url: str = ""
+    approval_policy: ApprovalPolicy = "ask"
+    shell_allowlist: list[str] = Field(default_factory=lambda: list(DEFAULT_SHELL_ALLOWLIST))
+    shell_denylist: list[str] = Field(default_factory=lambda: list(DEFAULT_SHELL_DENYLIST))
+    max_agent_steps: int = 8
+    auto_compact_threshold: float = 0.80
+    thinking_display: ThinkingDisplay = "collapsed"
+    completion_notifications: bool = False
 
 
 class TlsSettings(BaseModel):

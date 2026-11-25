@@ -1,7 +1,8 @@
-import { Gauge, Palette, Server, Shield, Sliders, Terminal } from "lucide-react";
+import { Bot, Gauge, Palette, Server, Shield, Sliders, Terminal } from "lucide-react";
 
 export type SettingsTabId =
   | "clients"
+  | "agent"
   | "routing"
   | "benchmarks"
   | "nodes"
@@ -10,6 +11,7 @@ export type SettingsTabId =
 
 export const SETTINGS_TABS: Array<{ id: SettingsTabId; label: string; icon: typeof Terminal }> = [
   { id: "clients", label: "Connect Clients", icon: Terminal },
+  { id: "agent", label: "Agent & Chat", icon: Bot },
   { id: "routing", label: "Routing & Guards", icon: Sliders },
   { id: "benchmarks", label: "Benchmarks", icon: Gauge },
   { id: "nodes", label: "Install Nodes", icon: Server },
