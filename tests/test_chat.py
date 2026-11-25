@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from contextlib import asynccontextmanager
@@ -18,7 +19,7 @@ from backend.agent import main as agent_main
 from backend.router.chat_api import ChatStore, build_chat_router
 from backend.router.config import SplitchConfig
 from backend.router.telemetry import ClusterState
-from backend.router.web_search import _is_public_url
+from backend.router.web_search import _is_public_url, execute_web_search
 from backend.shared.models import (
     AliasConfig,
     ChatMessageRecord,
@@ -1401,6 +1402,133 @@ def test_skill_awareness_omits_suggest_skill_when_tools_disabled(tmp_path: Path)
         srv.shutdown()
         srv.server_close()
         th.join(timeout=2.0)
+
+
+def test_open_web_search_includes_github_and_handles_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for var in ("BRAVE_API_KEY", "TAVILY_API_KEY", "SPLITCH_SEARXNG_URL", "SPLITCH_WEB_SEARCH_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SPLITCH_DATA_DIR", str(tmp_path))
+
+    seen_github_requests: list[dict[str, Any]] = []
+    mode = {"github_error": False, "others_error": False}
+
+    async def _fake_get(
+        self: httpx.AsyncClient, url: str | httpx.URL, *args: Any, **kwargs: Any
+    ) -> httpx.Response:
+        u = str(url)
+        req = httpx.Request("GET", u)
+        if "api.github.com/search/repositories" in u:
+            seen_github_requests.append(
+                {
+                    "params": kwargs.get("params"),
+                    "headers": kwargs.get("headers"),
+                }
+            )
+            if mode["github_error"]:
+                raise httpx.ConnectError("github unreachable", request=req)
+            return httpx.Response(
+                200,
+                request=req,
+                json={
+                    "items": [
+                        {
+                            "full_name": "splitch/orchestrator",
+                            "html_url": "https://github.com/splitch/orchestrator",
+                            "stargazers_count": 1234,
+                            "description": "Local AI orchestrator",
+                        },
+                        {
+                            "full_name": "splitch/empty-desc",
+                            "html_url": "https://github.com/splitch/empty-desc",
+                            "stargazers_count": 42,
+                            "description": None,
+                        },
+                        {
+                            "full_name": "",
+                            "html_url": "https://github.com/splitch/missing-name",
+                            "stargazers_count": 9,
+                            "description": "Should be skipped",
+                        },
+                    ]
+                },
+            )
+        if mode["others_error"]:
+            return httpx.Response(503, request=req, text="unavailable")
+        if "api.duckduckgo.com" in u:
+            return httpx.Response(
+                200,
+                request=req,
+                json={
+                    "AbstractText": "DDG summary",
+                    "AbstractURL": "https://example.com/splitch-ddg",
+                    "Heading": "Splitch DDG",
+                    "RelatedTopics": [],
+                },
+            )
+        if "en.wikipedia.org" in u:
+            return httpx.Response(
+                200,
+                request=req,
+                json={"query": {"search": [{"title": "Splitch", "snippet": "Wiki snippet"}]}},
+            )
+        if "hn.algolia.com" in u:
+            return httpx.Response(
+                200,
+                request=req,
+                json={
+                    "hits": [
+                        {
+                            "title": "Show HN: Splitch",
+                            "url": "https://github.com/splitch/orchestrator",
+                            "points": 88,
+                            "created_at": "2026-11-01T00:00:00Z",
+                            "objectID": "1",
+                        },
+                        {
+                            "title": "HN Unique Story",
+                            "url": "https://news.ycombinator.com/item?id=2",
+                            "points": 55,
+                            "created_at": "2026-11-02T00:00:00Z",
+                            "objectID": "2",
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(404, request=req)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _fake_get)
+
+    # 1. Normal open-web search: GitHub formatted, deduplicated across sources, provider header accurate.
+    ok, body = asyncio.run(execute_web_search("splitch orchestrator", max_results=6))
+    assert ok is True
+    assert "(via Open Web (DDG IA + GitHub + Wikipedia + HN))" in body
+    assert "splitch/orchestrator (★1234) — GitHub" in body
+    assert "Local AI orchestrator" in body
+    assert "splitch/empty-desc (★42) — GitHub" in body
+    assert "GitHub repository splitch/empty-desc" in body
+    assert "https://github.com/splitch/missing-name" not in body
+    # Duplicate URL across DDG IA, GitHub, and HN must appear only once.
+    assert body.count("https://github.com/splitch/orchestrator") == 1
+    assert "Splitch — Wikipedia" in body
+    assert "HN Unique Story" in body
+    assert seen_github_requests and seen_github_requests[0]["params"]["q"] == "splitch orchestrator"
+
+    # 2. Other open sources return 503: GitHub results still succeed cleanly.
+    mode["others_error"] = True
+    ok_gh_only, body_gh_only = asyncio.run(execute_web_search("splitch orchestrator"))
+    assert ok_gh_only is True
+    assert "splitch/orchestrator (★1234) — GitHub" in body_gh_only
+
+    # 3. GitHub raises httpx.ConnectError while other sources work: no crash, surviving sources returned.
+    mode["others_error"] = False
+    mode["github_error"] = True
+    ok_no_gh, body_no_gh = asyncio.run(execute_web_search("splitch orchestrator"))
+    assert ok_no_gh is True
+    assert "Splitch — Wikipedia" in body_no_gh
+    assert "HN Unique Story" in body_no_gh
+
 
 
 

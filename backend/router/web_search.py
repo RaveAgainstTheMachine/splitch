@@ -306,10 +306,40 @@ async def _search_open_sources(
         except (httpx.HTTPError, ValueError):
             return []
 
-    ddg_res, wiki_res, hn_res = await asyncio.gather(_ddg_ia(), _wiki(), _hn())
+    async def _github() -> list[dict[str, str]]:
+        try:
+            r = await client.get(
+                "https://api.github.com/search/repositories",
+                params={"q": query, "sort": "stars", "order": "desc", "per_page": 4},
+                headers={"Accept": "application/vnd.github+json"},
+            )
+            if r.status_code != 200:
+                return []
+            out: list[dict[str, str]] = []
+            for repo in r.json().get("items") or []:
+                full_name = str(repo.get("full_name") or "")
+                html_url = str(repo.get("html_url") or "")
+                if not full_name or not html_url:
+                    continue
+                stars = int(repo.get("stargazers_count") or 0)
+                desc = _clean_snippet(str(repo.get("description") or ""))
+                out.append(
+                    {
+                        "title": f"{full_name} (★{stars}) — GitHub",
+                        "url": html_url,
+                        "snippet": desc or f"GitHub repository {full_name}",
+                    }
+                )
+            return out
+        except (httpx.HTTPError, ValueError):
+            return []
+
+    ddg_res, wiki_res, hn_res, gh_res = await asyncio.gather(
+        _ddg_ia(), _wiki(), _hn(), _github()
+    )
     merged: list[dict[str, str]] = []
     seen_urls: set[str] = set()
-    for bucket in (ddg_res, wiki_res, hn_res):
+    for bucket in (ddg_res, gh_res, wiki_res, hn_res):
         for item in bucket:
             u = item.get("url", "")
             if u and u not in seen_urls:
@@ -397,7 +427,7 @@ async def execute_web_search(query: str, max_results: int = 6) -> tuple[bool, st
                 return False, f"Tavily search error: {exc}"
 
         items = await _search_open_sources(client, clean_q, limit)
-        return True, _format_results("Open Web (DDG IA + Wikipedia + HN)", clean_q, items)
+        return True, _format_results("Open Web (DDG IA + GitHub + Wikipedia + HN)", clean_q, items)
 
 
 async def execute_web_fetch(url: str) -> tuple[bool, str]:
