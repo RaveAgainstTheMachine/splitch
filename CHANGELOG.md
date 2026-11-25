@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.18.4] - 2026-11-25
+
+### Reasoning Effort Compatibility & Fallback
+- **Automatic `reasoning_effort` Fallback (`backend/router/chat_api.py`):** Added `_adjust_reasoning_effort_on_error()` + one-shot retry when an upstream `llama-server` Jinja chat template rejects `reasoning_effort` (`high` -> `xhigh`, `xhigh` -> `high`, `none` -> `off`, or strips unsupported values) instead of aborting the stream with HTTP 500.
+- **`xhigh` Reasoning Effort Support (`backend/shared/models.py`, `dashboard/src/components/chat/ChatComposer.tsx`):** Added `xhigh` (`Extra High`) to `ChatSendRequest.reasoning_effort` and the composer Reasoning Effort selector.
+
 ## [0.18.3] - 2026-11-25
 
 ### CI & Cross-Platform Fixes (macOS, Windows & Headless Chrome)

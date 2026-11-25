@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -59,6 +60,29 @@ from backend.shared.models import (
 )
 from backend.shared.secrets import sign_tool_approval_ed25519
 from backend.shared.security import sign_tool_approval
+
+
+def _adjust_reasoning_effort_on_error(
+    req_body: dict[str, Any], err_body: str
+) -> dict[str, Any] | None:
+    """Remap or strip reasoning_effort when an upstream Jinja template rejects it."""
+    if "reasoning_effort" not in req_body:
+        return None
+    lower = err_body.lower()
+    if "unexpected reasoning effort" not in lower and "reasoning_effort" not in lower:
+        return None
+    cur = str(req_body["reasoning_effort"]).lower()
+    supported = lower.split("supported", 1)[-1] if "supported" in lower else lower
+    updated = dict(req_body)
+    if cur == "high" and re.search(r"\bxhigh\b", supported):
+        updated["reasoning_effort"] = "xhigh"
+    elif cur == "xhigh" and re.search(r"\bhigh\b", supported) and not re.search(r"\bxhigh\b", supported):
+        updated["reasoning_effort"] = "high"
+    elif cur == "none" and re.search(r"\boff\b", supported):
+        updated["reasoning_effort"] = "off"
+    else:
+        updated.pop("reasoning_effort", None)
+    return updated
 
 
 def _sse(event: str, data: dict[str, Any]) -> bytes:
@@ -698,77 +722,90 @@ def build_chat_router(
 
                 decision.node.in_flight += 1
                 try:
-                    async with cluster.proxy_client.stream(
-                        "POST",
-                        f"{decision.node.engine_url}/v1/chat/completions",
-                        json=req_body,
-                    ) as upstream:
-                        status_code = upstream.status_code
-                        if status_code >= 400:
-                            err_body = (await upstream.aread()).decode("utf-8", errors="replace")[:400]
-                            yield _sse("error", {"message": f"Upstream HTTP {status_code}: {err_body}"})
-                            return
-
-                        async for line in upstream.aiter_lines():
-                            if not line.startswith("data: "):
-                                continue
-                            raw_data = line[6:].strip()
-                            if not raw_data or raw_data == "[DONE]":
-                                continue
-                            try:
-                                chunk = json.loads(raw_data)
-                            except ValueError:
-                                continue
-
-                            usage = chunk.get("usage")
-                            if isinstance(usage, dict):
-                                if isinstance(usage.get("prompt_tokens"), int):
-                                    prompt_tokens_real = usage["prompt_tokens"]
-                                if isinstance(usage.get("completion_tokens"), int):
-                                    completion_tokens_real = usage["completion_tokens"]
-                                if isinstance(usage.get("total_tokens"), int):
-                                    total_tokens_real = usage["total_tokens"]
-
-                            choices = chunk.get("choices") or []
-                            if not choices:
-                                continue
-                            delta = choices[0].get("delta") or {}
-
-                            rc = delta.get("reasoning_content")
-                            if rc:
-                                if ttft_ms is None:
-                                    ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
-                                approx_tokens += 1
-                                reasoning_buf.append(rc)
-                                yield _sse("reasoning", {"text": rc})
-
-                            txt = delta.get("content")
-                            if txt:
-                                if ttft_ms is None:
-                                    ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
-                                approx_tokens += 1
-                                content_buf.append(txt)
-                                yield _sse("token", {"text": txt})
-
-                            for tc in delta.get("tool_calls") or []:
-                                if not isinstance(tc, dict):
-                                    continue
-                                idx = int(tc.get("index", 0))
-                                slot = tool_calls_acc.setdefault(
-                                    idx,
-                                    {
-                                        "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
-                                        "type": "function",
-                                        "function": {"name": "", "arguments": ""},
-                                    },
+                    for attempt in range(2):
+                        async with cluster.proxy_client.stream(
+                            "POST",
+                            f"{decision.node.engine_url}/v1/chat/completions",
+                            json=req_body,
+                        ) as upstream:
+                            status_code = upstream.status_code
+                            if status_code >= 400:
+                                err_body = (await upstream.aread()).decode(
+                                    "utf-8", errors="replace"
+                                )[:400]
+                                if attempt == 0:
+                                    retry_body = _adjust_reasoning_effort_on_error(
+                                        req_body, err_body
+                                    )
+                                    if retry_body is not None:
+                                        req_body = retry_body
+                                        continue
+                                yield _sse(
+                                    "error", {"message": f"Upstream HTTP {status_code}: {err_body}"}
                                 )
-                                if tc.get("id"):
-                                    slot["id"] = tc["id"]
-                                fn = tc.get("function") or {}
-                                if fn.get("name"):
-                                    slot["function"]["name"] += fn["name"]
-                                if fn.get("arguments"):
-                                    slot["function"]["arguments"] += fn["arguments"]
+                                return
+
+                            async for line in upstream.aiter_lines():
+                                if not line.startswith("data: "):
+                                    continue
+                                raw_data = line[6:].strip()
+                                if not raw_data or raw_data == "[DONE]":
+                                    continue
+                                try:
+                                    chunk = json.loads(raw_data)
+                                except ValueError:
+                                    continue
+
+                                usage = chunk.get("usage")
+                                if isinstance(usage, dict):
+                                    if isinstance(usage.get("prompt_tokens"), int):
+                                        prompt_tokens_real = usage["prompt_tokens"]
+                                    if isinstance(usage.get("completion_tokens"), int):
+                                        completion_tokens_real = usage["completion_tokens"]
+                                    if isinstance(usage.get("total_tokens"), int):
+                                        total_tokens_real = usage["total_tokens"]
+
+                                choices = chunk.get("choices") or []
+                                if not choices:
+                                    continue
+                                delta = choices[0].get("delta") or {}
+
+                                rc = delta.get("reasoning_content")
+                                if rc:
+                                    if ttft_ms is None:
+                                        ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
+                                    approx_tokens += 1
+                                    reasoning_buf.append(rc)
+                                    yield _sse("reasoning", {"text": rc})
+
+                                txt = delta.get("content")
+                                if txt:
+                                    if ttft_ms is None:
+                                        ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
+                                    approx_tokens += 1
+                                    content_buf.append(txt)
+                                    yield _sse("token", {"text": txt})
+
+                                for tc in delta.get("tool_calls") or []:
+                                    if not isinstance(tc, dict):
+                                        continue
+                                    idx = int(tc.get("index", 0))
+                                    slot = tool_calls_acc.setdefault(
+                                        idx,
+                                        {
+                                            "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                                            "type": "function",
+                                            "function": {"name": "", "arguments": ""},
+                                        },
+                                    )
+                                    if tc.get("id"):
+                                        slot["id"] = tc["id"]
+                                    fn = tc.get("function") or {}
+                                    if fn.get("name"):
+                                        slot["function"]["name"] += fn["name"]
+                                    if fn.get("arguments"):
+                                        slot["function"]["arguments"] += fn["arguments"]
+                            break
                 except httpx.HTTPError as exc:
                     yield _sse("error", {"message": f"Stream error: {exc}"})
                     return

@@ -582,7 +582,7 @@ class ChatSendRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=262144)
     seed: int | None = None
     stop: list[str] | None = None
-    reasoning_effort: Literal["off", "low", "medium", "high"] | None = None
+    reasoning_effort: Literal["off", "low", "medium", "high", "xhigh"] | None = None
     enable_thinking: bool | None = None
 
 

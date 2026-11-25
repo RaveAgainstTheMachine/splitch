@@ -22,7 +22,7 @@ export interface SamplingConfig {
   maxTokens: string;
   seed: string;
   stop: string;
-  reasoningEffort: "" | "off" | "low" | "medium" | "high";
+  reasoningEffort: "" | "off" | "low" | "medium" | "high" | "xhigh";
   enableThinking: "" | "on" | "off";
 }
 
@@ -406,6 +406,7 @@ export function ChatComposer({
                         <option value="low">Low</option>
                         <option value="medium">Medium</option>
                         <option value="high">High</option>
+                        <option value="xhigh">Extra High</option>
                       </select>
                     </label>
                     <label className="media-field">

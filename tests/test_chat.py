@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import threading
+from contextlib import asynccontextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -13,7 +19,13 @@ from backend.router.chat_api import ChatStore, build_chat_router
 from backend.router.config import SplitchConfig
 from backend.router.telemetry import ClusterState
 from backend.router.web_search import _is_public_url
-from backend.shared.models import ConversationCreate, ToolExecRequest
+from backend.shared.models import (
+    ConversationCreate,
+    LoadedModel,
+    NodeStatus,
+    NodeTelemetry,
+    ToolExecRequest,
+)
 
 
 def test_chat_store_persistence_and_trim(tmp_path: Path) -> None:
@@ -228,3 +240,224 @@ def test_workspace_tools_opt_in_and_sandbox(tmp_path: Path, monkeypatch: pytest.
             ToolExecRequest(tool="read_file", arguments={"path": "../../etc/passwd"})
         )
     assert exc.value.status_code == 403
+
+
+def _parse_sse_events(raw_text: str) -> list[tuple[str, dict[str, Any]]]:
+    events: list[tuple[str, dict[str, Any]]] = []
+    cur_event = ""
+    for line in raw_text.splitlines():
+        if line.startswith("event: "):
+            cur_event = line[7:].strip()
+        elif line.startswith("data: "):
+            events.append((cur_event, json.loads(line[6:])))
+    return events
+
+
+def _run_chat_send_against_loopback(
+    tmp_path: Path,
+    *,
+    send_payload: dict[str, Any],
+    upstream_outcomes: list[tuple[int, str]],
+) -> tuple[list[dict[str, Any]], list[tuple[str, dict[str, Any]]], int]:
+    """Start a real loopback HTTP server simulating llama-server and send a chat message."""
+    recorded_bodies: list[dict[str, Any]] = []
+    outcomes = list(upstream_outcomes)
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            recorded_bodies.append(json.loads(raw.decode("utf-8")))
+            status, body_text = outcomes.pop(0) if outcomes else (500, "No more outcomes")
+            if status >= 400:
+                payload = body_text.encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+
+            sse_chunk = (
+                f"data: {json.dumps({'choices': [{'delta': {'content': body_text}}]})}\n\n"
+                "data: [DONE]\n\n"
+            ).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(sse_chunk)))
+            self.end_headers()
+            self.wfile.write(sse_chunk)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        host, port = srv.server_address
+        engine_url = f"http://{host}:{port}"
+
+        cluster = ClusterState(SplitchConfig(), data_dir=tmp_path)
+        cluster.nodes["gpu-1"] = NodeStatus(
+            node_id="gpu-1",
+            display_name="GPU 1",
+            role="gpu",
+            agent_url=engine_url,
+            engine_url=engine_url,
+            online=True,
+            telemetry=NodeTelemetry(
+                node_id="gpu-1",
+                role="gpu",
+                platform="linux",
+                timestamp=1.0,
+                online=True,
+                engine="llama-server",
+                engine_healthy=True,
+                context_length=32768,
+                models=[LoadedModel(id="qwen-32b", status="loaded")],
+            ),
+        )
+
+        @asynccontextmanager
+        async def _lifespan(_app: FastAPI):
+            cluster._proxy_client = httpx.AsyncClient()
+            try:
+                yield
+            finally:
+                await cluster._proxy_client.aclose()
+
+        app = FastAPI(lifespan=_lifespan)
+        app.include_router(build_chat_router(cluster, tmp_path, tmp_path / "skills"))
+        with TestClient(app) as tc:
+            conv = tc.post(
+                "/api/chat/conversations",
+                json={
+                    "title": "Reasoning Test",
+                    "model": "qwen-32b",
+                    "tools_enabled": False,
+                    "web_search_enabled": False,
+                },
+            ).json()
+            resp = tc.post(
+                f"/api/chat/conversations/{conv['id']}/send",
+                json=send_payload,
+            )
+            return recorded_bodies, _parse_sse_events(resp.text), resp.status_code
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=2.0)
+
+
+def test_chat_reasoning_effort_xhigh_accepted_and_forwarded(tmp_path: Path) -> None:
+    bodies, events, status_code = _run_chat_send_against_loopback(
+        tmp_path,
+        send_payload={"content": "hi", "reasoning_effort": "xhigh"},
+        upstream_outcomes=[(200, "ok-xhigh")],
+    )
+    assert status_code == 200
+    assert len(bodies) == 1
+    assert bodies[0]["reasoning_effort"] == "xhigh"
+    assert ("token", {"text": "ok-xhigh"}) in events
+    assert any(ev == "done" for ev, _ in events)
+
+
+def test_chat_reasoning_effort_retry_high_to_xhigh(tmp_path: Path) -> None:
+    err = (
+        "Jinja Exception: Unexpected reasoning effort high. "
+        "Supported types are xhigh (default), medium, and low."
+    )
+    bodies, events, status_code = _run_chat_send_against_loopback(
+        tmp_path,
+        send_payload={"content": "solve", "reasoning_effort": "high"},
+        upstream_outcomes=[(500, err), (200, "retried-ok")],
+    )
+    assert status_code == 200
+    assert len(bodies) == 2
+    assert bodies[0]["reasoning_effort"] == "high"
+    assert bodies[1]["reasoning_effort"] == "xhigh"
+    assert ("token", {"text": "retried-ok"}) in events
+    assert not any(ev == "error" for ev, _ in events)
+
+
+def test_chat_reasoning_effort_retry_xhigh_to_high(tmp_path: Path) -> None:
+    err = (
+        "Jinja Exception: Unexpected reasoning effort xhigh. "
+        "Supported types are high, medium, and low."
+    )
+    bodies, events, status_code = _run_chat_send_against_loopback(
+        tmp_path,
+        send_payload={"content": "solve", "reasoning_effort": "xhigh"},
+        upstream_outcomes=[(400, err), (200, "retried-high")],
+    )
+    assert status_code == 200
+    assert len(bodies) == 2
+    assert bodies[0]["reasoning_effort"] == "xhigh"
+    assert bodies[1]["reasoning_effort"] == "high"
+    assert ("token", {"text": "retried-high"}) in events
+    assert not any(ev == "error" for ev, _ in events)
+
+
+def test_chat_reasoning_effort_retry_off_none_to_off(tmp_path: Path) -> None:
+    err = (
+        "Jinja Exception: Unexpected reasoning effort none. "
+        "Supported types are off, low, medium, and high."
+    )
+    bodies, events, status_code = _run_chat_send_against_loopback(
+        tmp_path,
+        send_payload={"content": "solve", "reasoning_effort": "off"},
+        upstream_outcomes=[(400, err), (200, "retried-off")],
+    )
+    assert status_code == 200
+    assert len(bodies) == 2
+    assert bodies[0]["reasoning_effort"] == "none"
+    assert bodies[1]["reasoning_effort"] == "off"
+    assert ("token", {"text": "retried-off"}) in events
+
+
+def test_chat_reasoning_effort_strips_when_no_matching_replacement(tmp_path: Path) -> None:
+    err = (
+        "Jinja Exception: Unexpected reasoning effort medium. "
+        "Supported types are minimal."
+    )
+    bodies, events, status_code = _run_chat_send_against_loopback(
+        tmp_path,
+        send_payload={"content": "solve", "reasoning_effort": "medium"},
+        upstream_outcomes=[(500, err), (200, "stripped-ok")],
+    )
+    assert status_code == 200
+    assert len(bodies) == 2
+    assert bodies[0]["reasoning_effort"] == "medium"
+    assert "reasoning_effort" not in bodies[1]
+    assert ("token", {"text": "stripped-ok"}) in events
+    assert not any(ev == "error" for ev, _ in events)
+
+
+def test_chat_reasoning_effort_no_retry_on_unrelated_error(tmp_path: Path) -> None:
+    bodies, events, status_code = _run_chat_send_against_loopback(
+        tmp_path,
+        send_payload={"content": "solve", "reasoning_effort": "high"},
+        upstream_outcomes=[(500, "Out of memory"), (200, "should-not-reach")],
+    )
+    assert status_code == 200
+    assert len(bodies) == 1
+    assert bodies[0]["reasoning_effort"] == "high"
+    assert ("error", {"message": "Upstream HTTP 500: Out of memory"}) in events
+    assert not any(ev == "token" for ev, _ in events)
+
+
+def test_chat_reasoning_effort_retries_at_most_once(tmp_path: Path) -> None:
+    err = (
+        "Jinja Exception: Unexpected reasoning effort high. "
+        "Supported types are xhigh (default), medium, and low."
+    )
+    bodies, events, status_code = _run_chat_send_against_loopback(
+        tmp_path,
+        send_payload={"content": "solve", "reasoning_effort": "high"},
+        upstream_outcomes=[(500, err), (500, "Still failing"), (200, "never")],
+    )
+    assert status_code == 200
+    assert len(bodies) == 2
+    assert ("error", {"message": "Upstream HTTP 500: Still failing"}) in events
+
