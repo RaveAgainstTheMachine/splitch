@@ -90,6 +90,24 @@ function nodeBudgetGb(node: NodeStatus | undefined, gpuSelection: string = "all"
   return 0;
 }
 
+function nodeStrataBudgetGb(node: NodeStatus | undefined): number {
+  const t = node?.telemetry;
+  if (!t) return 0;
+  const vramGb = t.vram_total_mb / 1024;
+  const ramGb = t.ram_total_mb / 1024;
+  const ssdFreeGb = t.storage_free_gb;
+  const isUnified = node?.role === "unified" || Boolean(t.gpus?.some((g) => g.is_unified));
+  if (isUnified) {
+    const pool = Math.max(vramGb, ramGb) * 0.85;
+    return Number((ssdFreeGb > 0 ? Math.min(pool, Math.max(0, ssdFreeGb - 4)) : pool).toFixed(2));
+  }
+  if (vramGb >= 16 && ramGb >= 28 && ssdFreeGb > 0) {
+    return Number(Math.max(0, ssdFreeGb - 4).toFixed(2));
+  }
+  const memPool = vramGb + ramGb;
+  return Number((ssdFreeGb > 0 ? Math.min(memPool, Math.max(0, ssdFreeGb - 4)) : memPool).toFixed(2));
+}
+
 function fmtRelativeDate(iso: string | null): string {
   if (!iso) return "—";
   const ts = Date.parse(iso);
@@ -255,9 +273,13 @@ export function ModelsTab({
     }
   }, [selectedNodeGpus, targetGpu]);
 
+  const [selectedStrataPath, setSelectedStrataPath] = useState("");
   const selectedBudgetGb = useMemo(
-    () => nodeBudgetGb(selectedNodeObj, targetGpu),
-    [selectedNodeObj, targetGpu]
+    () =>
+      searchFormat === "strata"
+        ? nodeStrataBudgetGb(selectedNodeObj)
+        : nodeBudgetGb(selectedNodeObj, targetGpu),
+    [searchFormat, selectedNodeObj, targetGpu]
   );
 
   const selectedTargetLabel = useMemo(() => {
@@ -313,10 +335,10 @@ export function ModelsTab({
     q: string,
     sortKey: SortKey,
     desc: boolean,
-    fmt: "gguf" | "mlx" = searchFormat === "mlx" ? "mlx" : "gguf"
+    fmt: "gguf" | "mlx" | "strata" = searchFormat
   ) => {
     const trimmed = q.trim();
-    if (trimmed.length < 2) return;
+    if (fmt !== "strata" && trimmed.length < 2) return;
     setSearching(true);
     try {
       const serverSort = sortKey === "gguf_count" ? "downloads" : sortKey;
@@ -435,7 +457,9 @@ export function ModelsTab({
     }
     setLoadingFiles(true);
     try {
-      const res = await fetch(`/api/models/details?repo_id=${encodeURIComponent(repoId)}`);
+      const res = await fetch(
+        `/api/models/details?repo_id=${encodeURIComponent(repoId)}&format=${encodeURIComponent(searchFormat)}`
+      );
       if (!res.ok) throw new Error(`Model details lookup failed: HTTP ${res.status}`);
       const details: HfRepoDetails = await res.json();
       setRepoDetailsMap((prev) => ({ ...prev, [repoId]: details }));
@@ -731,7 +755,8 @@ export function ModelsTab({
                   const nextFmt = e.target.value as "gguf" | "mlx" | "strata";
                   setSearchFormat(nextFmt);
                   setSelectedRepo(null);
-                  if (nextFmt !== "strata" && repos.length > 0) {
+                  setRepoDetailsMap({});
+                  if (nextFmt === "strata" || repos.length > 0 || query.trim().length >= 2) {
                     void executeHfSearch(query, sortBy, sortDesc, nextFmt);
                   }
                 }}
@@ -789,42 +814,47 @@ export function ModelsTab({
               </label>
             )}
 
-            {searchFormat !== "strata" && (
-              <label className="fit-switch" htmlFor={fitSwitchId}>
-                <input
-                  id={fitSwitchId}
-                  type="checkbox"
-                  {...({ switch: "" } as Record<string, string>)}
-                  checked={onlyFitting}
-                  disabled={selectedBudgetGb <= 0}
-                  onChange={(e) => handleOnlyFittingToggle(e.target.checked)}
-                />
-                <span>
-                  Only show models that fit
-                  {selectedBudgetGb > 0 ? ` (≤ ${selectedBudgetGb.toFixed(1)} GB)` : ""}
-                </span>
-              </label>
-            )}
+            <label className="fit-switch" htmlFor={fitSwitchId}>
+              <input
+                id={fitSwitchId}
+                type="checkbox"
+                {...({ switch: "" } as Record<string, string>)}
+                checked={onlyFitting}
+                disabled={selectedBudgetGb <= 0}
+                onChange={(e) => handleOnlyFittingToggle(e.target.checked)}
+              />
+              <span>
+                Only show models that fit
+                {selectedBudgetGb > 0 ? ` (≤ ${selectedBudgetGb.toFixed(1)} GB)` : ""}
+              </span>
+            </label>
           </div>
         </div>
 
-        {searchFormat === "strata" ? (
+        {searchFormat === "strata" && (
           <StrataPane
             nodes={nodes}
             targetNode={targetNode}
+            selectedModelPath={selectedStrataPath}
             onAssignAlias={openAssignAliasesDialog}
             onStatusRefresh={onStatusRefresh}
             onConfirm={onConfirm}
           />
-        ) : (
-          <>
-            <form className="hf-controls" onSubmit={searchHf}>
+        )}
+
+        <form className="hf-controls" onSubmit={searchHf}>
           <input
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search GGUF models…"
-            aria-label="Search Hugging Face GGUF models"
+            placeholder={
+              searchFormat === "strata"
+                ? "Filter Strata models on Hugging Face (optional)…"
+                : searchFormat === "mlx"
+                  ? "Search MLX models on Hugging Face…"
+                  : "Search GGUF models…"
+            }
+            aria-label="Search Hugging Face models"
           />
           <select
             aria-label="Sort repositories by"
@@ -1271,6 +1301,32 @@ export function ModelsTab({
                                                 );
                                               }
                                               if (isOnDisk) {
+                                                const localFile = (
+                                                  inventory.find((inv) => inv.node_id === targetNode)
+                                                    ?.files ?? []
+                                                ).find(
+                                                  (lf) =>
+                                                    (lf.filename.split("/").pop() ?? lf.filename).toLowerCase() ===
+                                                    baseName.toLowerCase()
+                                                );
+                                                if (searchFormat === "strata" && localFile) {
+                                                  const isSelected =
+                                                    selectedStrataPath === localFile.path;
+                                                  return (
+                                                    <button
+                                                      type="button"
+                                                      className={`btn btn--sm ${isSelected ? "btn--accent" : ""}`}
+                                                      onClick={() =>
+                                                        setSelectedStrataPath(
+                                                          isSelected ? "" : localFile.path
+                                                        )
+                                                      }
+                                                    >
+                                                      <Play size={11} aria-hidden="true" />{" "}
+                                                      {isSelected ? "Selected for Strata" : "Use in Strata"}
+                                                    </button>
+                                                  );
+                                                }
                                                 return (
                                                   <span
                                                     className="pill pill--ok"
@@ -1318,8 +1374,6 @@ export function ModelsTab({
               </div>
             )}
           </div>
-        )}
-          </>
         )}
 
       </section>

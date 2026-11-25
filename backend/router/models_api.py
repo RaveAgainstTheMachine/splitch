@@ -229,6 +229,28 @@ def _node_single_gpu_budget_gb(node: NodeStatus) -> float:
     return _node_budget_gb(node)
 
 
+def _node_strata_budget_gb(node: NodeStatus) -> float:
+    """Effective storage/memory budget for Strata sparse-MoE streaming on a node."""
+    t = node.telemetry
+    if not t:
+        return 0.0
+    vram_gb = t.vram_total_mb / 1024.0
+    ram_gb = t.ram_total_mb / 1024.0
+    ssd_free_gb = t.storage_free_gb
+    is_unified = bool(node.role == "unified" or (t.gpus and any(g.is_unified for g in t.gpus)))
+    if is_unified:
+        pool_gb = max(vram_gb, ram_gb) * 0.85
+        if ssd_free_gb > 0:
+            return round(min(pool_gb, max(0.0, ssd_free_gb - 4.0)), 2)
+        return round(pool_gb, 2)
+    if vram_gb >= 16.0 and ram_gb >= 28.0 and ssd_free_gb > 0:
+        return round(max(0.0, ssd_free_gb - 4.0), 2)
+    mem_pool = vram_gb + ram_gb
+    if ssd_free_gb > 0:
+        return round(min(mem_pool, max(0.0, ssd_free_gb - 4.0)), 2)
+    return round(mem_pool, 2)
+
+
 def _extract_repo_details(
     item: dict, node_budgets: dict[str, float] | None = None
 ) -> HfRepoResult:
@@ -266,7 +288,8 @@ def _extract_repo_details(
     gguf_names = [
         str(s.get("rfilename", ""))
         for s in siblings
-        if isinstance(s, dict) and str(s.get("rfilename", "")).lower().endswith(".gguf")
+        if isinstance(s, dict)
+        and str(s.get("rfilename", "")).lower().endswith((".gguf", ".strata"))
     ]
     gguf_count = len(gguf_names)
 
@@ -344,8 +367,14 @@ def _extract_repo_details(
     )
 
 
-def _build_gguf_file_list(entries: list, cluster: ClusterState) -> list[HfGgufFile]:
-    node_budgets = {nid: _node_budget_gb(n) for nid, n in cluster.nodes.items()}
+def _build_gguf_file_list(
+    entries: list, cluster: ClusterState, *, format: str = "gguf"
+) -> list[HfGgufFile]:
+    is_strata = format.strip().lower() == "strata"
+    node_budgets = {
+        nid: (_node_strata_budget_gb(n) if is_strata else _node_budget_gb(n))
+        for nid, n in cluster.nodes.items()
+    }
     single_gpu_budgets = {nid: _node_single_gpu_budget_gb(n) for nid, n in cluster.nodes.items()}
     multi_gpu_ids = {
         nid for nid, n in cluster.nodes.items() if n.telemetry and len(n.telemetry.gpus) > 1
@@ -356,7 +385,7 @@ def _build_gguf_file_list(entries: list, cluster: ClusterState) -> list[HfGgufFi
         if not isinstance(entry, dict) or entry.get("type") != "file":
             continue
         path = str(entry.get("path", ""))
-        if not path.lower().endswith(".gguf"):
+        if not path.lower().endswith((".gguf", ".strata")):
             continue
         size_bytes = int(entry.get("size") or (entry.get("lfs") or {}).get("size") or 0)
         size_gb = round(size_bytes / (1024**3), 2)
@@ -398,26 +427,28 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
 
     @router.get("/models/search", response_model=list[HfRepoResult])
     async def search_hf_models(
-        q: str,
+        q: str = "",
         sort: str = "downloads",
         direction: int = -1,
         limit: int = 18,
         format: str = "gguf",
     ) -> list[HfRepoResult]:
         query = q.strip()
-        if len(query) < 2:
+        fmt = format.strip().lower()
+        if fmt != "strata" and len(query) < 2:
             return []
         hf_sort = sort if sort in VALID_HF_SORTS else "downloads"
         hf_dir = 1 if direction == 1 else -1
-        hf_filter = "mlx" if format.strip().lower() == "mlx" else "gguf"
+        hf_filter = "strata" if fmt == "strata" else ("mlx" if fmt == "mlx" else "gguf")
         params: list[tuple[str, str | int]] = [
-            ("search", query),
             ("filter", hf_filter),
             ("sort", hf_sort),
             ("direction", hf_dir),
             ("limit", min(limit, 30)),
             *[("expand[]", field) for field in HF_SEARCH_EXPAND],
         ]
+        if query:
+            params.insert(0, ("search", query))
         try:
             async with httpx.AsyncClient(timeout=12.0) as client:
                 resp = await client.get("https://huggingface.co/api/models", params=params)
@@ -426,7 +457,10 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         except (httpx.HTTPError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=f"HF search failed: {exc}") from exc
 
-        node_budgets = {nid: _node_budget_gb(n) for nid, n in cluster.nodes.items()}
+        node_budgets = {
+            nid: (_node_strata_budget_gb(n) if fmt == "strata" else _node_budget_gb(n))
+            for nid, n in cluster.nodes.items()
+        }
         results: list[HfRepoResult] = []
         for item in items:
             if not isinstance(item, dict) or not item.get("id"):
@@ -435,7 +469,7 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         return results
 
     @router.get("/models/files", response_model=list[HfGgufFile])
-    async def list_hf_ggufs(repo_id: str) -> list[HfGgufFile]:
+    async def list_hf_ggufs(repo_id: str, format: str = "gguf") -> list[HfGgufFile]:
         if not HF_REPO_ID_RE.fullmatch(repo_id):
             raise HTTPException(status_code=400, detail="Invalid repo_id")
         try:
@@ -448,10 +482,12 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
                 entries = resp.json()
         except (httpx.HTTPError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=f"HF tree fetch failed: {exc}") from exc
-        return _build_gguf_file_list(entries if isinstance(entries, list) else [], cluster)
+        return _build_gguf_file_list(
+            entries if isinstance(entries, list) else [], cluster, format=format
+        )
 
     @router.get("/models/details", response_model=HfRepoDetails)
-    async def get_hf_repo_details(repo_id: str) -> HfRepoDetails:
+    async def get_hf_repo_details(repo_id: str, format: str = "gguf") -> HfRepoDetails:
         if not HF_REPO_ID_RE.fullmatch(repo_id):
             raise HTTPException(status_code=400, detail="Invalid repo_id")
 
@@ -500,7 +536,7 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
             except (httpx.HTTPError, ValueError) as exc:
                 raise HTTPException(status_code=502, detail=f"HF details fetch failed: {exc}") from exc
 
-        files = _build_gguf_file_list(entries, cluster)
+        files = _build_gguf_file_list(entries, cluster, format=format)
         if not files:
             safe_bytes = sum(
                 int((e.get("lfs") or {}).get("size") or e.get("size") or 0)

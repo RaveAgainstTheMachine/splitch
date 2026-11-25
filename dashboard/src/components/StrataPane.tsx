@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   Cpu,
   Download,
@@ -13,111 +13,78 @@ import {
   Zap
 } from "lucide-react";
 import type { ConfirmState } from "./ConfirmDialog";
-import type {
-  NodeStatus,
-  NodeStrataStatus,
-  StrataCatalogEntry,
-  StrataFitTier
-} from "../types";
+import type { NodeStatus, NodeStrataStatus } from "../types";
 
-interface StrataPaneProps {
+interface Props {
   nodes: NodeStatus[];
   targetNode: string;
+  selectedModelPath?: string;
   onAssignAlias: (nodeId: string, modelId: string) => void;
-  onStatusRefresh: () => Promise<void> | void;
-  onConfirm: (next: ConfirmState) => void;
+  onStatusRefresh: () => Promise<void>;
+  onConfirm: (state: ConfirmState) => void;
 }
-
-const TIER_PILL: Record<StrataFitTier, { cls: string; label: string }> = {
-  optimal: { cls: "pill--ok", label: "Optimal Fit" },
-  low_ram: { cls: "pill--accent", label: "Low-RAM Split" },
-  tight: { cls: "pill--warn", label: "Tight Fit" },
-  insufficient: { cls: "", label: "Insufficient" }
-};
 
 export function StrataPane({
   nodes,
   targetNode,
+  selectedModelPath = "",
   onAssignAlias,
   onStatusRefresh,
   onConfirm
-}: StrataPaneProps) {
-  const [catalog, setCatalog] = useState<StrataCatalogEntry[]>([]);
-  const [statuses, setStatuses] = useState<Record<string, NodeStrataStatus>>({});
-  const [selectedFamily, setSelectedFamily] = useState("qwen");
-  const [selectedModel, setSelectedModel] = useState("iq2_xs");
+}: Props) {
+  const [statuses, setStatuses] = useState<NodeStrataStatus[]>([]);
   const [contextLen, setContextLen] = useState("64k");
   const [kvFormat, setKvFormat] = useState<"int8" | "q4_0" | "k8v4" | "fp16">("int8");
   const [visionMode, setVisionMode] = useState<"auto" | "on" | "off" | "gpu" | "cpu">("auto");
   const [draftingMode, setDraftingMode] = useState<"auto" | "mtp" | "dflash2" | "off">("auto");
   const [evictPrimaryVram, setEvictPrimaryVram] = useState(true);
-  const [planPreview, setPlanPreview] = useState<Record<string, unknown> | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [planPreview, setPlanPreview] = useState<Record<string, unknown> | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const pollRef = useRef<number | null>(null);
   const evictSwitchId = useId();
 
-  const fetchAll = async () => {
+  const nodeStatus = statuses.find((s) => s.node_id === targetNode);
+  const nodeObj = nodes.find((n) => n.node_id === targetNode);
+  const isJobRunning = nodeStatus?.job?.status === "running";
+
+  const fetchStatuses = async () => {
     try {
-      const [catRes, stRes] = await Promise.all([
-        fetch("/api/strata/catalog", { cache: "no-store" }),
-        fetch("/api/strata/status", { cache: "no-store" })
-      ]);
-      if (catRes.ok) {
-        setCatalog((await catRes.json()) as StrataCatalogEntry[]);
+      const sRes = await fetch("/api/strata/status");
+      if (sRes.ok) {
+        setStatuses(await sRes.json());
       }
-      if (stRes.ok) {
-        const list = (await stRes.json()) as NodeStrataStatus[];
-        const byId: Record<string, NodeStrataStatus> = {};
-        for (const item of list) byId[item.node_id] = item;
-        setStatuses(byId);
-      }
-    } catch {
-      // ignore transient network errors
+      setErrorMsg(null);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Failed to load Strata status");
     }
   };
 
   useEffect(() => {
-    void fetchAll();
+    void fetchStatuses();
   }, []);
 
-  const nodeStatus = statuses[targetNode];
-  const nodeObj = nodes.find((n) => n.node_id === targetNode);
-  const isJobRunning = nodeStatus?.job?.status === "running";
-
   useEffect(() => {
-    if (pollRef.current !== null) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    if (isJobRunning) {
-      pollRef.current = window.setInterval(() => {
-        void fetchAll();
-      }, 1500);
-    }
-    return () => {
-      if (pollRef.current !== null) {
-        window.clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-  }, [isJobRunning]);
+    if (!isJobRunning) return;
+    const timer = window.setInterval(() => {
+      void fetchStatuses();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [isJobRunning, targetNode]);
 
-  const postNodeAction = async (path: string, body: Record<string, unknown> = {}) => {
-    if (!targetNode) return null;
-    setErrorMsg(null);
+  const postNodeAction = async (path: string, body?: unknown) => {
     setBusyAction(path);
+    setErrorMsg(null);
     try {
       const res = await fetch(`/api/strata/nodes/${encodeURIComponent(targetNode)}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
+        body: body !== undefined ? JSON.stringify(body) : "{}"
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data.detail || `HTTP ${res.status}`);
       }
-      await fetchAll();
+      await fetchStatuses();
       await onStatusRefresh();
       return data;
     } catch (err) {
@@ -128,39 +95,30 @@ export function StrataPane({
     }
   };
 
-  const launchPayload = (overrides: Record<string, unknown> = {}) => ({
-    family: selectedFamily,
-    model: selectedModel,
+  const launchPayload = (modelPathOverride?: string) => ({
+    model_path: modelPathOverride ?? selectedModelPath,
     context: contextLen,
     kv: kvFormat,
     vision: visionMode,
     drafting: draftingMode,
-    evict_primary_vram: evictPrimaryVram,
-    ...overrides
+    evict_primary_vram: evictPrimaryVram
   });
 
   const handlePlan = async () => {
-    const res = await postNodeAction("/plan", launchPayload({ plan_only: true }));
-    if (res && typeof res === "object") {
-      setPlanPreview(res as Record<string, unknown>);
-    }
+    const data = await postNodeAction("/plan", launchPayload());
+    if (data) setPlanPreview(data);
   };
 
   const handleQuickTune = () => {
     onConfirm({
-      title: `Run Quick Tune on ${nodeObj?.display_name ?? targetNode}?`,
+      title: "Run Strata Quick Tune?",
       message:
-        `Quick Tune benchmarks ${selectedFamily}/${selectedModel} (${contextLen}) for ~20 minutes ` +
-        "using exclusive GPU access. Primary engine VRAM and any active Strata server will be stopped first.",
+        "Quick Tune benchmarks expert placement and KV settings on this node (takes ~20 minutes). Continue?",
       confirmLabel: "Start Quick Tune",
       onConfirm: async () => {
-        await postNodeAction("/calibrate", {
-          family: selectedFamily,
-          model: selectedModel,
-          context: contextLen,
-          kv: kvFormat,
-          mode: "quick",
-          evict_primary_vram: evictPrimaryVram
+        await postNodeAction("/launch", {
+          ...launchPayload(),
+          mode: "quick"
         });
       }
     });
@@ -171,7 +129,7 @@ export function StrataPane({
   const ssdGb = nodeObj?.telemetry ? nodeObj.telemetry.storage_free_gb.toFixed(1) : "0";
 
   return (
-    <div className="settings-stack" style={{ marginTop: "0.75rem" }}>
+    <div className="settings-stack" style={{ marginTop: "0.65rem", marginBottom: "0.75rem" }}>
       <div className="panel-head" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
         <div className="row-actions" style={{ flexWrap: "wrap" }}>
           <span className="pill">
@@ -192,7 +150,7 @@ export function StrataPane({
           <button
             type="button"
             className="btn btn--sm"
-            onClick={() => void fetchAll()}
+            onClick={() => void fetchStatuses()}
             disabled={busyAction !== null}
           >
             <RefreshCw size={12} aria-hidden="true" /> Refresh
@@ -232,7 +190,15 @@ export function StrataPane({
               {isJobRunning && <Loader2 size={13} className="spin" aria-hidden="true" />}{" "}
               {nodeStatus.job.action.toUpperCase()}: {nodeStatus.job.step || nodeStatus.job.status}
             </strong>
-            <span className={`pill ${nodeStatus.job.status === "completed" ? "pill--ok" : nodeStatus.job.status === "failed" ? "pill--warn" : "pill--accent"}`}>
+            <span
+              className={`pill ${
+                nodeStatus.job.status === "completed"
+                  ? "pill--ok"
+                  : nodeStatus.job.status === "failed"
+                    ? "pill--warn"
+                    : "pill--accent"
+              }`}
+            >
               {nodeStatus.job.status}
             </span>
           </div>
@@ -253,54 +219,6 @@ export function StrataPane({
           )}
         </div>
       )}
-
-      <div className="hf-results">
-        <div className="hf-list">
-          {catalog.map((entry) => {
-            const { spec, fits } = entry;
-            const fit = fits[targetNode];
-            const pill = fit ? TIER_PILL[fit.tier] : TIER_PILL.insufficient;
-            const active = selectedFamily === spec.family && selectedModel === spec.model;
-            return (
-              <article
-                key={`${spec.family}:${spec.model}`}
-                className={`repo-slice ${active ? "repo-slice--active" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="repo-slice__row strata-pack__row"
-                  onClick={() => {
-                    setSelectedFamily(spec.family);
-                    setSelectedModel(spec.model);
-                    setPlanPreview(null);
-                  }}
-                >
-                  <div className="repo-slice__identity">
-                    <div className="strata-pack__title">
-                      <strong className="repo-slice__name">{spec.label}</strong>
-                      <span className="repo-slice__badges">
-                        <span className={`pill ${pill.cls}`} title={fit?.reason || ""}>
-                          {pill.label}
-                        </span>
-                        {spec.supports_vision && <span className="pill">Vision</span>}
-                        {spec.supports_dflash2 && <span className="pill">DFlash2</span>}
-                      </span>
-                    </div>
-                    <div className="strata-pack__notes muted">
-                      {spec.notes}
-                    </div>
-                  </div>
-                  <div className="strata-pack__stats muted">
-                    <span>{spec.download_gb} GB dl</span>
-                    <span>{spec.experts_ram_gb} GB RAM</span>
-                    <span>{spec.ssd_shard_gb > 0 ? `+${spec.ssd_shard_gb} GB SSD` : ""}</span>
-                  </div>
-                </button>
-              </article>
-            );
-          })}
-        </div>
-      </div>
 
       <div className="two-col" style={{ gap: "0.6rem" }}>
         <label className="media-field">
@@ -358,45 +276,47 @@ export function StrataPane({
         </label>
       </div>
 
-      <div className="panel-head" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
-        <label className="fit-switch" htmlFor={evictSwitchId}>
-          <input
-            id={evictSwitchId}
-            type="checkbox"
-            {...({ switch: "" } as Record<string, string>)}
-            checked={evictPrimaryVram}
-            onChange={(e) => setEvictPrimaryVram(e.target.checked)}
-          />
-          <span>Unload primary engine models first (free VRAM)</span>
-        </label>
+      {selectedModelPath && (
+        <div className="panel-head" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
+          <label className="fit-switch" htmlFor={evictSwitchId}>
+            <input
+              id={evictSwitchId}
+              type="checkbox"
+              {...({ switch: "" } as Record<string, string>)}
+              checked={evictPrimaryVram}
+              onChange={(e) => setEvictPrimaryVram(e.target.checked)}
+            />
+            <span>Unload primary engine models first (free VRAM)</span>
+          </label>
 
-        <div className="row-actions" style={{ flexWrap: "wrap" }}>
-          <button
-            type="button"
-            className="btn btn--sm"
-            disabled={!nodeStatus?.installed || isJobRunning || busyAction !== null}
-            onClick={() => void handlePlan()}
-          >
-            <Terminal size={12} aria-hidden="true" /> Preview Plan
-          </button>
-          <button
-            type="button"
-            className="btn btn--sm"
-            disabled={!nodeStatus?.installed || isJobRunning || busyAction !== null}
-            onClick={handleQuickTune}
-          >
-            <Gauge size={12} aria-hidden="true" /> Quick Tune (~20m)
-          </button>
-          <button
-            type="button"
-            className="btn btn--sm btn--accent"
-            disabled={!nodeStatus?.installed || isJobRunning || busyAction !== null}
-            onClick={() => void postNodeAction("/launch", launchPayload())}
-          >
-            <Play size={12} aria-hidden="true" /> Launch / Switch Model
-          </button>
+          <div className="row-actions" style={{ flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn btn--sm"
+              disabled={!nodeStatus?.installed || isJobRunning || busyAction !== null}
+              onClick={() => void handlePlan()}
+            >
+              <Terminal size={12} aria-hidden="true" /> Preview Plan
+            </button>
+            <button
+              type="button"
+              className="btn btn--sm"
+              disabled={!nodeStatus?.installed || isJobRunning || busyAction !== null}
+              onClick={handleQuickTune}
+            >
+              <Gauge size={12} aria-hidden="true" /> Quick Tune (~20m)
+            </button>
+            <button
+              type="button"
+              className="btn btn--sm btn--accent"
+              disabled={!nodeStatus?.installed || isJobRunning || busyAction !== null}
+              onClick={() => void postNodeAction("/launch", launchPayload())}
+            >
+              <Play size={12} aria-hidden="true" /> Launch Selected
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {planPreview && (
         <pre

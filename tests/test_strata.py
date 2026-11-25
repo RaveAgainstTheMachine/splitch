@@ -389,3 +389,292 @@ def test_router_sidecar_policy_and_models_list() -> None:
         assert "pc/Qwen3.8-Flash-Next-IQ2_XS" in ids
     finally:
         router_app_mod.cluster.nodes = old_nodes
+
+
+def _make_node(
+    node_id: str,
+    *,
+    role: str = "gpu",
+    vram_gb: float = 24.0,
+    ram_gb: float = 64.0,
+    ssd_free_gb: float = 300.0,
+    is_unified: bool = False,
+    with_telemetry: bool = True,
+) -> NodeStatus:
+    telemetry = (
+        NodeTelemetry(
+            node_id=node_id,
+            role=role,
+            platform="darwin" if is_unified else "linux",
+            timestamp=1.0,
+            vram_total_mb=vram_gb * 1024.0,
+            ram_total_mb=ram_gb * 1024.0,
+            storage_free_gb=ssd_free_gb,
+            gpus=[
+                GpuDevice(
+                    index=0,
+                    vendor="apple" if is_unified else "nvidia",
+                    name="Unified" if is_unified else "RTX",
+                    vram_total_mb=vram_gb * 1024.0,
+                    is_unified=is_unified,
+                )
+            ],
+        )
+        if with_telemetry
+        else None
+    )
+    return NodeStatus(
+        node_id=node_id,
+        display_name=node_id,
+        role=role,  # type: ignore[arg-type]
+        agent_url="http://127.0.0.1:8090",
+        engine_url="http://127.0.0.1:8081",
+        online=True,
+        telemetry=telemetry,
+    )
+
+
+def test_node_strata_budget_gb_all_tiers() -> None:
+    from backend.router.models_api import _node_strata_budget_gb
+
+    # Missing telemetry -> 0.0
+    assert _node_strata_budget_gb(_make_node("none", with_telemetry=False)) == 0.0
+
+    # Unified node: min(max(vram, ram) * 0.85, ssd_free - 4), or pool if ssd_free == 0
+    assert _node_strata_budget_gb(
+        _make_node("u1", role="unified", vram_gb=0.0, ram_gb=64.0, ssd_free_gb=500.0, is_unified=True)
+    ) == 54.4
+    assert _node_strata_budget_gb(
+        _make_node("u2", role="unified", vram_gb=128.0, ram_gb=64.0, ssd_free_gb=50.0, is_unified=True)
+    ) == 46.0
+    assert _node_strata_budget_gb(
+        _make_node("u3", role="unified", vram_gb=0.0, ram_gb=64.0, ssd_free_gb=0.0, is_unified=True)
+    ) == 54.4
+    assert _node_strata_budget_gb(
+        _make_node("u4", role="unified", vram_gb=0.0, ram_gb=64.0, ssd_free_gb=2.0, is_unified=True)
+    ) == 0.0
+
+    # Discrete GPU with vram >= 16 and ram >= 28 and ssd_free > 0 -> ssd_free - 4.0
+    assert _node_strata_budget_gb(
+        _make_node("d1", vram_gb=16.0, ram_gb=28.0, ssd_free_gb=200.0)
+    ) == 196.0
+    assert _node_strata_budget_gb(
+        _make_node("d2", vram_gb=24.0, ram_gb=64.0, ssd_free_gb=3.0)
+    ) == 0.0
+
+    # Smaller discrete GPU or ssd_free == 0 -> min(vram + ram, ssd_free - 4)
+    assert _node_strata_budget_gb(
+        _make_node("s1", vram_gb=12.0, ram_gb=32.0, ssd_free_gb=500.0)
+    ) == 44.0
+    assert _node_strata_budget_gb(
+        _make_node("s2", vram_gb=12.0, ram_gb=32.0, ssd_free_gb=30.0)
+    ) == 26.0
+    assert _node_strata_budget_gb(
+        _make_node("s3", vram_gb=24.0, ram_gb=16.0, ssd_free_gb=500.0)
+    ) == 40.0
+    assert _node_strata_budget_gb(
+        _make_node("s4", vram_gb=24.0, ram_gb=64.0, ssd_free_gb=0.0)
+    ) == 88.0
+
+
+def test_router_models_search_strata_and_gguf(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.router import models_api as models_api_mod
+
+    monkeypatch.setattr(router_app_mod, "API_KEY", "")
+    monkeypatch.setattr(router_app_mod, "API_KEY_HASH", "")
+
+    captured_requests: list[httpx.Request] = []
+
+    def _hf_handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        if request.url.path == "/api/models":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": "strata-org/Hy4-Flash-100B",
+                        "downloads": 5000,
+                        "likes": 120,
+                        "siblings": [
+                            {"rfilename": "Hy4-Flash-SQ64.strata"},
+                            {"rfilename": "README.md"},
+                        ],
+                    }
+                ],
+            )
+        return httpx.Response(404)
+
+    class _MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, **kwargs) -> None:
+            kwargs["transport"] = httpx.MockTransport(_hf_handler)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(models_api_mod.httpx, "AsyncClient", _MockAsyncClient)
+
+    old_nodes = dict(router_app_mod.cluster.nodes)
+    try:
+        router_app_mod.cluster.nodes = {
+            "pc": _make_node("pc", vram_gb=24.0, ram_gb=64.0, ssd_free_gb=300.0),
+        }
+        tc = TestClient(router_app_mod.app)
+
+        # format=gguf with len(q) < 2 returns [] without hitting HF
+        r_empty_gguf = tc.get("/api/models/search?format=gguf&q=")
+        assert r_empty_gguf.status_code == 200
+        assert r_empty_gguf.json() == []
+        r_short_gguf = tc.get("/api/models/search?format=gguf&q=a")
+        assert r_short_gguf.status_code == 200
+        assert r_short_gguf.json() == []
+        assert captured_requests == []
+
+        # format=strata with empty q="" passes filter=strata without search param
+        r_empty_strata = tc.get("/api/models/search?format=strata&q=")
+        assert r_empty_strata.status_code == 200
+        assert len(captured_requests) == 1
+        params_empty = captured_requests[0].url.params
+        assert params_empty.get("filter") == "strata"
+        assert "search" not in params_empty
+        body_empty = r_empty_strata.json()
+        assert len(body_empty) == 1
+        assert body_empty[0]["gguf_count"] == 1
+        assert "pc" in body_empty[0]["fits_nodes"]
+
+        # format=strata with non-empty q="qwen" passes both search=qwen and filter=strata
+        r_q_strata = tc.get("/api/models/search?format=strata&q=qwen")
+        assert r_q_strata.status_code == 200
+        assert len(captured_requests) == 2
+        params_q = captured_requests[1].url.params
+        assert params_q.get("filter") == "strata"
+        assert params_q.get("search") == "qwen"
+
+        # Same 100B repo under format=gguf (est_min_gb=58) does NOT fit 24GB VRAM node
+        r_q_gguf = tc.get("/api/models/search?format=gguf&q=qwen")
+        assert r_q_gguf.status_code == 200
+        assert r_q_gguf.json()[0]["fits_nodes"] == []
+    finally:
+        router_app_mod.cluster.nodes = old_nodes
+
+
+def test_extract_repo_details_and_files_strata(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.router import models_api as models_api_mod
+    from backend.router.models_api import _build_gguf_file_list, _extract_repo_details
+    from backend.router.telemetry import ClusterState
+
+    monkeypatch.setattr(router_app_mod, "API_KEY", "")
+    monkeypatch.setattr(router_app_mod, "API_KEY_HASH", "")
+
+    details = _extract_repo_details(
+        {
+            "id": "strata-org/Demo-30B",
+            "siblings": [
+                {"rfilename": "demo-sq64.strata"},
+                {"rfilename": "demo-sq96.STRATA"},
+                {"rfilename": "demo-Q4_K_M.gguf"},
+                {"rfilename": "config.json"},
+                {"rfilename": "README.md"},
+            ],
+        }
+    )
+    assert details.gguf_count == 3
+
+    gib = 1024**3
+    tree_entries = [
+        {"type": "file", "path": "Hy4-Flash-SQ64.strata", "size": 100 * gib},
+        {"type": "file", "path": "Hy4-Flash-Q4_K_M.gguf", "size": 10 * gib},
+        {"type": "file", "path": "model.safetensors", "size": 50 * gib},
+        {"type": "file", "path": "config.json", "size": 1024},
+    ]
+
+    cs = ClusterState(router_app_mod.cluster.config)
+    cs.nodes = {"pc": _make_node("pc", vram_gb=24.0, ram_gb=64.0, ssd_free_gb=300.0)}
+
+    strata_files = _build_gguf_file_list(tree_entries, cs, format="strata")
+    assert [f.filename for f in strata_files] == [
+        "Hy4-Flash-Q4_K_M.gguf",
+        "Hy4-Flash-SQ64.strata",
+    ]
+    by_name_strata = {f.filename: f for f in strata_files}
+    assert by_name_strata["Hy4-Flash-SQ64.strata"].fits_nodes == ["pc"]
+
+    gguf_files = _build_gguf_file_list(tree_entries, cs, format="gguf")
+    by_name_gguf = {f.filename: f for f in gguf_files}
+    assert by_name_gguf["Hy4-Flash-SQ64.strata"].fits_nodes == []
+    assert by_name_gguf["Hy4-Flash-Q4_K_M.gguf"].fits_nodes == ["pc"]
+
+    # Endpoint test: GET /api/models/files?repo_id=...&format=strata
+    def _tree_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/models/strata-org/Hy4-Flash/tree/main":
+            return httpx.Response(200, json=tree_entries)
+        return httpx.Response(404)
+
+    class _MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, **kwargs) -> None:
+            kwargs["transport"] = httpx.MockTransport(_tree_handler)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(models_api_mod.httpx, "AsyncClient", _MockAsyncClient)
+    old_nodes = dict(router_app_mod.cluster.nodes)
+    try:
+        router_app_mod.cluster.nodes = cs.nodes
+        tc = TestClient(router_app_mod.app)
+        resp = tc.get("/api/models/files?repo_id=strata-org/Hy4-Flash&format=strata")
+        assert resp.status_code == 200
+        items = resp.json()
+        assert [i["filename"] for i in items] == [
+            "Hy4-Flash-Q4_K_M.gguf",
+            "Hy4-Flash-SQ64.strata",
+        ]
+        assert items[1]["fits_nodes"] == ["pc"]
+    finally:
+        router_app_mod.cluster.nodes = old_nodes
+
+
+def test_agent_models_pull_strata_accept_and_reject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_mod, "AGENT_TOKEN", "")
+    monkeypatch.setattr(agent_mod, "ROUTER_PUBLIC_KEY", None)
+    monkeypatch.setattr(agent_mod, "STORAGE_PATH", str(tmp_path))
+
+    def _dl_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"strata-payload", headers={"content-length": "14"})
+
+    class _MockAsyncClient(httpx.AsyncClient):
+        def __init__(self, **kwargs) -> None:
+            kwargs["transport"] = httpx.MockTransport(_dl_handler)
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(agent_mod.httpx, "AsyncClient", _MockAsyncClient)
+    tc = TestClient(agent_mod.app)
+
+    ok_resp = tc.post(
+        "/files/models/pull",
+        json={"repo_id": "strata-org/Hy4-Flash", "filename": "Hy4-Flash-SQ64.strata"},
+    )
+    assert ok_resp.status_code == 200
+    assert ok_resp.json()["filename"] == "Hy4-Flash-SQ64.strata"
+    assert ok_resp.json()["status"] == "downloading"
+
+    ok_upper = tc.post(
+        "/files/models/pull",
+        json={"repo_id": "strata-org/Hy4-Flash", "filename": "Hy4-Flash-SQ64.STRATA"},
+    )
+    assert ok_upper.status_code == 200
+
+    bad_ext = tc.post(
+        "/files/models/pull",
+        json={"repo_id": "strata-org/Hy4-Flash", "filename": "weights.bin"},
+    )
+    assert bad_ext.status_code == 400
+
+    bad_traversal = tc.post(
+        "/files/models/pull",
+        json={"repo_id": "strata-org/Hy4-Flash", "filename": "../Hy4-Flash-SQ64.strata"},
+    )
+    assert bad_traversal.status_code == 400
+
+    bad_mid_traversal = tc.post(
+        "/files/models/pull",
+        json={"repo_id": "strata-org/Hy4-Flash", "filename": "sub/../Hy4-Flash-SQ64.strata"},
+    )
+    assert bad_mid_traversal.status_code == 400

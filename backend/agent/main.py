@@ -445,46 +445,48 @@ def _scan_local_ggufs() -> list[LocalModelFile]:
     seen_paths: set[str] = set()
     primary_root = Path(STORAGE_PATH)
     if primary_root.exists():
-        for entry in sorted(primary_root.glob("*.gguf")):
-            if not entry.is_file():
-                continue
-            try:
-                size_gb = round(entry.stat().st_size / (1024**3), 2)
-            except OSError:
-                continue
-            resolved = str(entry.resolve())
-            seen_paths.add(resolved)
-            files.append(
-                LocalModelFile(
-                    filename=entry.name, path=str(entry), size_gb=size_gb, managed=True
+        for pat in ("*.gguf", "*.strata"):
+            for entry in sorted(primary_root.glob(pat)):
+                if not entry.is_file():
+                    continue
+                try:
+                    size_gb = round(entry.stat().st_size / (1024**3), 2)
+                except OSError:
+                    continue
+                resolved = str(entry.resolve())
+                seen_paths.add(resolved)
+                files.append(
+                    LocalModelFile(
+                        filename=entry.name, path=str(entry), size_gb=size_gb, managed=True
+                    )
                 )
-            )
 
     for extra in EXTRA_MODEL_DIRS:
         root = Path(extra)
         if not root.exists():
             continue
-        for entry in sorted(root.rglob("*.gguf")):
-            try:
-                if not entry.is_file():
-                    continue
-                resolved = str(entry.resolve())
-                if resolved in seen_paths:
-                    continue
-                size_bytes = entry.stat().st_size
-                if size_bytes < 50 * 1024 * 1024:
-                    continue
-                seen_paths.add(resolved)
-                files.append(
-                    LocalModelFile(
-                        filename=entry.name,
-                        path=str(entry),
-                        size_gb=round(size_bytes / (1024**3), 2),
-                        managed=False,
+        for pat in ("*.gguf", "*.strata"):
+            for entry in sorted(root.rglob(pat)):
+                try:
+                    if not entry.is_file():
+                        continue
+                    resolved = str(entry.resolve())
+                    if resolved in seen_paths:
+                        continue
+                    size_bytes = entry.stat().st_size
+                    if size_bytes < 50 * 1024 * 1024:
+                        continue
+                    seen_paths.add(resolved)
+                    files.append(
+                        LocalModelFile(
+                            filename=entry.name,
+                            path=str(entry),
+                            size_gb=round(size_bytes / (1024**3), 2),
+                            managed=False,
+                        )
                     )
-                )
-            except OSError:
-                continue
+                except OSError:
+                    continue
     return files
 
 
@@ -970,9 +972,9 @@ async def pull_model_file(req: PullModelRequest) -> DownloadJob:
         asyncio.create_task(_run_hf_mlx_download(job))
         return job
 
-    if ".." in req.filename or not req.filename.lower().endswith((".gguf", ".safetensors")):
+    if ".." in req.filename or not req.filename.lower().endswith((".gguf", ".safetensors", ".strata")):
         raise HTTPException(
-            status_code=400, detail="Only safe .gguf or .safetensors filenames are allowed"
+            status_code=400, detail="Only safe .gguf, .safetensors, or .strata filenames are allowed"
         )
     mounted, _, _ = await asyncio.to_thread(_collect_storage, STORAGE_PATH)
     if not mounted:
