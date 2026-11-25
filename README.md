@@ -42,25 +42,25 @@
 ## Screenshots
 
 <p align="center">
-  <a href="docs/assets/screenshots/chat-preview.png">
-    <img src="docs/assets/screenshots/chat-preview.png" alt="Splitch Agent Chat IDE with Swarm Inspector" width="100%" />
+  <a href="docs/assets/screenshots/chat-preview.webp">
+    <img src="docs/assets/screenshots/chat-preview.webp" alt="Splitch Agent Chat IDE with Swarm Inspector" width="100%" />
   </a>
   <br />
-  <strong>Agent Chat IDE &amp; Swarm Inspector</strong> — <sub>Sandboxed workspace tools, parallel multi-node agent swarms, scoped MCP/Skills &amp; live inspector · <em>click any image for full resolution</em></sub>
+  <strong>Agent Chat IDE &amp; Swarm Inspector</strong> — <sub>Sandboxed workspace tools, parallel multi-node agent swarms, scoped MCP/Skills &amp; live inspector · <em>cycles Midnight, OLED Black, Nordic Slate, Warm Graphite &amp; Light themes</em></sub>
 </p>
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/overview.png">
-        <img src="docs/assets/screenshots/overview.png" alt="Cluster Overview" width="100%" />
+      <a href="docs/assets/screenshots/overview.webp">
+        <img src="docs/assets/screenshots/overview.webp" alt="Cluster Overview" width="100%" />
       </a>
       <br />
       <strong>Cluster Overview</strong> — <sub>Multi-GPU &amp; Apple Silicon MLX telemetry, Gaming Auto-Yield &amp; live traces</sub>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/media-studio.png">
-        <img src="docs/assets/screenshots/media-studio.png" alt="Media Studio" width="100%" />
+      <a href="docs/assets/screenshots/media-studio.webp">
+        <img src="docs/assets/screenshots/media-studio.webp" alt="Media Studio" width="100%" />
       </a>
       <br />
       <strong>Media Studio</strong> — <sub>Managed <code>sd-server</code> &amp; ComfyUI with auto-LLM VRAM eviction</sub>
@@ -68,15 +68,15 @@
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/models.png">
-        <img src="docs/assets/screenshots/models.png" alt="Models & Aliases" width="100%" />
+      <a href="docs/assets/screenshots/models.webp">
+        <img src="docs/assets/screenshots/models.webp" alt="Models & Aliases" width="100%" />
       </a>
       <br />
       <strong>Models &amp; Aliases</strong> — <sub>Hugging Face GGUF &amp; MLX pulls, hardware-fit checks &amp; aliases</sub>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/settings.png">
-        <img src="docs/assets/screenshots/settings.png" alt="Settings & Client Setup" width="100%" />
+      <a href="docs/assets/screenshots/settings.webp">
+        <img src="docs/assets/screenshots/settings.webp" alt="Settings & Client Setup" width="100%" />
       </a>
       <br />
       <strong>Settings &amp; Client Setup</strong> — <sub>One-click configs for Hermes, Claude Code, Codex CLI, OpenCode &amp; live protocol probes</sub>
@@ -85,76 +85,57 @@
 </table>
 
 <details>
-<summary><strong>More Screenshots Gallery</strong> — MCP Servers, Skills Library &amp; Appearance Settings</summary>
+<summary><strong>More Screenshots Gallery (6 Views)</strong> — Workspace &amp; Git, MCP Servers, Skills Library, Agent &amp; Routing Settings, Appearance</summary>
 
 <br />
 
 <table>
   <tr>
-    <td width="33.3%" valign="top">
-      <a href="docs/assets/screenshots/mcp-servers.png">
-        <img src="docs/assets/screenshots/mcp-servers.png" alt="MCP Servers" width="100%" />
+    <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/workspace-git.webp">
+        <img src="docs/assets/screenshots/workspace-git.webp" alt="Workspace File Tree & Git Review" width="100%" />
       </a>
       <br />
-      <strong>MCP Servers</strong> — <sub>Local-first MCP servers, encrypted env vault &amp; node sync</sub>
+      <strong>Workspace &amp; Git Review</strong> — <sub>IDE file tree, live diff staging &amp; AI commit generator</sub>
     </td>
-    <td width="33.3%" valign="top">
-      <a href="docs/assets/screenshots/skills.png">
-        <img src="docs/assets/screenshots/skills.png" alt="Skills Library" width="100%" />
+    <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/mcp-servers.webp">
+        <img src="docs/assets/screenshots/mcp-servers.webp" alt="MCP Servers" width="100%" />
+      </a>
+      <br />
+      <strong>MCP Servers</strong> — <sub>Local-first MCP registry, encrypted env vault &amp; node sync</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/skills.webp">
+        <img src="docs/assets/screenshots/skills.webp" alt="Skills Library" width="100%" />
       </a>
       <br />
       <strong>Skills Library</strong> — <sub><code>skills.sh</code> discovery, GitHub <code>SKILL.md</code> import &amp; per-chat toggles</sub>
     </td>
-    <td width="33.3%" valign="top">
-      <a href="docs/assets/screenshots/appearance.png">
-        <img src="docs/assets/screenshots/appearance.png" alt="Appearance & Theme Settings" width="100%" />
-      </a>
-      <br />
-      <strong>Appearance &amp; Theme</strong> — <sub>System/Dark/Light scheme, 4 surface presets &amp; live accent sync</sub>
-    </td>
-  </tr>
-</table>
-
-</details>
-
-<details>
-<summary><strong>Themes &amp; Default Accent Colors</strong> — Midnight, OLED Black, Nordic Slate, Warm Graphite &amp; Light Mode</summary>
-
-<br />
-
-Built-in surfaces (`Midnight`, `OLED Black`, `Nordic Slate`, `Warm Graphite`) pair with `System` / `Dark` / `Light` schemes and 6 curated default accents (**Violet** `#a78bfa`, **Cyan** `#22d3ee`, **Emerald** `#34d399`, **Amber** `#f59e0b`, **Rose** `#fb7185`, **Cobalt** `#60a5fa`) plus custom hex colors — automatically syncing the browser favicon, PWA titlebar, and tray icon.
-
-<table>
-  <tr>
     <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/theme-light-cobalt.png">
-        <img src="docs/assets/screenshots/theme-light-cobalt.png" alt="Light Mode with Cobalt Accent" width="100%" />
+      <a href="docs/assets/screenshots/settings-agent.webp">
+        <img src="docs/assets/screenshots/settings-agent.webp" alt="Agent & Chat Settings" width="100%" />
       </a>
       <br />
-      <strong>Light Mode + Cobalt</strong> (<code>#60a5fa</code>)
-    </td>
-    <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/theme-oled-emerald.png">
-        <img src="docs/assets/screenshots/theme-oled-emerald.png" alt="OLED Black with Emerald Accent" width="100%" />
-      </a>
-      <br />
-      <strong>OLED Black + Emerald</strong> (<code>#34d399</code>)
+      <strong>Agent &amp; Chat Settings</strong> — <sub>Web search (Open Web / Tavily / Brave), context compaction &amp; max-round guardrails</sub>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/theme-slate-amber.png">
-        <img src="docs/assets/screenshots/theme-slate-amber.png" alt="Nordic Slate with Amber Accent" width="100%" />
+      <a href="docs/assets/screenshots/settings-routing.webp">
+        <img src="docs/assets/screenshots/settings-routing.webp" alt="Routing & GPU Yield Guards" width="100%" />
       </a>
       <br />
-      <strong>Nordic Slate + Amber</strong> (<code>#f59e0b</code>)
+      <strong>Routing &amp; GPU Yield Guards</strong> — <sub>Auto-heavy thresholds, Gaming-Mode VRAM limits &amp; fallback rules</sub>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/theme-charcoal-rose.png">
-        <img src="docs/assets/screenshots/theme-charcoal-rose.png" alt="Warm Graphite with Rose Accent" width="100%" />
+      <a href="docs/assets/screenshots/appearance.webp">
+        <img src="docs/assets/screenshots/appearance.webp" alt="Appearance & Theme Settings" width="100%" />
       </a>
       <br />
-      <strong>Warm Graphite + Rose</strong> (<code>#fb7185</code>)
+      <strong>Appearance &amp; Theme</strong> — <sub>System/Dark/Light, 4 surface presets &amp; live favicon/tray accent sync</sub>
     </td>
   </tr>
 </table>
