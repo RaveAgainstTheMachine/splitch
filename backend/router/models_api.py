@@ -625,7 +625,9 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
 
         async def _fetch(agent_url: str) -> None:
             try:
-                async with httpx.AsyncClient(timeout=4.0, headers=headers) as client:
+                async with httpx.AsyncClient(
+                    timeout=4.0, headers=headers, verify=cluster.httpx_verify
+                ) as client:
                     r = await client.get(f"{agent_url}/files/models")
                     if r.status_code == 200:
                         inventories.append(NodeModelInventory.model_validate(r.json()))
@@ -651,7 +653,9 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         if hf_tok.strip():
             headers["x-splitch-hf-token"] = hf_tok.strip()
         try:
-            async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
+            async with httpx.AsyncClient(
+                timeout=15.0, headers=headers, verify=cluster.httpx_verify
+            ) as client:
                 r = await client.post(
                     f"{node.agent_url}/files/models/pull",
                     json=req.model_dump(),
@@ -671,7 +675,9 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
             raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
         try:
             async with httpx.AsyncClient(
-                timeout=10.0, headers=cluster.agent_headers("DELETE", f"/files/models/{filename}")
+                timeout=10.0,
+                headers=cluster.agent_headers("DELETE", f"/files/models/{filename}"),
+                verify=cluster.httpx_verify,
             ) as client:
                 r = await client.delete(f"{node.agent_url}/files/models/{filename}")
                 if r.status_code >= 400:

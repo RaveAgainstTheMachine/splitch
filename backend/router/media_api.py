@@ -832,7 +832,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         node = _require_online_node(node_id)
         try:
             async with httpx.AsyncClient(
-                timeout=8.0, headers=cluster.agent_headers("GET", "/media/engine/status")
+                timeout=8.0,
+                headers=cluster.agent_headers("GET", "/media/engine/status"),
+                verify=cluster.httpx_verify,
             ) as client:
                 r = await client.get(f"{node.agent_url}/media/engine/status")
                 if r.status_code >= 400:
@@ -850,7 +852,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         node = _require_online_node(node_id)
         try:
             async with httpx.AsyncClient(
-                timeout=20.0, headers=cluster.agent_headers("POST", "/media/engine/install")
+                timeout=20.0,
+                headers=cluster.agent_headers("POST", "/media/engine/install"),
+                verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(
                     f"{node.agent_url}/media/engine/install", json=req.model_dump()
@@ -870,7 +874,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         node = _require_online_node(node_id)
         try:
             async with httpx.AsyncClient(
-                timeout=30.0, headers=cluster.agent_headers("POST", "/media/engine/start")
+                timeout=30.0,
+                headers=cluster.agent_headers("POST", "/media/engine/start"),
+                verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(
                     f"{node.agent_url}/media/engine/start", json=req.model_dump()
@@ -892,7 +898,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         node = _require_online_node(node_id)
         try:
             async with httpx.AsyncClient(
-                timeout=15.0, headers=cluster.agent_headers("POST", "/media/engine/stop")
+                timeout=15.0,
+                headers=cluster.agent_headers("POST", "/media/engine/stop"),
+                verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(f"{node.agent_url}/media/engine/stop")
                 if r.status_code >= 400:
@@ -911,7 +919,9 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         payload["node_id"] = node_id
         try:
             async with httpx.AsyncClient(
-                timeout=15.0, headers=cluster.agent_headers("POST", "/files/models/pull")
+                timeout=15.0,
+                headers=cluster.agent_headers("POST", "/files/models/pull"),
+                verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(f"{node.agent_url}/files/models/pull", json=payload)
                 if r.status_code >= 400:

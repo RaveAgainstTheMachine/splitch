@@ -253,15 +253,19 @@ class ClusterState:
         return True
 
     @property
+    def httpx_verify(self) -> bool | str:
+        ca_bundle = (
+            os.getenv("SPLITCH_CA_BUNDLE", "").strip() or self.config.tls.ca_bundle.strip()
+        )
+        return ca_bundle if ca_bundle else True
+
+    @property
     def proxy_client(self) -> httpx.AsyncClient:
         assert self._proxy_client is not None
         return self._proxy_client
 
     async def start(self) -> None:
-        ca_bundle = (
-            os.getenv("SPLITCH_CA_BUNDLE", "").strip() or self.config.tls.ca_bundle.strip()
-        )
-        verify: bool | str = ca_bundle if ca_bundle else True
+        verify = self.httpx_verify
         self._poll_client = httpx.AsyncClient(
             timeout=httpx.Timeout(3.0, connect=1.5),
             verify=verify,

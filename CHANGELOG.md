@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.21.1] - 2026-11-25
+
+### Router-to-Agent HTTPS CA Bundle Fix
+- **Unified `cluster.httpx_verify` (`backend/router/telemetry.py`, `chat_api.py`, `workspace_api.py`, `app.py`, `models_api.py`, `strata_api.py`, `media_api.py`, `settings_api.py`):** Wired `ClusterState.httpx_verify` (`SPLITCH_CA_BUNDLE` / `tls.ca_bundle`) to every `httpx.AsyncClient` calling `node.agent_url`, fixing `[SSL: CERTIFICATE_VERIFY_FAILED]` on chat tool execution, workspace git/file browsing, model inventory/pull, Strata, and media controls.
+
 ## [0.21.0] - 2026-11-25
 
 ### Multi-Agent Swarm Orchestration (Phase 1)

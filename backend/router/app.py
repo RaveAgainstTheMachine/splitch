@@ -979,7 +979,9 @@ async def get_node_engine_config(node_id: str) -> EngineRuntimeConfig:
         raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
     try:
         async with httpx.AsyncClient(
-            timeout=10.0, headers=cluster.agent_headers("GET", "/engine/runtime-config")
+            timeout=10.0,
+            headers=cluster.agent_headers("GET", "/engine/runtime-config"),
+            verify=cluster.httpx_verify,
         ) as client:
             r = await client.get(f"{node.agent_url}/engine/runtime-config")
             if r.status_code >= 400:
@@ -1000,7 +1002,9 @@ async def set_node_engine_config(
         raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
     try:
         async with httpx.AsyncClient(
-            timeout=25.0, headers=cluster.agent_headers("POST", "/engine/runtime-config")
+            timeout=25.0,
+            headers=cluster.agent_headers("POST", "/engine/runtime-config"),
+            verify=cluster.httpx_verify,
         ) as client:
             r = await client.post(
                 f"{node.agent_url}/engine/runtime-config",
@@ -1022,7 +1026,9 @@ async def get_node_storage_usage(node_id: str) -> StorageUsageResponse:
         raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
     try:
         async with httpx.AsyncClient(
-            timeout=10.0, headers=cluster.agent_headers("GET", "/files/storage/usage")
+            timeout=10.0,
+            headers=cluster.agent_headers("GET", "/files/storage/usage"),
+            verify=cluster.httpx_verify,
         ) as client:
             r = await client.get(f"{node.agent_url}/files/storage/usage")
             if r.status_code >= 400:
@@ -1041,7 +1047,9 @@ async def clean_node_storage_cache(node_id: str) -> StorageCleanResponse:
         raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
     try:
         async with httpx.AsyncClient(
-            timeout=25.0, headers=cluster.agent_headers("POST", "/files/storage/clean-cache")
+            timeout=25.0,
+            headers=cluster.agent_headers("POST", "/files/storage/clean-cache"),
+            verify=cluster.httpx_verify,
         ) as client:
             r = await client.post(f"{node.agent_url}/files/storage/clean-cache", json={})
             if r.status_code >= 400:
@@ -1080,7 +1088,9 @@ async def browse_node_workspace(node_id: str, subpath: str = "") -> WorkspaceDir
         raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
     try:
         async with httpx.AsyncClient(
-            timeout=8.0, headers=cluster.agent_headers("GET", "/workspace/dirs")
+            timeout=8.0,
+            headers=cluster.agent_headers("GET", "/workspace/dirs"),
+            verify=cluster.httpx_verify,
         ) as client:
             r = await client.get(f"{node.agent_url}/workspace/dirs", params={"subpath": subpath})
             if r.status_code >= 400:

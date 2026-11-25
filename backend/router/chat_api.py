@@ -1240,6 +1240,7 @@ def build_chat_router(
                                     async with httpx.AsyncClient(
                                         timeout=25.0,
                                         headers=tool_headers,
+                                        verify=cluster.httpx_verify,
                                     ) as http:
                                         r = await http.post(
                                             f"{exec_node.agent_url}/tools/execute",
