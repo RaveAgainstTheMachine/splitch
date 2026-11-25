@@ -742,6 +742,162 @@ export function ModelsTab({
 
   return (
     <div className="tab-stack">
+      <section className="panel" aria-labelledby={invCaptionId}>
+        <div className="panel-head">
+          <h2 id={invCaptionId}>
+            <HardDrive size={14} aria-hidden="true" /> Node Models
+          </h2>
+          <button
+            type="button"
+            className="btn btn--sm"
+            onClick={() => {
+              void fetchInventory();
+              void onStatusRefresh();
+            }}
+          >
+            <RefreshCw size={12} aria-hidden="true" /> Refresh
+          </button>
+        </div>
+
+        <div tabIndex={0} role="region" aria-labelledby={invCaptionId} className="table-wrapper">
+          <table className="data-table inventory-table">
+            <thead>
+              <tr>
+                <th scope="col">Node</th>
+                <th scope="col">Filename</th>
+                <th scope="col">Engine</th>
+                <th scope="col">Size</th>
+                <th scope="col">Status</th>
+                <th scope="col">Location</th>
+                <th scope="col">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {inventory.flatMap((inv) =>
+                inv.files.map((f) => {
+                  const engineModel = findEngineModel(inv.node_id, f.filename);
+                  const isLoaded = engineModel?.status === "loaded";
+                  const isLoading =
+                    engineModel?.status === "loading" ||
+                    (engineModel != null &&
+                      busyAction === `${inv.node_id}:${engineModel.id}:load`);
+                  const isUnloading =
+                    engineModel != null &&
+                    busyAction === `${inv.node_id}:${engineModel.id}:unload`;
+                  const loName = f.filename.toLowerCase();
+                  const invNode = nodeById[inv.node_id];
+                  const engineTag =
+                    f.format === "mlx"
+                      ? "MLX"
+                      : loName.endsWith(".strata")
+                        ? "Strata"
+                        : invNode?.telemetry?.strata_installed
+                          ? "llama.cpp / Strata"
+                          : "llama.cpp";
+
+                  return (
+                    <tr key={`${inv.node_id}:${f.path}`}>
+                      <th scope="row">
+                        <span className="node-tag">{inv.node_id}</span>
+                      </th>
+                      <td>
+                        <code>{f.filename}</code>
+                      </td>
+                      <td>
+                        <span className="pill">{engineTag}</span>
+                      </td>
+                      <td>{f.size_gb} GB</td>
+                      <td>
+                        {engineModel ? (
+                          <span
+                            className={`pill ${
+                              isLoaded ? "pill--ok" : isLoading ? "pill--accent" : ""
+                            }`}
+                          >
+                            {isLoading ? "Loading…" : isLoaded ? "Loaded" : "Unloaded"}
+                          </span>
+                        ) : (
+                          <span
+                            className="pill"
+                            title="File is on disk; llama-server indexes .gguf models in its models-dir"
+                          >
+                            On disk
+                          </span>
+                        )}
+                      </td>
+                      <td className="muted">
+                        {f.managed ? inv.storage_path : "HF Cache (read-only)"}
+                      </td>
+                      <td>
+                        <div className="row-actions">
+                          {engineModel && (
+                            <>
+                              <button
+                                type="button"
+                                className={`btn btn--sm ${isLoaded ? "" : "btn--accent"}`}
+                                disabled={isLoading || isUnloading}
+                                onClick={() =>
+                                  void onModelAction(
+                                    inv.node_id,
+                                    engineModel.id,
+                                    isLoaded ? "unload" : "load"
+                                  )
+                                }
+                              >
+                                {isLoading || isUnloading ? (
+                                  <>
+                                    <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
+                                    {isUnloading ? "Unloading…" : "Loading…"}
+                                  </>
+                                ) : isLoaded ? (
+                                  <>
+                                    <Square size={11} aria-hidden="true" /> Unload
+                                  </>
+                                ) : (
+                                  <>
+                                    <Play size={11} aria-hidden="true" /> Load
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn--sm"
+                                title="Update aliases pointing to this node"
+                                onClick={() => openAssignAliasesDialog(inv.node_id, engineModel.id)}
+                              >
+                                <Tag size={11} aria-hidden="true" /> Aliases
+                              </button>
+                            </>
+                          )}
+                          {f.managed ? (
+                            <button
+                              type="button"
+                              className="btn btn--sm btn--danger"
+                              onClick={() => deleteGguf(inv.node_id, f.filename)}
+                            >
+                              <Trash2 size={12} aria-hidden="true" /> Delete
+                            </button>
+                          ) : (
+                            !engineModel && <span className="muted">external</span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+              {inventory.every((inv) => inv.files.length === 0) && (
+                <tr>
+                  <td colSpan={7} className="muted empty-cell">
+                    No models on disk.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section className="panel">
         <div className="panel-head">
           <h2>Hugging Face</h2>
@@ -1376,148 +1532,6 @@ export function ModelsTab({
           </div>
         )}
 
-      </section>
-
-      <section className="panel" aria-labelledby={invCaptionId}>
-        <div className="panel-head">
-          <h2 id={invCaptionId}>
-            <HardDrive size={14} aria-hidden="true" /> Node Models
-          </h2>
-          <button
-            type="button"
-            className="btn btn--sm"
-            onClick={() => {
-              void fetchInventory();
-              void onStatusRefresh();
-            }}
-          >
-            <RefreshCw size={12} aria-hidden="true" /> Refresh
-          </button>
-        </div>
-
-        <div tabIndex={0} role="region" aria-labelledby={invCaptionId} className="table-wrapper">
-          <table className="data-table inventory-table">
-            <thead>
-              <tr>
-                <th scope="col">Node</th>
-                <th scope="col">Filename</th>
-                <th scope="col">Size</th>
-                <th scope="col">Status</th>
-                <th scope="col">Location</th>
-                <th scope="col">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {inventory.flatMap((inv) =>
-                inv.files.map((f) => {
-                  const engineModel = findEngineModel(inv.node_id, f.filename);
-                  const isLoaded = engineModel?.status === "loaded";
-                  const isLoading =
-                    engineModel?.status === "loading" ||
-                    (engineModel != null &&
-                      busyAction === `${inv.node_id}:${engineModel.id}:load`);
-                  const isUnloading =
-                    engineModel != null &&
-                    busyAction === `${inv.node_id}:${engineModel.id}:unload`;
-
-                  return (
-                    <tr key={`${inv.node_id}:${f.path}`}>
-                      <th scope="row">
-                        <span className="node-tag">{inv.node_id}</span>
-                      </th>
-                      <td>
-                        <code>{f.filename}</code>
-                      </td>
-                      <td>{f.size_gb} GB</td>
-                      <td>
-                        {engineModel ? (
-                          <span
-                            className={`pill ${
-                              isLoaded ? "pill--ok" : isLoading ? "pill--accent" : ""
-                            }`}
-                          >
-                            {isLoading ? "Loading…" : isLoaded ? "Loaded" : "Unloaded"}
-                          </span>
-                        ) : (
-                          <span
-                            className="pill"
-                            title="File is on disk; llama-server indexes .gguf models in its models-dir"
-                          >
-                            On disk
-                          </span>
-                        )}
-                      </td>
-                      <td className="muted">
-                        {f.managed ? inv.storage_path : "HF Cache (read-only)"}
-                      </td>
-                      <td>
-                        <div className="row-actions">
-                          {engineModel && (
-                            <>
-                              <button
-                                type="button"
-                                className={`btn btn--sm ${isLoaded ? "" : "btn--accent"}`}
-                                disabled={isLoading || isUnloading}
-                                onClick={() =>
-                                  void onModelAction(
-                                    inv.node_id,
-                                    engineModel.id,
-                                    isLoaded ? "unload" : "load"
-                                  )
-                                }
-                              >
-                                {isLoading || isUnloading ? (
-                                  <>
-                                    <Loader2 size={12} className="spin" aria-hidden="true" />{" "}
-                                    {isUnloading ? "Unloading…" : "Loading…"}
-                                  </>
-                                ) : isLoaded ? (
-                                  <>
-                                    <Square size={11} aria-hidden="true" /> Unload
-                                  </>
-                                ) : (
-                                  <>
-                                    <Play size={11} aria-hidden="true" /> Load
-                                  </>
-                                )}
-                              </button>
-                              <button
-                                type="button"
-                                className="btn btn--sm"
-                                title="Update aliases pointing to this node"
-                                onClick={() => openAssignAliasesDialog(inv.node_id, engineModel.id)}
-                              >
-                                <Tag size={11} aria-hidden="true" /> Aliases
-                              </button>
-                            </>
-                          )}
-                          {f.managed ? (
-                            <button
-                              type="button"
-                              className="btn btn--sm btn--danger"
-                              onClick={() => deleteGguf(inv.node_id, f.filename)}
-                            >
-                              <Trash2 size={12} aria-hidden="true" /> Delete
-                            </button>
-                          ) : (
-                            !engineModel && <span className="muted">external</span>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-              {inventory.every((inv) => inv.files.length === 0) && (
-                <tr>
-                  <td colSpan={6} className="muted empty-cell">
-                    No models on disk.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
       </section>
 
       <section className="panel" aria-labelledby={aliasCaptionId}>
