@@ -195,8 +195,13 @@ echo "  ✓ ruff check passed"
 
 if [ "$QUICK" = "0" ]; then
   echo "[preflight 5/6] Building frontend TypeScript & Vite bundle..."
+  if grep -rnE "999px|9999px|rounded-full" dashboard/src/ >/dev/null 2>&1; then
+    echo "[preflight] ERROR: Pill-shaped border-radius (999px/9999px/rounded-full) found in dashboard/src/:" >&2
+    grep -rnE "999px|9999px|rounded-full" dashboard/src/ >&2
+    exit 1
+  fi
   (cd dashboard && npm run build >/dev/null)
-  echo "  ✓ dashboard build passed"
+  echo "  ✓ dashboard build passed (0 pill shapes)"
 
   echo "[preflight 6/6] Running full pytest suite..."
   uv run --no-sync pytest -q
