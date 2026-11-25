@@ -28,6 +28,7 @@ from backend.shared.models import (
 )
 from backend.shared.strata_manager import (
     STRATA_CATALOG,
+    _validate_strata_args,
     assess_strata_fit,
     build_strata_calibrate_cmd,
     build_strata_launch_cmd,
@@ -212,6 +213,89 @@ def test_four_tier_fit_estimator() -> None:
         }
     )
     assert assess_strata_fit(inkling, mac_32).tier == "optimal"
+
+
+def test_strata_catalog_19_packs_and_arg_validation() -> None:
+    assert len(STRATA_CATALOG) == 19
+    expected_new_packs = {
+        ("gyro", "gyro-s"),
+        ("gyro", "gyro-m"),
+        ("unsloth", "ud-iq4_xs"),
+        ("unsloth", "ud-q4_k_xl"),
+        ("nvfp4", "nvfp4"),
+        ("hy4-flash", "sq-96"),
+        ("unsloth", "ud-q5_k_xl"),
+        ("unsloth", "ud-q6_k_xl"),
+        ("hy4-flash", "sq-128"),
+        ("unsloth", "q8_0"),
+    }
+    catalog_keys = {(spec.family, spec.model) for spec in STRATA_CATALOG}
+    assert len(catalog_keys) == len(STRATA_CATALOG)
+    assert expected_new_packs.issubset(catalog_keys)
+    assert max(spec.download_gb for spec in STRATA_CATALOG) == 188.0
+
+    for spec in STRATA_CATALOG:
+        assert spec.family
+        assert spec.model
+        assert spec.download_gb > 0
+        assert spec.experts_ram_gb > 0
+        assert spec.min_vram_gb > 0
+        assert spec.ssd_shard_gb >= 0
+        _validate_strata_args(family=spec.family, model=spec.model)
+
+
+def test_strata_fit_discrete_gpu_24g_62g_450g_and_edge_cases() -> None:
+    by_key = {(spec.family, spec.model): spec for spec in STRATA_CATALOG}
+    node = NodeStatus(
+        node_id="gpu-node",
+        display_name="Discrete GPU",
+        role="gpu",
+        agent_url="http://127.0.0.1:8090",
+        engine_url="http://127.0.0.1:8081",
+        online=True,
+        telemetry=NodeTelemetry(
+            node_id="gpu-node",
+            role="gpu",
+            platform="linux",
+            timestamp=1.0,
+            vram_total_mb=24 * 1024.0,
+            ram_total_mb=62 * 1024.0,
+            storage_free_gb=450.0,
+        ),
+    )
+
+    assert assess_strata_fit(by_key[("gyro", "gyro-m")], node).tier == "optimal"
+    assert assess_strata_fit(by_key[("unsloth", "ud-iq4_xs")], node).tier == "low_ram"
+    assert assess_strata_fit(by_key[("unsloth", "ud-q5_k_xl")], node).tier == "tight"
+
+    low_ssd_node = node.model_copy(
+        update={
+            "telemetry": node.telemetry.model_copy(update={"storage_free_gb": 126.0})  # type: ignore[union-attr]
+        }
+    )
+    q8_fit = assess_strata_fit(by_key[("unsloth", "q8_0")], low_ssd_node)
+    assert q8_fit.tier == "insufficient"
+    assert "Needs 192 GB SSD free" in q8_fit.reason
+
+    # Verify ssd_shard_gb is included in total_download SSD check (89.6 + 67.6 + 4 = 161.2)
+    sq96_low_ssd = node.model_copy(
+        update={
+            "telemetry": node.telemetry.model_copy(update={"storage_free_gb": 150.0})  # type: ignore[union-attr]
+        }
+    )
+    sq96_fit = assess_strata_fit(by_key[("hy4-flash", "sq-96")], sq96_low_ssd)
+    assert sq96_fit.tier == "insufficient"
+    assert "SSD free" in sq96_fit.reason
+
+    # Verify min_vram_gb guard
+    low_vram_node = node.model_copy(
+        update={
+            "telemetry": node.telemetry.model_copy(update={"vram_total_mb": 8 * 1024.0})  # type: ignore[union-attr]
+        }
+    )
+    gyro_m_low_vram = assess_strata_fit(by_key[("gyro", "gyro-m")], low_vram_node)
+    assert gyro_m_low_vram.tier == "insufficient"
+    assert "VRAM" in gyro_m_low_vram.reason
 
 
 def test_agent_strata_endpoints_and_proxy(tmp_path: Path, monkeypatch) -> None:
