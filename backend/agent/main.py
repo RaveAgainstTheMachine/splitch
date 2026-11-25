@@ -20,19 +20,63 @@ import shlex
 import shutil
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import httpx
 import psutil
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
+from backend.agent.downloads import (
+    DownloadSpeedTracker as _DownloadSpeedTracker,  # noqa: F401
+)
+from backend.agent.downloads import (
+    download_xet_mlx as _download_xet_mlx,  # noqa: F401
+)
+from backend.agent.downloads import (
+    download_xet_single as _download_xet_single,  # noqa: F401
+)
+from backend.agent.downloads import (
+    make_job_tqdm as _make_job_tqdm,  # noqa: F401
+)
+from backend.agent.downloads import (
+    resolve_hf_protocol as _resolve_hf_protocol,  # noqa: F401
+)
+from backend.agent.downloads import (
+    run_hf_download as _run_hf_download_impl,
+)
+from backend.agent.downloads import (
+    run_hf_mlx_download as _run_hf_mlx_download_impl,
+)
+from backend.agent.media_routes import (
+    build_media_agent_router,
+)
+from backend.agent.media_routes import (
+    build_media_status_snapshot as _build_media_status_snapshot,
+)
+from backend.agent.media_routes import (
+    build_sd_model_args as _build_sd_model_args,  # noqa: F401
+)
+from backend.agent.media_routes import (
+    find_first_media_match as _find_first_media_match,  # noqa: F401
+)
+from backend.agent.media_routes import (
+    resolve_media_file as _resolve_media_file,  # noqa: F401
+)
+from backend.agent.media_routes import (
+    scan_local_media_models as _scan_local_media_models_impl,
+)
+from backend.agent.strata_routes import (
+    build_strata_agent_router,
+)
+from backend.agent.strata_routes import (
+    build_strata_status_snapshot as _build_strata_status_snapshot,
+)
 from backend.agent.sync import (
     merge_client_config as _merge_client_config,
 )
@@ -64,7 +108,10 @@ from backend.agent.workspace_git import (
     read_workspace_file,
 )
 from backend.router.config import default_data_root
-from backend.shared.engines import detect_installed_engines, install_or_update_engine
+from backend.shared.engines import (
+    detect_installed_engines,  # noqa: F401
+    install_or_update_engine,  # noqa: F401
+)
 from backend.shared.gpu_probe import (
     LLM_PROCESS_TOKENS,  # noqa: F401
     collect_all_gpus,
@@ -87,7 +134,6 @@ from backend.shared.models import (
     GitDiffResponse,
     GitPathsRequest,
     GitStatusResponse,
-    InstallMediaEngineRequest,
     LoadedModel,
     LocalModelFile,
     McpScriptSyncRequest,
@@ -99,16 +145,10 @@ from backend.shared.models import (
     NodeStrataStatus,
     NodeTelemetry,
     PullModelRequest,
-    SdCliVideoRequest,
     SkillSyncPayload,
-    StartMediaEngineRequest,
     StorageCleanResponse,
     StorageUsageResponse,
-    StrataCalibrateRequest,
-    StrataImportPlanRequest,
-    StrataInstallRequest,
     StrataJobState,
-    StrataLaunchRequest,
     ToolExecRequest,
     ToolExecResponse,
     UiThemeConfig,
@@ -130,16 +170,16 @@ from backend.shared.security import (
     verify_tool_approval,
 )
 from backend.shared.strata_manager import (
-    build_strata_calibrate_cmd,
-    build_strata_launch_cmd,
-    import_strata_gguf_plan,
-    install_or_update_strata,
-    list_installed_strata_models,
-    list_strata_presets,
-    read_strata_engine_meta,
+    build_strata_calibrate_cmd,  # noqa: F401
+    build_strata_launch_cmd,  # noqa: F401
+    import_strata_gguf_plan,  # noqa: F401
+    install_or_update_strata,  # noqa: F401
+    list_installed_strata_models,  # noqa: F401
+    list_strata_presets,  # noqa: F401
+    read_strata_engine_meta,  # noqa: F401
     resolve_strata_bin,
-    stop_strata_server,
-    strata_env,
+    stop_strata_server,  # noqa: F401
+    strata_env,  # noqa: F401
 )
 from backend.shared.updater import (
     UpdateResult,
@@ -845,329 +885,25 @@ async def _refresh_engine_model_index(expected_stem: str | None = None) -> None:
             break
 
 
-class _DownloadSpeedTracker:
-    """Compute smoothed bytes/sec across chunked downloads."""
-
-    def __init__(self) -> None:
-        now = time.monotonic()
-        self._start = now
-        self._last_tick = now
-        self._window_bytes = 0
-
-    def record(self, job: DownloadJob, chunk_len: int) -> None:
-        self._window_bytes += chunk_len
-        now = time.monotonic()
-        dt = now - self._last_tick
-        if dt >= 0.4:
-            instant = self._window_bytes / dt
-            job.speed_bytes_per_sec = round(
-                instant
-                if job.speed_bytes_per_sec <= 0.0
-                else (job.speed_bytes_per_sec * 0.4 + instant * 0.6),
-                1,
-            )
-            self._last_tick = now
-            self._window_bytes = 0
-        elif job.speed_bytes_per_sec <= 0.0:
-            elapsed = max(0.05, now - self._start)
-            job.speed_bytes_per_sec = round(job.downloaded_bytes / elapsed, 1)
-
-
-def _resolve_hf_protocol() -> str:
-    raw = os.getenv("SPLITCH_HF_PROTOCOL", "").strip().lower()
-    if raw in ("auto", "xet", "http"):
-        return raw
-    if os.getenv("PYTEST_CURRENT_TEST"):
-        return "http"
-    return "auto"
-
-
-def _make_job_tqdm(job: DownloadJob, tracker: _DownloadSpeedTracker, *, cap_99: bool = False):
-    from tqdm import tqdm as _BaseTqdm
-
-    lock = threading.Lock()
-
-    class _JobTqdm(_BaseTqdm):  # type: ignore[misc]
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            kwargs.setdefault("disable", True)
-            super().__init__(*args, **kwargs)
-            tot = int(getattr(self, "total", 0) or 0)
-            if tot > 0:
-                with lock:
-                    if cap_99:
-                        if tot > job.total_bytes and job.total_bytes == 0:
-                            job.total_bytes = tot
-                    else:
-                        job.total_bytes = max(job.total_bytes, tot)
-
-        def update(self, n: float = 1) -> bool | None:
-            inc = int(n or 0)
-            if inc > 0:
-                with lock:
-                    job.downloaded_bytes += inc
-                    tracker.record(job, inc)
-                    if job.total_bytes > 0:
-                        pct = round((job.downloaded_bytes / job.total_bytes) * 100.0, 1)
-                        job.percent = min(99.9, pct) if cap_99 else min(100.0, pct)
-            return super().update(n)
-
-    return _JobTqdm
-
-
-def _download_xet_single(
-    job: DownloadJob,
-    dest: Path,
-    staging_dir: Path,
-    hf_token: str,
-    tracker: _DownloadSpeedTracker,
-) -> None:
-    from huggingface_hub import hf_hub_download
-
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    tqdm_cls = _make_job_tqdm(job, tracker, cap_99=False)
-    try:
-        downloaded = hf_hub_download(
-            repo_id=job.repo_id,
-            filename=job.filename,
-            local_dir=str(staging_dir),
-            token=hf_token or None,
-            tqdm_class=tqdm_cls,
-        )
-        src = Path(downloaded)
-        if not src.is_file():
-            raise FileNotFoundError(f"hf_hub_download missing output: {src}")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        src.replace(dest)
-    finally:
-        with contextlib.suppress(OSError):
-            if staging_dir.exists():
-                shutil.rmtree(staging_dir)
-
-
-def _download_xet_mlx(
-    job: DownloadJob,
-    dest_dir: Path,
-    tmp_dir: Path,
-    hf_token: str,
-    tracker: _DownloadSpeedTracker,
-) -> None:
-    from huggingface_hub import snapshot_download
-
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    tqdm_cls = _make_job_tqdm(job, tracker, cap_99=True)
-    try:
-        snapshot_download(
-            repo_id=job.repo_id,
-            local_dir=str(tmp_dir),
-            allow_patterns=["*.safetensors", "*.json", "*.model", "*.tiktoken", "*.txt"],
-            token=hf_token or None,
-            tqdm_class=tqdm_cls,
-        )
-        if not any(tmp_dir.rglob("*.safetensors")):
-            raise ValueError("Repository does not contain MLX .safetensors weights")
-        if dest_dir.exists():
-            shutil.rmtree(dest_dir)
-        tmp_dir.replace(dest_dir)
-    except Exception:
-        with contextlib.suppress(OSError):
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir)
-        raise
-
-
 async def _run_hf_download(job: DownloadJob, *, hf_token_override: str = "") -> None:
-    root = Path(STORAGE_PATH)
-    root.mkdir(parents=True, exist_ok=True)
-    safe_name = Path(job.filename).name
-    dest = root / safe_name
-    part = root / f"{safe_name}.part"
-    staging_dir = root / f".{safe_name}.xet"
-    url = f"https://huggingface.co/{job.repo_id}/resolve/main/{job.filename}"
-    headers = {}
-    hf_token = hf_token_override.strip() or os.getenv("HF_TOKEN", "").strip()
-    if hf_token:
-        headers["Authorization"] = f"Bearer {hf_token}"
-
-    proto = _resolve_hf_protocol()
-    if proto in ("auto", "xet"):
-        xet_tracker = _DownloadSpeedTracker()
-        job.protocol = "xet"
-        try:
-            await asyncio.to_thread(
-                _download_xet_single, job, dest, staging_dir, hf_token, xet_tracker
-            )
-            job.percent = 100.0
-            job.speed_bytes_per_sec = 0.0
-            job.status = "completed"
-            if safe_name.lower().endswith(".gguf"):
-                asyncio.create_task(_refresh_engine_model_index(expected_stem=dest.stem))
-            else:
-                asyncio.create_task(state.poll_once())
-            return
-        except Exception as exc:  # noqa: BLE001 — fall back to async httpx stream when xet fails
-            if proto == "xet":
-                job.speed_bytes_per_sec = 0.0
-                job.status = "failed"
-                job.error = str(exc)
-                return
-            logger.debug("hf_xet single download failed (%s); falling back to HTTP", exc)
-            job.downloaded_bytes = 0
-            job.total_bytes = 0
-            job.percent = 0.0
-            job.speed_bytes_per_sec = 0.0
-
-    job.protocol = "http"
-    tracker = _DownloadSpeedTracker()
-    try:
-        async with (
-            httpx.AsyncClient(
-                follow_redirects=True,
-                timeout=httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0),
-            ) as dl_client,
-            dl_client.stream("GET", url, headers=headers) as resp,
-        ):
-            resp.raise_for_status()
-            job.total_bytes = int(resp.headers.get("content-length") or 0)
-            with part.open("wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    await asyncio.to_thread(f.write, chunk)
-                    job.downloaded_bytes += len(chunk)
-                    tracker.record(job, len(chunk))
-                    if job.total_bytes > 0:
-                        job.percent = round((job.downloaded_bytes / job.total_bytes) * 100.0, 1)
-        part.replace(dest)
-        job.percent = 100.0
-        job.speed_bytes_per_sec = 0.0
-        job.status = "completed"
-        if safe_name.lower().endswith(".gguf"):
-            asyncio.create_task(_refresh_engine_model_index(expected_stem=dest.stem))
-        else:
-            asyncio.create_task(state.poll_once())
-    except (httpx.HTTPError, OSError) as exc:
-        job.speed_bytes_per_sec = 0.0
-        job.status = "failed"
-        job.error = str(exc)
-        with contextlib.suppress(OSError):
-            if part.exists():
-                part.unlink()
+    await _run_hf_download_impl(
+        job,
+        storage_path=STORAGE_PATH,
+        refresh_engine_cb=_refresh_engine_model_index,
+        poll_once_cb=state.poll_once,
+        async_client_cls=httpx.AsyncClient,
+        hf_token_override=hf_token_override,
+    )
 
 
 async def _run_hf_mlx_download(job: DownloadJob, *, hf_token_override: str = "") -> None:
-    mlx_root = Path(STORAGE_PATH) / "mlx"
-    mlx_root.mkdir(parents=True, exist_ok=True)
-    slug = job.repo_id.replace("/", "--")
-    dest_dir = mlx_root / slug
-    tmp_dir = mlx_root / f".{slug}.part"
-    headers = {}
-    hf_token = hf_token_override.strip() or os.getenv("HF_TOKEN", "").strip()
-    if hf_token:
-        headers["Authorization"] = f"Bearer {hf_token}"
-
-    proto = _resolve_hf_protocol()
-    if proto in ("auto", "xet"):
-        xet_tracker = _DownloadSpeedTracker()
-        job.protocol = "xet"
-        try:
-            await asyncio.to_thread(
-                _download_xet_mlx, job, dest_dir, tmp_dir, hf_token, xet_tracker
-            )
-            job.percent = 100.0
-            job.speed_bytes_per_sec = 0.0
-            job.status = "completed"
-            asyncio.create_task(state.poll_once())
-            return
-        except Exception as exc:  # noqa: BLE001 — fall back to async httpx stream when xet fails
-            if proto == "xet":
-                job.speed_bytes_per_sec = 0.0
-                job.status = "failed"
-                job.error = str(exc)
-                return
-            logger.debug("hf_xet MLX snapshot download failed (%s); falling back to HTTP", exc)
-            job.downloaded_bytes = 0
-            job.total_bytes = 0
-            job.percent = 0.0
-            job.speed_bytes_per_sec = 0.0
-
-    job.protocol = "http"
-    tracker = _DownloadSpeedTracker()
-    try:
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0),
-        ) as dl_client:
-            tree_resp = await dl_client.get(
-                f"https://huggingface.co/api/models/{job.repo_id}/tree/main",
-                params={"recursive": "true"},
-                headers=headers,
-            )
-            tree_resp.raise_for_status()
-            entries = tree_resp.json()
-            if not isinstance(entries, list):
-                raise TypeError("Unexpected HF tree response")
-
-            wanted: list[tuple[str, int]] = []
-            for item in entries:
-                if not isinstance(item, dict) or item.get("type") != "file":
-                    continue
-                path_str = str(item.get("path") or "")
-                if not path_str or ".." in path_str or path_str.startswith("."):
-                    continue
-                lo = path_str.lower()
-                if lo.endswith((".safetensors", ".json", ".model", ".tiktoken", ".txt")):
-                    size_b = int(
-                        (item.get("lfs") or {}).get("size") or item.get("size") or 0
-                    )
-                    wanted.append((path_str, size_b))
-
-            if not any(p.lower().endswith(".safetensors") for p, _ in wanted):
-                raise ValueError("Repository does not contain MLX .safetensors weights")
-
-            job.total_bytes = sum(sz for _, sz in wanted)
-            if tmp_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, tmp_dir)
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-
-            for rel_path, _ in wanted:
-                out_file = (tmp_dir / rel_path).resolve()
-                if not out_file.is_relative_to(tmp_dir.resolve()):
-                    continue
-                out_file.parent.mkdir(parents=True, exist_ok=True)
-                url = f"https://huggingface.co/{job.repo_id}/resolve/main/{rel_path}"
-                async with dl_client.stream("GET", url, headers=headers) as resp:
-                    resp.raise_for_status()
-                    with out_file.open("wb") as f:
-                        async for chunk in resp.aiter_bytes(chunk_size=1024 * 1024):
-                            if not chunk:
-                                continue
-                            await asyncio.to_thread(f.write, chunk)
-                            job.downloaded_bytes += len(chunk)
-                            tracker.record(job, len(chunk))
-                            if job.total_bytes > 0:
-                                job.percent = min(
-                                    99.9,
-                                    round((job.downloaded_bytes / job.total_bytes) * 100.0, 1),
-                                )
-
-        if dest_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, dest_dir)
-        tmp_dir.replace(dest_dir)
-        job.percent = 100.0
-        job.speed_bytes_per_sec = 0.0
-        job.status = "completed"
-        asyncio.create_task(state.poll_once())
-    except (httpx.HTTPError, OSError, TypeError, ValueError) as exc:
-        job.speed_bytes_per_sec = 0.0
-        job.status = "failed"
-        job.error = str(exc)
-        with contextlib.suppress(OSError):
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir)
+    await _run_hf_mlx_download_impl(
+        job,
+        storage_path=STORAGE_PATH,
+        poll_once_cb=state.poll_once,
+        async_client_cls=httpx.AsyncClient,
+        hf_token_override=hf_token_override,
+    )
 
 
 @app.post("/files/models/pull", response_model=DownloadJob)
@@ -1507,831 +1243,22 @@ async def clean_storage_cache() -> StorageCleanResponse:
 
 
 def _scan_local_media_models() -> list[LocalModelFile]:
-    files: list[LocalModelFile] = []
-    seen: set[str] = set()
-    roots = [Path(STORAGE_PATH), Path(STORAGE_PATH) / "media"]
-    for root in roots:
-        if not root.exists():
-            continue
-        for pat in ("*.safetensors", "*.ckpt", "*.gguf"):
-            for entry in sorted(root.glob(pat)):
-                if not entry.is_file():
-                    continue
-                resolved = str(entry.resolve())
-                if resolved in seen:
-                    continue
-                try:
-                    size_gb = round(entry.stat().st_size / (1024**3), 2)
-                except OSError:
-                    continue
-                seen.add(resolved)
-                files.append(
-                    LocalModelFile(
-                        filename=entry.name,
-                        path=str(entry),
-                        size_gb=size_gb,
-                        managed=True,
-                    )
-                )
-    return files
+    return _scan_local_media_models_impl(STORAGE_PATH)
 
 
 def _build_media_engine_status() -> NodeMediaEngineStatus:
-    installed = detect_installed_engines()
-    sd_info = next((e for e in installed if e.engine == "sd.cpp"), None)
-    running = bool(state.sd_proc is not None and state.sd_proc.returncode is None)
-    if state.sd_proc is not None and state.sd_proc.returncode is not None and not state.sd_last_error:
-        state.sd_last_error = f"sd-server exited with code {state.sd_proc.returncode}"
-    return NodeMediaEngineStatus(
-        node_id=NODE_ID,
-        sd_installed=sd_info is not None,
-        sd_binary=sd_info.path if sd_info else "",
-        sd_version=sd_info.build_tag or sd_info.version if sd_info else "",
-        sd_backend=sd_info.backend if sd_info else "",
-        sd_managed_running=running,
-        sd_running_model=state.sd_running_model if running else "",
-        sd_error=state.sd_last_error,
-        install_in_progress=state.sd_install_busy,
-        install_step=state.sd_install_step,
-        media_engine=state.snapshot.media_engine,
-        media_healthy=state.snapshot.media_healthy,
-        media_url=state.snapshot.media_url,
-        local_media_models=_scan_local_media_models(),
-        active_downloads=list(state.downloads.values()),
-    )
-
-
-@app.get("/media/engine/status", response_model=NodeMediaEngineStatus)
-async def get_media_engine_status() -> NodeMediaEngineStatus:
-    return await asyncio.to_thread(_build_media_engine_status)
-
-
-@app.post("/media/engine/install", response_model=NodeMediaEngineStatus)
-async def install_media_engine(req: InstallMediaEngineRequest) -> NodeMediaEngineStatus:
-    if state.sd_install_busy:
-        return await asyncio.to_thread(_build_media_engine_status)
-    state.sd_install_busy = True
-    state.sd_last_error = None
-    state.sd_install_step = f"Downloading hardware-matched stable-diffusion.cpp ({req.backend})..."
-
-    async def _worker() -> None:
-        try:
-            res = await asyncio.to_thread(
-                install_or_update_engine,
-                "sd.cpp",
-                backend=req.backend,
-                force=req.force,
-            )
-            if res.ok:
-                state.sd_install_step = res.steps[-1] if res.steps else "Installed stable-diffusion.cpp"
-                state.sd_last_error = None
-            else:
-                state.sd_last_error = res.error or "Failed to install stable-diffusion.cpp"
-                state.sd_install_step = "Install failed"
-        except (OSError, RuntimeError, ValueError) as exc:
-            state.sd_last_error = str(exc)
-            state.sd_install_step = "Install failed"
-        finally:
-            state.sd_install_busy = False
-
-    asyncio.create_task(_worker())
-    return await asyncio.to_thread(_build_media_engine_status)
-
-
-def _resolve_media_file(storage_root: Path, filename: str) -> Path | None:
-    if not filename or ".." in filename or "/" in filename or "\\" in filename:
-        return None
-    for candidate in (storage_root / filename, storage_root / "media" / filename):
-        resolved = candidate.resolve()
-        if resolved.is_file() and resolved.is_relative_to(storage_root):
-            return resolved
-    return None
-
-
-def _find_first_media_match(storage_root: Path, patterns: tuple[str, ...]) -> Path | None:
-    for root in (storage_root, storage_root / "media"):
-        if not root.exists():
-            continue
-        for entry in sorted(root.iterdir()):
-            if not entry.is_file():
-                continue
-            low = entry.name.lower()
-            if any(pat in low for pat in patterns):
-                resolved = entry.resolve()
-                if resolved.is_relative_to(storage_root):
-                    return resolved
-    return None
-
-
-def _build_sd_model_args(
-    storage_root: Path,
-    model_path: Path,
-    *,
-    vae: str = "",
-    t5xxl: str = "",
-    clip_l: str = "",
-    llm: str = "",
-) -> tuple[list[str], str | None]:
-    """Build sd-server / sd-cli model flags, auto-wiring multi-file DiT bundles."""
-    low = model_path.name.lower()
-
-    vae_path = _resolve_media_file(storage_root, vae) if vae else None
-    t5_path = _resolve_media_file(storage_root, t5xxl) if t5xxl else None
-    clip_l_path = _resolve_media_file(storage_root, clip_l) if clip_l else None
-    llm_path = _resolve_media_file(storage_root, llm) if llm else None
-
-    if "z-image" in low or "z_image" in low:
-        llm_path = llm_path or _find_first_media_match(storage_root, ("qwen3-4b", "qwen_3_4b"))
-        vae_path = vae_path or _find_first_media_match(storage_root, ("ae.safetensors",))
-        missing = []
-        if not llm_path:
-            missing.append("Qwen3-4B text encoder (Qwen3-4B-Q4_K_M.gguf)")
-        if not vae_path:
-            missing.append("FLUX VAE (ae.safetensors)")
-        if missing:
-            return [], f"Z-Image-Turbo requires companion file(s): {', '.join(missing)}. Click Pull on the Z-Image-Turbo bundle."
-        return [
-            "--diffusion-model",
-            str(model_path),
-            "--llm",
-            str(llm_path),
-            "--vae",
-            str(vae_path),
-            "--flash-attn",
-        ], None
-
-    if "flux" in low:
-        t5_path = t5_path or _find_first_media_match(storage_root, ("t5-v1_1-xxl", "t5xxl"))
-        clip_l_path = clip_l_path or _find_first_media_match(storage_root, ("clip_l",))
-        vae_path = vae_path or _find_first_media_match(storage_root, ("ae.safetensors",))
-        missing = []
-        if not t5_path:
-            missing.append("T5-XXL encoder (t5-v1_1-xxl-encoder-Q4_K_M.gguf)")
-        if not clip_l_path:
-            missing.append("CLIP-L encoder (clip_l.safetensors)")
-        if not vae_path:
-            missing.append("FLUX VAE (ae.safetensors)")
-        if missing:
-            return [], f"FLUX requires companion file(s): {', '.join(missing)}. Click Pull on the FLUX.1-schnell bundle."
-        return [
-            "--diffusion-model",
-            str(model_path),
-            "--t5xxl",
-            str(t5_path),
-            "--clip_l",
-            str(clip_l_path),
-            "--vae",
-            str(vae_path),
-            "--flash-attn",
-        ], None
-
-    if "wan2." in low or "wan_" in low:
-        t5_path = t5_path or _find_first_media_match(storage_root, ("umt5_xxl", "umt5-xxl", "umt5"))
-        vae_path = vae_path or _find_first_media_match(storage_root, ("wan_2.1_vae", "wan2.1_vae", "wan_vae"))
-        missing = []
-        if not t5_path:
-            missing.append("UMT5-XXL encoder (umt5_xxl_fp8_e4m3fn_scaled.safetensors)")
-        if not vae_path:
-            missing.append("Wan 2.1 VAE (wan_2.1_vae.safetensors)")
-        if missing:
-            return [], f"Wan 2.1 requires companion file(s): {', '.join(missing)}. Click Pull on a Wan 2.1 video bundle."
-        return [
-            "--diffusion-model",
-            str(model_path),
-            "--t5xxl",
-            str(t5_path),
-            "--vae",
-            str(vae_path),
-            "--flow-shift",
-            "3.0",
-            "--flash-attn",
-        ], None
-
-    # Explicit companion flags or standard single-file checkpoint (SDXL / SD 1.5)
-    if any((vae_path, t5_path, clip_l_path, llm_path)):
-        args = ["--diffusion-model", str(model_path)]
-        if vae_path:
-            args.extend(["--vae", str(vae_path)])
-        if t5_path:
-            args.extend(["--t5xxl", str(t5_path)])
-        if clip_l_path:
-            args.extend(["--clip_l", str(clip_l_path)])
-        if llm_path:
-            args.extend(["--llm", str(llm_path)])
-        args.append("--flash-attn")
-        return args, None
-
-    return ["-m", str(model_path)], None
-
-
-@app.post("/media/engine/start", response_model=NodeMediaEngineStatus)
-async def start_media_engine(req: StartMediaEngineRequest) -> NodeMediaEngineStatus:
-    if ".." in req.model_file or "/" in req.model_file or "\\" in req.model_file:
-        raise HTTPException(status_code=400, detail="Invalid model_file name")
-    storage_root = Path(STORAGE_PATH).resolve()
-    model_path = _resolve_media_file(storage_root, req.model_file)
-    if model_path is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Model '{req.model_file}' not found in {STORAGE_PATH}",
-        )
-
-    model_args, bundle_err = _build_sd_model_args(
-        storage_root,
-        model_path,
-        vae=req.vae,
-        t5xxl=req.t5xxl,
-        clip_l=req.clip_l,
-        llm=req.llm,
-    )
-    if bundle_err:
-        raise HTTPException(status_code=400, detail=bundle_err)
-
-    installed = await asyncio.to_thread(detect_installed_engines)
-    sd_info = next((e for e in installed if e.engine == "sd.cpp"), None)
-    if not sd_info:
-        raise HTTPException(
-            status_code=400,
-            detail="stable-diffusion.cpp (sd-server) is not installed on this node yet.",
-        )
-
-    # Stop existing managed sd-server before restarting with new model
-    if state.sd_proc is not None and state.sd_proc.returncode is None:
-        state.sd_proc.terminate()
-        with contextlib.suppress(TimeoutError, ProcessLookupError):
-            await asyncio.wait_for(state.sd_proc.wait(), timeout=3.0)
-
-    sd_bin = Path(sd_info.path)
-    if sd_bin.name.startswith("sd-cli"):
-        sibling = sd_bin.parent / ("sd-server.exe" if sys.platform == "win32" else "sd-server")
-        if sibling.is_file():
-            sd_bin = sibling
-
-    env = os.environ.copy()
-    lib_dir = str(sd_bin.parent)
-    if sys.platform == "darwin":
-        env["DYLD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('DYLD_LIBRARY_PATH', '')}"
-    elif sys.platform.startswith("linux"):
-        env["LD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('LD_LIBRARY_PATH', '')}"
-
-    cmd = [
-        str(sd_bin),
-        "--listen-ip",
-        "127.0.0.1",
-        "--listen-port",
-        str(req.port),
-        *model_args,
-    ]
-    state.sd_last_error = None
-    state.sd_running_model = req.model_file
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        state.sd_proc = proc
-    except OSError as exc:
-        state.sd_last_error = f"Failed to launch sd-server: {exc}"
-        raise HTTPException(status_code=500, detail=state.sd_last_error) from exc
-
-    # Wait briefly to detect immediate crash or readiness
-    for _ in range(12):
-        await asyncio.sleep(0.4)
-        if proc.returncode is not None:
-            err_tail = ""
-            if proc.stderr:
-                raw_err = await proc.stderr.read()
-                err_tail = raw_err.decode("utf-8", errors="replace").strip()[-500:]
-            state.sd_last_error = err_tail or f"sd-server exited with code {proc.returncode}"
-            state.sd_running_model = ""
-            raise HTTPException(status_code=500, detail=state.sd_last_error)
-        if state.client is not None:
-            ok, _, _ = await _probe_single_media_url(state.client, f"http://127.0.0.1:{req.port}")
-            if ok:
-                break
-
-    await state.poll_once()
-    return await asyncio.to_thread(_build_media_engine_status)
-
-
-@app.post("/media/engine/stop", response_model=NodeMediaEngineStatus)
-async def stop_media_engine() -> NodeMediaEngineStatus:
-    if state.sd_proc is not None and state.sd_proc.returncode is None:
-        state.sd_proc.terminate()
-        with contextlib.suppress(TimeoutError, ProcessLookupError):
-            await asyncio.wait_for(state.sd_proc.wait(), timeout=4.0)
-    state.sd_proc = None
-    state.sd_running_model = ""
-    state.sd_last_error = None
-    await state.poll_once()
-    return await asyncio.to_thread(_build_media_engine_status)
-
-
-@app.post("/media/video/generate")
-async def generate_video_via_sd_cli(req: SdCliVideoRequest) -> Response:
-    """Run native stable-diffusion.cpp `sd-cli -M vid_gen` for Wan 2.1/2.2 video generation."""
-    import tempfile
-
-    storage_root = Path(STORAGE_PATH).resolve()
-    model_path: Path | None = None
-    if req.model_file and req.model_file not in ("auto", "sd-cpp-local"):
-        model_path = _resolve_media_file(storage_root, req.model_file)
-    if model_path is None:
-        model_path = _find_first_media_match(
-            storage_root, ("wan2.1_t2v", "wan2.1-t2v", "wan2.2", "ltx-video")
-        )
-    if model_path is None:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No video model found on this node. Pull a Wan 2.1 video bundle in "
-                "Media Studio → Engine & Models (or connect ComfyUI)."
-            ),
-        )
-
-    model_args, bundle_err = _build_sd_model_args(storage_root, model_path)
-    if bundle_err:
-        raise HTTPException(status_code=400, detail=bundle_err)
-
-    installed = await asyncio.to_thread(detect_installed_engines)
-    sd_info = next((e for e in installed if e.engine == "sd.cpp"), None)
-    if not sd_info:
-        raise HTTPException(
-            status_code=400,
-            detail="stable-diffusion.cpp (sd-cli) is not installed on this node.",
-        )
-
-    sd_cli = Path(sd_info.path)
-    if sd_cli.name.startswith("sd-server"):
-        sibling = sd_cli.parent / ("sd-cli.exe" if sys.platform == "win32" else "sd-cli")
-        if sibling.is_file():
-            sd_cli = sibling
-    if not sd_cli.is_file():
-        found = shutil.which("sd-cli")
-        if not found:
-            raise HTTPException(status_code=400, detail="sd-cli binary not found alongside sd-server")
-        sd_cli = Path(found)
-
-    # Free GPU VRAM held by managed sd-server before running vid_gen
-    was_running_model = state.sd_running_model if (
-        state.sd_proc is not None and state.sd_proc.returncode is None
-    ) else ""
-    if state.sd_proc is not None and state.sd_proc.returncode is None:
-        state.sd_proc.terminate()
-        with contextlib.suppress(TimeoutError, ProcessLookupError):
-            await asyncio.wait_for(state.sd_proc.wait(), timeout=4.0)
-        state.sd_proc = None
-        state.sd_running_model = ""
-
-    env = os.environ.copy()
-    lib_dir = str(sd_cli.parent)
-    if sys.platform == "darwin":
-        env["DYLD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('DYLD_LIBRARY_PATH', '')}"
-    elif sys.platform.startswith("linux"):
-        env["LD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('LD_LIBRARY_PATH', '')}"
-
-    with tempfile.TemporaryDirectory(prefix="splitch-vid-") as tmpdir:
-        out_path = Path(tmpdir) / "out.webm"
-        cmd = [
-            str(sd_cli),
-            "-M",
-            "vid_gen",
-            *model_args,
-            "-W",
-            str(req.width),
-            "-H",
-            str(req.height),
-            "--video-frames",
-            str(req.frames),
-            "--fps",
-            str(req.fps),
-            "--steps",
-            str(req.steps),
-            "--cfg-scale",
-            str(req.cfg_scale),
-            "-s",
-            str(req.seed),
-            "-p",
-            req.prompt,
-            "-o",
-            str(out_path),
-        ]
-        if req.negative_prompt.strip():
-            cmd.extend(["-n", req.negative_prompt.strip()])
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-            _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=600.0)
-        except TimeoutError as exc:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            raise HTTPException(status_code=504, detail="sd-cli video generation timed out") from exc
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to launch sd-cli: {exc}") from exc
-
-        if proc.returncode != 0 or not out_path.is_file():
-            err_tail = stderr_b.decode("utf-8", errors="replace").strip()[-500:]
-            raise HTTPException(
-                status_code=500,
-                detail=err_tail or f"sd-cli exited with code {proc.returncode}",
-            )
-        raw = await asyncio.to_thread(out_path.read_bytes)
-
-    if was_running_model:
-        with contextlib.suppress(HTTPException, OSError):
-            await start_media_engine(StartMediaEngineRequest(model_file=was_running_model))
-
-    return Response(content=raw, media_type="video/webm")
-
-
-@app.api_route("/media/proxy/{path:path}", methods=["GET", "POST"])
-async def proxy_local_media_engine(path: str, request: Request) -> Response:
-    """Proxy router media requests to the node's local sd-server/ComfyUI over the agent port."""
-    base = (state.snapshot.media_url or MEDIA_URL or "http://127.0.0.1:8082").rstrip("/")
-    if not base:
-        raise HTTPException(status_code=503, detail="No local media engine running on this node")
-    target = f"{base}/{path.lstrip('/')}"
-    if request.url.query:
-        target = f"{target}?{request.url.query}"
-
-    fwd_headers: dict[str, str] = {}
-    ct = request.headers.get("content-type")
-    if ct:
-        fwd_headers["content-type"] = ct
-    accept = request.headers.get("accept")
-    if accept:
-        fwd_headers["accept"] = accept
-
-    body = await request.body()
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
-            resp = await client.request(
-                request.method,
-                target,
-                content=body if body else None,
-                headers=fwd_headers,
-            )
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Local media engine error: {exc}") from exc
-
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        media_type=resp.headers.get("content-type"),
-    )
+    return _build_media_status_snapshot(sys.modules[__name__])
 
 
 # ── Managed Strata Sparse-MoE Lifecycle, Quick Tune & Signed Streaming Proxy ─
 
-_STRATA_PROXY_ALLOWLIST = frozenset(
-    {
-        "v1/chat/completions",
-        "v1/completions",
-        "v1/messages",
-        "v1/responses",
-        "v1/models",
-        "health",
-    }
-)
-
-
-async def _evict_primary_engine_models() -> None:
-    """Unload any resident models on primary `ENGINE_URL` before Strata claims GPU VRAM."""
-    if not state.client or not state.snapshot.engine_healthy:
-        return
-    loaded = [m.id for m in state.snapshot.models if m.status == "loaded"]
-    for mid in loaded:
-        with contextlib.suppress(httpx.HTTPError):
-            if state.snapshot.engine == "ollama":
-                await state.client.post(
-                    f"{ENGINE_URL}/api/generate",
-                    json={"model": mid, "prompt": "", "keep_alive": 0},
-                    timeout=10.0,
-                )
-            else:
-                await state.client.post(
-                    f"{ENGINE_URL}/models/unload",
-                    json={"model": mid},
-                    timeout=10.0,
-                )
-
 
 def _build_strata_status() -> NodeStrataStatus:
-    strata_bin = resolve_strata_bin()
-    meta = read_strata_engine_meta()
-    storage_root = Path(STORAGE_PATH)
-    installed_models = list_installed_strata_models(storage_root) if strata_bin else []
-    active = state.snapshot.strata_active_model
-    for im in installed_models:
-        if active and im.id == active:
-            im.is_active = True
-    presets = list_strata_presets(storage_root) if strata_bin else []
-    job = state.strata_job.model_copy()
-    job.log_tail = list(state.strata_log_tail)
-    return NodeStrataStatus(
-        node_id=NODE_ID,
-        installed=strata_bin is not None,
-        version=str(meta.get("version") or ""),
-        binary_path=str(strata_bin) if strata_bin else "",
-        running=bool(
-            state.snapshot.strata_healthy
-            or (state.strata_proc is not None and state.strata_proc.returncode is None)
-        ),
-        healthy=state.snapshot.strata_healthy,
-        port=STRATA_PORT,
-        active_model=active,
-        models=list(state.snapshot.strata_models),
-        installed_models=installed_models,
-        presets=presets,
-        job=job,
-        error=job.error,
-    )
+    return _build_strata_status_snapshot(sys.modules[__name__])
 
 
-async def _run_strata_cli_job(
-    *,
-    action: Literal["launch", "calibrate"],
-    cmd: list[str],
-    step_label: str,
-    timeout_s: float,
-) -> None:
-    storage_root = Path(STORAGE_PATH)
-    state.strata_log_tail.clear()
-    state.strata_job = StrataJobState(
-        job_id=uuid.uuid4().hex[:10],
-        action=action,
-        status="running",
-        step=step_label,
-        started_at=time.time(),
-    )
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            env=strata_env(storage_root),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        state.strata_proc = proc
-
-        async def _drain() -> None:
-            assert proc.stdout is not None
-            while True:
-                line_b = await proc.stdout.readline()
-                if not line_b:
-                    break
-                line = line_b.decode("utf-8", errors="replace").rstrip()
-                if line:
-                    state.strata_log_tail.append(line)
-
-        await asyncio.wait_for(_drain(), timeout=timeout_s)
-        rc = await proc.wait()
-        if rc == 0:
-            await state.poll_once()
-            state.strata_job.status = "completed"
-            state.strata_job.step = (
-                "Quick Tune complete" if action == "calibrate" else "Strata serving"
-            )
-        else:
-            state.strata_job.status = "failed"
-            tail = state.strata_log_tail[-1] if state.strata_log_tail else f"exit code {rc}"
-            state.strata_job.error = tail
-            state.strata_job.step = f"{action} failed"
-    except TimeoutError:
-        if state.strata_proc and state.strata_proc.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                state.strata_proc.terminate()
-        state.strata_job.status = "failed"
-        state.strata_job.error = f"Timed out after {int(timeout_s)}s"
-        state.strata_job.step = f"{action} timed out"
-    except (OSError, ValueError) as exc:
-        state.strata_job.status = "failed"
-        state.strata_job.error = str(exc)
-        state.strata_job.step = f"{action} error"
-    finally:
-        state.strata_job.finished_at = time.time()
-        state.strata_job.log_tail = list(state.strata_log_tail)
-
-
-@app.get("/strata/status", response_model=NodeStrataStatus)
-async def get_strata_status() -> NodeStrataStatus:
-    return await asyncio.to_thread(_build_strata_status)
-
-
-@app.post("/strata/install", response_model=NodeStrataStatus)
-async def install_strata_endpoint(req: StrataInstallRequest | None = None) -> NodeStrataStatus:
-    if state.strata_job.status == "running":
-        return await asyncio.to_thread(_build_strata_status)
-    body = req or StrataInstallRequest()
-    state.strata_log_tail.clear()
-    state.strata_job = StrataJobState(
-        job_id=uuid.uuid4().hex[:10],
-        action="install",
-        status="running",
-        step="Downloading SHA-256-verified Strata CLI...",
-        started_at=time.time(),
-    )
-
-    async def _worker() -> None:
-        try:
-            res = await asyncio.to_thread(
-                install_or_update_strata,
-                version=body.version,
-                force=body.force,
-            )
-            state.strata_log_tail.extend(res.steps)
-            if res.ok:
-                state.strata_job.status = "completed"
-                state.strata_job.step = f"Strata v{res.current_tag} ready"
-            else:
-                state.strata_job.status = "failed"
-                state.strata_job.error = res.error or "Install failed"
-                state.strata_job.step = "Install failed"
-        except (OSError, RuntimeError, ValueError) as exc:
-            state.strata_job.status = "failed"
-            state.strata_job.error = str(exc)
-            state.strata_job.step = "Install failed"
-        finally:
-            state.strata_job.finished_at = time.time()
-            state.strata_job.log_tail = list(state.strata_log_tail)
-            await state.poll_once()
-
-    asyncio.create_task(_worker())
-    return await asyncio.to_thread(_build_strata_status)
-
-
-@app.post("/strata/plan")
-async def plan_strata_endpoint(req: StrataLaunchRequest) -> dict:
-    strata_bin = resolve_strata_bin()
-    if strata_bin is None:
-        raise HTTPException(status_code=400, detail="Strata is not installed on this node")
-    plan_req = req.model_copy(update={"plan_only": True})
-    try:
-        cmd = build_strata_launch_cmd(
-            strata_bin, plan_req, storage_root=Path(STORAGE_PATH), port=STRATA_PORT
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    def _run_plan() -> dict:
-        proc = subprocess.run(
-            cmd,
-            env=strata_env(STORAGE_PATH),
-            capture_output=True,
-            text=True,
-            timeout=15.0,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise HTTPException(
-                status_code=400,
-                detail=(proc.stderr or proc.stdout or "strata launch --plan failed").strip()[:400],
-            )
-        try:
-            return json.loads(proc.stdout or "{}")
-        except ValueError:
-            return {"raw": proc.stdout.strip()}
-
-    return await asyncio.to_thread(_run_plan)
-
-
-@app.post("/strata/launch", response_model=NodeStrataStatus)
-async def launch_strata_endpoint(req: StrataLaunchRequest) -> NodeStrataStatus:
-    if state.strata_job.status == "running":
-        raise HTTPException(status_code=409, detail="Another Strata job is currently running")
-    strata_bin = resolve_strata_bin()
-    if strata_bin is None:
-        raise HTTPException(status_code=400, detail="Strata is not installed on this node")
-    launch_req = req.model_copy(update={"plan_only": False})
-    try:
-        cmd = build_strata_launch_cmd(
-            strata_bin, launch_req, storage_root=Path(STORAGE_PATH), port=STRATA_PORT
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if req.evict_primary_vram:
-        await _evict_primary_engine_models()
-
-    label = req.preset or (
-        f"{req.family}/{req.model}" if req.family or req.model else Path(req.model_path).name
-    )
-    asyncio.create_task(
-        _run_strata_cli_job(
-            action="launch",
-            cmd=cmd,
-            step_label=f"Launching Strata ({label})...",
-            timeout_s=1800.0,
-        )
-    )
-    return await asyncio.to_thread(_build_strata_status)
-
-
-@app.post("/strata/calibrate", response_model=NodeStrataStatus)
-async def calibrate_strata_endpoint(req: StrataCalibrateRequest) -> NodeStrataStatus:
-    if state.strata_job.status == "running":
-        raise HTTPException(status_code=409, detail="Another Strata job is currently running")
-    strata_bin = resolve_strata_bin()
-    if strata_bin is None:
-        raise HTTPException(status_code=400, detail="Strata is not installed on this node")
-    try:
-        cmd = build_strata_calibrate_cmd(
-            strata_bin, req, storage_root=Path(STORAGE_PATH), port=STRATA_PORT
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if req.evict_primary_vram:
-        await _evict_primary_engine_models()
-    await asyncio.to_thread(stop_strata_server, Path(STORAGE_PATH))
-
-    label = req.preset or f"{req.family}/{req.model}"
-    timeout_s = 7800.0 if req.mode == "thorough" else 1800.0
-    asyncio.create_task(
-        _run_strata_cli_job(
-            action="calibrate",
-            cmd=cmd,
-            step_label=f"Running {req.mode} tune on {label} (exclusive GPU)...",
-            timeout_s=timeout_s,
-        )
-    )
-    return await asyncio.to_thread(_build_strata_status)
-
-
-@app.post("/strata/stop", response_model=NodeStrataStatus)
-async def stop_strata_endpoint() -> NodeStrataStatus:
-    if state.strata_proc is not None and state.strata_proc.returncode is None:
-        state.strata_proc.terminate()
-        with contextlib.suppress(TimeoutError, ProcessLookupError):
-            await asyncio.wait_for(state.strata_proc.wait(), timeout=4.0)
-    await asyncio.to_thread(stop_strata_server, Path(STORAGE_PATH))
-    if state.strata_job.status == "running":
-        state.strata_job.status = "failed"
-        state.strata_job.error = "Stopped by user"
-        state.strata_job.step = "Stopped"
-        state.strata_job.finished_at = time.time()
-    await state.poll_once()
-    return await asyncio.to_thread(_build_strata_status)
-
-
-@app.post("/strata/import-plan")
-async def import_strata_plan_endpoint(req: StrataImportPlanRequest) -> dict:
-    try:
-        return await asyncio.to_thread(import_strata_gguf_plan, req.model_path, Path(STORAGE_PATH))
-    except (FileNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.api_route("/strata/proxy/{path:path}", methods=["GET", "POST"])
-async def proxy_local_strata_engine(path: str, request: Request) -> Response:
-    """Zero-copy streaming SSE proxy from router to local loopback `strata-server`."""
-    clean_path = path.lstrip("/")
-    if clean_path not in _STRATA_PROXY_ALLOWLIST:
-        raise HTTPException(status_code=403, detail=f"Strata proxy path not allowlisted: {clean_path}")
-
-    target = f"{STRATA_URL}/{clean_path}"
-    if request.url.query:
-        target = f"{target}?{request.url.query}"
-
-    fwd_headers: dict[str, str] = {}
-    for hname in ("content-type", "accept", "anthropic-version", "anthropic-beta"):
-        val = request.headers.get(hname)
-        if val:
-            fwd_headers[hname] = val
-
-    body = await request.body()
-    client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
-    try:
-        req_obj = client.build_request(
-            request.method,
-            target,
-            content=body if body else None,
-            headers=fwd_headers,
-        )
-        upstream = await client.send(req_obj, stream=True)
-    except httpx.HTTPError as exc:
-        await client.aclose()
-        raise HTTPException(status_code=502, detail=f"Local Strata server unreachable: {exc}") from exc
-
-    async def _stream():
-        try:
-            async for chunk in upstream.aiter_bytes():
-                if chunk:
-                    yield chunk
-        finally:
-            await upstream.aclose()
-            await client.aclose()
-
-    ct = upstream.headers.get("content-type") or "application/json"
-    return StreamingResponse(_stream(), status_code=upstream.status_code, media_type=ct)
+app.include_router(build_media_agent_router(lambda: sys.modules[__name__]))
+app.include_router(build_strata_agent_router(lambda: sys.modules[__name__]))
 
 
 @app.delete("/files/models/{filename}")

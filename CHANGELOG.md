@@ -3,6 +3,14 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.25.4] - 2026-11-25
+
+### Structural Refactor (Agent, Chat Context & Dashboard Styles)
+- **Node Agent Split (`backend/agent/downloads.py`, `backend/agent/media_routes.py`, `backend/agent/strata_routes.py`):** Extracted Hugging Face `hf_xet`/HTTP downloaders, local media engine lifecycle/proxy routes, and Strata Sparse-MoE lifecycle/Quick Tune/proxy routes out of `backend/agent/main.py` (2,657 → 1,584 lines) while preserving all route contracts and test/module exports.
+- **Agent Chat Context Split (`backend/router/chat_context.py`):** Extracted system/rules/scoped-extension assembly, auto-compaction, approval/reasoning helpers, and `suggest_mcp`/`suggest_skill` discovery execution out of `backend/router/chat_api.py` (1,486 → 958 lines).
+- **Dashboard CSS Partials (`dashboard/src/index.css`, `dashboard/src/styles/`):** Split `index.css` (5,086 lines) into ordered `@import` partials (`base.css`, `panels.css`, `chat.css`, `studio-settings.css`) preserving exact CSS cascade order and zero-pill constraints.
+- **Parity Verification (`tests/test_refactor_parity.py`):** Added 6 integration/parity tests covering agent mounted routers, download tracker/protocol fallbacks, chat context/approval/compaction helpers, and CSS cascade order.
+
 ## [0.25.3] - 2026-11-25
 
 ### Supply-Chain Hardening & Feature Maturity Docs

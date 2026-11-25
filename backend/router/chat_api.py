@@ -10,9 +10,7 @@ Splitch Agent Chat Backend:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-import re
 import secrets
 import time
 import uuid
@@ -24,28 +22,37 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
+from backend.router.chat_context import (
+    adjust_reasoning_effort_on_error as _adjust_reasoning_effort_on_error,
+)
+from backend.router.chat_context import (
+    execute_discovery_tool,
+    load_chat_rules,
+    load_scopes,
+    norm_ws_key,
+    prepare_chat_turn,
+    run_compaction,
+    save_chat_rules,
+    save_scopes,
+)
+from backend.router.chat_context import (
+    matches_cmd_prefix_or_pattern as _matches_cmd_prefix_or_pattern,  # noqa: F401
+)
+from backend.router.chat_context import (
+    requires_tool_approval as _requires_tool_approval,
+)
+from backend.router.chat_context import (
+    sse_event as _sse,
+)
 from backend.router.chat_mcp import (
     call_mcp_tool as _call_mcp_tool,
 )
-from backend.router.chat_mcp import (
-    fetch_mcp_tools as _fetch_mcp_tools,
-)
-from backend.router.chat_store import (
-    APPROVAL_REQUIRED_TOOLS,
-    MCP_DISCOVERY_TOOLS_SCHEMA,
-    MEDIA_TOOLS_SCHEMA,
-    SKILL_DISCOVERY_TOOLS_SCHEMA,
-    SWARM_TOOLS_SCHEMA,
-    WORKSPACE_TOOLS_SCHEMA,
-    ChatStore,
-)
-from backend.router.mcp_api import annotate_mcp_egress, search_mcp_registry_items
+from backend.router.chat_store import ChatStore
 from backend.router.media_api import MediaService
 from backend.router.policy import resolve_route
-from backend.router.skills_api import scan_installed_skills, search_skills_registry_items
 from backend.router.swarm import SwarmManager
 from backend.router.telemetry import ClusterState
-from backend.router.web_search import WEB_TOOLS_SCHEMA, execute_web_fetch, execute_web_search
+from backend.router.web_search import execute_web_fetch, execute_web_search
 from backend.shared.models import (
     ApprovalDecision,
     ChatMessageRecord,
@@ -57,7 +64,6 @@ from backend.shared.models import (
     ConversationCreate,
     ConversationSummary,
     ConversationUpdate,
-    McpServerConfig,
     MediaGenerateRequest,
     ScopedExtensionsConfig,
     ScopeRule,
@@ -68,77 +74,6 @@ from backend.shared.models import (
 )
 from backend.shared.secrets import sign_tool_approval_ed25519
 from backend.shared.security import sign_tool_approval
-
-
-def _adjust_reasoning_effort_on_error(
-    req_body: dict[str, Any], err_body: str
-) -> dict[str, Any] | None:
-    """Remap or strip reasoning_effort when an upstream Jinja template rejects it."""
-    if "reasoning_effort" not in req_body:
-        return None
-    lower = err_body.lower()
-    if "unexpected reasoning effort" not in lower and "reasoning_effort" not in lower:
-        return None
-    cur = str(req_body["reasoning_effort"]).lower()
-    supported = lower.split("supported", 1)[-1] if "supported" in lower else lower
-    updated = dict(req_body)
-    if cur == "high" and re.search(r"\bxhigh\b", supported):
-        updated["reasoning_effort"] = "xhigh"
-    elif cur == "xhigh" and re.search(r"\bhigh\b", supported) and not re.search(r"\bxhigh\b", supported):
-        updated["reasoning_effort"] = "high"
-    elif cur == "none" and re.search(r"\boff\b", supported):
-        updated["reasoning_effort"] = "off"
-    else:
-        updated.pop("reasoning_effort", None)
-    return updated
-
-
-def _sse(event: str, data: dict[str, Any]) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
-
-
-def _matches_cmd_prefix_or_pattern(cmd: str, entries: list[str], *, anywhere: bool) -> bool:
-    low = cmd.strip().lower()
-    if not low:
-        return False
-    for pat in entries:
-        p = pat.strip().lower()
-        if not p:
-            continue
-        if anywhere:
-            if p in low:
-                return True
-        elif low == p or low.startswith((f"{p} ", f"{p}\t")):
-            return True
-    return False
-
-
-def _requires_tool_approval(
-    tool_name: str,
-    parsed_args: dict[str, Any],
-    *,
-    is_external_mcp: bool,
-    conv_auto_approve: bool,
-    router_cfg: Any,
-) -> bool:
-    """Evaluate tiered approval policy + shell allow/denylist (denylist always wins)."""
-    policy = getattr(router_cfg, "approval_policy", "ask")
-    if is_external_mcp:
-        return not (conv_auto_approve or policy == "full_auto")
-    if tool_name not in APPROVAL_REQUIRED_TOOLS:
-        return False
-    if tool_name == "run_command":
-        cmd_str = str(parsed_args.get("command") or "")
-        denylist = list(getattr(router_cfg, "shell_denylist", []) or [])
-        if _matches_cmd_prefix_or_pattern(cmd_str, denylist, anywhere=True):
-            return True
-        if conv_auto_approve or policy == "full_auto":
-            return False
-        if policy == "turbo_safe":
-            allowlist = list(getattr(router_cfg, "shell_allowlist", []) or [])
-            return not _matches_cmd_prefix_or_pattern(cmd_str, allowlist, anywhere=False)
-        return True
-    return not (conv_auto_approve or policy in ("auto_edits", "turbo_safe", "full_auto"))
 
 
 def build_chat_router(
@@ -160,134 +95,42 @@ def build_chat_router(
         _call_mcp_tool,
     )
 
-    def _norm_ws_key(subpath: str) -> str:
-        return subpath.strip().strip("/") or "."
-
-    def _load_scopes() -> ScopedExtensionsConfig:
-        if not scopes_file.exists():
-            return ScopedExtensionsConfig()
-        try:
-            return ScopedExtensionsConfig.model_validate(
-                json.loads(scopes_file.read_text(encoding="utf-8"))
-            )
-        except (OSError, ValueError):
-            return ScopedExtensionsConfig()
-
-    def _save_scopes(cfg: ScopedExtensionsConfig) -> ScopedExtensionsConfig:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        scopes_file.write_text(
-            json.dumps(cfg.model_dump(mode="json"), indent=2), encoding="utf-8"
-        )
-        return cfg
-
-    def _resolve_effective_extensions(
-        workspace_subpath: str,
-        chat_skills: list[str],
-        chat_mcps: list[str],
-    ) -> tuple[list[str], list[str]]:
-        scopes = _load_scopes()
-        ws_rule = scopes.workspaces.get(_norm_ws_key(workspace_subpath), ScopeRule())
-        eff_skills = list(
-            dict.fromkeys([*scopes.global_scope.skills, *ws_rule.skills, *chat_skills])
-        )
-        eff_mcps = list(
-            dict.fromkeys([*scopes.global_scope.mcps, *ws_rule.mcps, *chat_mcps])
-        )
-        return eff_skills, eff_mcps
-
-    def _load_selected_skills(skill_ids: list[str]) -> str:
-        if not skill_ids or not skills_dir.exists():
-            return ""
-        blocks: list[str] = []
-        for sid in skill_ids:
-            md = (skills_dir / sid / "SKILL.md").resolve()
-            if md.is_relative_to(skills_dir.resolve()) and md.is_file():
-                with contextlib.suppress(OSError):
-                    blocks.append(f"<skill id=\"{sid}\">\n{md.read_text(encoding='utf-8')[:8000]}\n</skill>")
-        return "\n\n".join(blocks)
-
-    def _load_all_mcp_configs() -> list[McpServerConfig]:
-        reg = data_dir / "mcp_servers.json"
-        if not reg.exists():
-            return []
-        try:
-            raw = json.loads(reg.read_text(encoding="utf-8"))
-            return [
-                annotate_mcp_egress(McpServerConfig.model_validate(item))
-                for item in raw
-                if isinstance(item, dict) and item.get("id")
-            ]
-        except (OSError, ValueError):
-            return []
-
-    def _load_mcp_configs(mcp_ids: list[str]) -> dict[str, McpServerConfig]:
-        reg = data_dir / "mcp_servers.json"
-        if not mcp_ids or not reg.exists():
-            return {}
-        try:
-            raw = json.loads(reg.read_text(encoding="utf-8"))
-            wanted = set(mcp_ids)
-            return {
-                item["id"]: annotate_mcp_egress(McpServerConfig.model_validate(item))
-                for item in raw
-                if isinstance(item, dict) and item.get("id") in wanted and item.get("enabled", True)
-            }
-        except (OSError, ValueError):
-            return {}
-
     @router.get("/scopes", response_model=ScopedExtensionsConfig)
     async def get_scopes() -> ScopedExtensionsConfig:
-        return await asyncio.to_thread(_load_scopes)
-
-    def _rules_file() -> Path:
-        return data_dir / "rules.json"
-
-    def _load_rules() -> ChatRulesConfig:
-        p = _rules_file()
-        if not p.exists():
-            return ChatRulesConfig()
-        try:
-            return ChatRulesConfig.model_validate(json.loads(p.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            return ChatRulesConfig()
-
-    def _save_rules(cfg: ChatRulesConfig) -> ChatRulesConfig:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        _rules_file().write_text(cfg.model_dump_json(indent=2) + "\n", encoding="utf-8")
-        return cfg
+        return await asyncio.to_thread(load_scopes, scopes_file)
 
     @router.get("/rules", response_model=ChatRulesConfig)
     async def get_chat_rules() -> ChatRulesConfig:
-        return await asyncio.to_thread(_load_rules)
+        return await asyncio.to_thread(load_chat_rules, data_dir)
 
     @router.put("/rules", response_model=ChatRulesConfig)
     async def put_chat_rules(cfg: ChatRulesConfig) -> ChatRulesConfig:
-        return await asyncio.to_thread(_save_rules, cfg)
+        return await asyncio.to_thread(save_chat_rules, data_dir, cfg)
 
     @router.put("/scopes/global", response_model=ScopedExtensionsConfig)
     async def update_global_scope(rule: ScopeRule) -> ScopedExtensionsConfig:
         def _upd() -> ScopedExtensionsConfig:
-            cfg = _load_scopes()
+            cfg = load_scopes(scopes_file)
             cfg.global_scope = ScopeRule(
                 skills=list(dict.fromkeys(rule.skills)),
                 mcps=list(dict.fromkeys(rule.mcps)),
             )
-            return _save_scopes(cfg)
+            return save_scopes(data_dir, scopes_file, cfg)
 
         return await asyncio.to_thread(_upd)
 
     @router.put("/scopes/workspace", response_model=ScopedExtensionsConfig)
     async def update_workspace_scope(req: WorkspaceScopeUpdate) -> ScopedExtensionsConfig:
         def _upd() -> ScopedExtensionsConfig:
-            cfg = _load_scopes()
-            key = _norm_ws_key(req.workspace)
+            cfg = load_scopes(scopes_file)
+            key = norm_ws_key(req.workspace)
             skills = list(dict.fromkeys(req.skills))
             mcps = list(dict.fromkeys(req.mcps))
             if not skills and not mcps:
                 cfg.workspaces.pop(key, None)
             else:
                 cfg.workspaces[key] = ScopeRule(skills=skills, mcps=mcps)
-            return _save_scopes(cfg)
+            return save_scopes(data_dir, scopes_file, cfg)
 
         return await asyncio.to_thread(_upd)
 
@@ -399,155 +242,14 @@ def build_chat_router(
         fut.set_result(decision.approved)
         return {"ok": True, "approved": decision.approved}
 
-    def _estimate_msgs_tokens(
-        summary: str, sys_text: str, msgs: list[ChatMessageRecord]
-    ) -> int:
-        chars = len(sys_text) + len(summary)
-        for m in msgs:
-            chars += len(m.content or "") + len(m.reasoning or "") + len(json.dumps(m.tool_calls))
-        return max(1, chars // 4)
-
-    def _split_for_compaction(
-        uncompacted: list[ChatMessageRecord], keep_recent: int = 6
-    ) -> tuple[list[ChatMessageRecord], list[ChatMessageRecord]]:
-        if len(uncompacted) <= keep_recent:
-            return [], uncompacted
-        split_idx = len(uncompacted) - keep_recent
-        # Prefer starting kept tail on a user message so tool_calls/results never split mid-turn
-        while split_idx > 2 and uncompacted[split_idx].role != "user":
-            split_idx -= 1
-        if split_idx < 2:
-            return [], uncompacted
-        return uncompacted[:split_idx], uncompacted[split_idx:]
-
-    async def _run_compaction(
-        conv: ConversationSummary, keep_recent: int = 6
-    ) -> CompactResponse:
-        all_msgs = await asyncio.to_thread(store.list_messages, conv.id)
-        uncompacted = [m for m in all_msgs if m.created_at > conv.compacted_through_ts]
-        older, recent = _split_for_compaction(uncompacted, keep_recent=keep_recent)
-        est_before = _estimate_msgs_tokens(conv.compacted_summary, conv.system_prompt, uncompacted)
-        if not older:
-            return CompactResponse(
-                ok=True,
-                compacted=False,
-                compacted_messages=0,
-                kept_messages=len(uncompacted),
-                summary=conv.compacted_summary,
-                compacted_through_ts=conv.compacted_through_ts,
-                estimated_tokens_before=est_before,
-                estimated_tokens_after=est_before,
-                detail="Conversation is already concise enough — fewer than 2 older turns to compact.",
-            )
-
-        transcript_lines: list[str] = []
-        if conv.compacted_summary.strip():
-            transcript_lines.append(f"[Previous Summary]\n{conv.compacted_summary.strip()}\n")
-        for m in older:
-            role_tag = m.role.upper() if not m.tool_name else f"TOOL({m.tool_name})"
-            body = (m.content or "").strip()
-            if len(body) > 1000:
-                body = body[:1000] + " ...[truncated]"
-            transcript_lines.append(f"{role_tag}: {body}")
-
-        compact_candidates: list[str] = []
-        for cand in ("heavy", "fast"):
-            if cand in cluster.aliases and cand not in compact_candidates:
-                compact_candidates.append(cand)
-        if conv.model not in compact_candidates:
-            compact_candidates.append(conv.model)
-
-        compact_req = {
-            "model": compact_candidates[0],
-            "stream": False,
-            "temperature": 0.2,
-            "max_tokens": 500,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Condense the conversation history into a crisp, high-signal engineering summary. "
-                        "Preserve: user goals, technical decisions, file paths, symbol names, tool results, "
-                        "errors fixed, and unresolved next steps. Omit pleasantries and verbatim large outputs. "
-                        "Use concise markdown bullets."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": "\n\n".join(transcript_lines)[:14_000],
-                },
-            ],
-        }
-
-        decision = None
-        skip_reasons: dict[str, str] = {}
-        for cand_model in compact_candidates:
-            compact_req["model"] = cand_model
-            decision, skip_reasons = resolve_route(
-                endpoint="/v1/chat/completions",
-                requested_model=cand_model,
-                body=compact_req,
-                nodes=cluster.nodes,
-                aliases=cluster.aliases,
-                control=cluster.control,
-                guards=cluster.config.guards,
-                heavy_char_threshold=cluster.config.router.auto_heavy_char_threshold,
-            )
-            if decision is not None:
-                break
-        if decision is None:
-            raise HTTPException(
-                status_code=503, detail=f"No eligible node for compaction: {skip_reasons}"
-            )
-
-        compact_req["model"] = decision.target_model
-        summary_text = ""
-        try:
-            resp = await cluster.proxy_client.post(
-                f"{decision.node.engine_url}/v1/chat/completions",
-                json=compact_req,
-            )
-            if resp.status_code >= 400:
-                raise HTTPException(
-                    status_code=502, detail=f"Compaction upstream HTTP {resp.status_code}"
-                )
-            data = resp.json()
-            choices = data.get("choices") or []
-            if choices and isinstance(choices[0], dict):
-                msg_obj = choices[0].get("message") or {}
-                summary_text = str(msg_obj.get("content") or "").strip()
-        except HTTPException:
-            raise
-        except (httpx.HTTPError, ValueError) as exc:
-            raise HTTPException(status_code=502, detail=f"Compaction failed: {exc}") from exc
-
-        if not summary_text:
-            # Deterministic fallback summary if model emitted empty content
-            summary_text = "\n".join(
-                f"- **{m.role}**: {(m.content or '')[:180].replace(chr(10), ' ')}" for m in older[:12]
-            )
-
-        watermark = older[-1].created_at
-        await asyncio.to_thread(store.save_compaction, conv.id, summary_text, watermark)
-        est_after = _estimate_msgs_tokens(summary_text, conv.system_prompt, recent)
-        return CompactResponse(
-            ok=True,
-            compacted=True,
-            compacted_messages=len(older),
-            kept_messages=len(recent),
-            summary=summary_text,
-            compacted_through_ts=watermark,
-            estimated_tokens_before=est_before,
-            estimated_tokens_after=est_after,
-        )
-
     @router.post("/conversations/{conv_id}/compact", response_model=CompactResponse)
     async def compact_conversation(conv_id: str, keep_recent: int = 4) -> CompactResponse:
         conv = await asyncio.to_thread(store.get_conversation, conv_id)
         if not conv:
             raise HTTPException(status_code=404, detail="Conversation not found")
-        return await _run_compaction(conv, keep_recent=max(2, min(keep_recent, 12)))
+        return await run_compaction(
+            cluster, store, conv, keep_recent=max(2, min(keep_recent, 12))
+        )
 
     @router.delete("/conversations/{conv_id}/compact", response_model=ConversationSummary)
     async def clear_conversation_compaction(conv_id: str) -> ConversationSummary:
@@ -582,168 +284,23 @@ def build_chat_router(
         async def _event_stream() -> AsyncGenerator[bytes, None]:
             yield _sse("user_saved", user_msg.model_dump())
 
-            # Assemble system prompt + global rules + injected skills + MCP tools
-            sys_parts = [
-                "You are Splitch, a precise local AI engineering assistant.",
-                "Be concise, accurate, and use tools directly when inspecting or modifying workspace files.",
-            ]
-            rules_cfg = await asyncio.to_thread(_load_rules)
-            if rules_cfg.global_rules.strip():
-                sys_parts.append(f"Global User Rules:\n{rules_cfg.global_rules.strip()}")
-            if conv.system_prompt.strip():
-                sys_parts.append(conv.system_prompt.strip())
-
-            eff_skills, eff_mcps = await asyncio.to_thread(
-                _resolve_effective_extensions,
-                conv.workspace_subpath,
-                conv.enabled_skills,
-                conv.enabled_mcps,
+            prep_events, turn = await prepare_chat_turn(
+                conv=conv,
+                cluster=cluster,
+                store=store,
+                data_dir=data_dir,
+                skills_dir=skills_dir,
+                scopes_file=scopes_file,
+                media_service=media_service,
             )
-
-            skills_text = await asyncio.to_thread(_load_selected_skills, eff_skills)
-            if skills_text:
-                sys_parts.append(f"Active Skills:\n{skills_text}")
-
-            if conv.web_search_enabled:
-                sys_parts.append(
-                    "Web search is enabled. Use `web_search` for current facts or documentation, "
-                    "optionally call `web_fetch` on a result URL for full details, and cite source URLs."
-                )
-
-            # Auto-compact older turns non-destructively when active context crosses 80%
-            active_conv = conv
-            all_history = await asyncio.to_thread(store.list_messages, conv_id)
-            uncompacted_msgs = [
-                m for m in all_history if m.created_at > active_conv.compacted_through_ts
-            ]
-            ctx_budget = next(
-                (
-                    n.telemetry.context_length
-                    for n in cluster.nodes.values()
-                    if n.online and n.telemetry and n.telemetry.context_length
-                ),
-                32768,
-            )
-            est_active_tokens = _estimate_msgs_tokens(
-                active_conv.compacted_summary, "\n\n".join(sys_parts), uncompacted_msgs
-            )
-            compact_threshold = max(0.50, min(0.95, float(cluster.config.router.auto_compact_threshold)))
-            if (
-                active_conv.auto_compact
-                and ctx_budget > 0
-                and (est_active_tokens / ctx_budget) >= compact_threshold
-                and len(uncompacted_msgs) > 7
-            ):
-                yield _sse(
-                    "compacting",
-                    {"estimated_tokens": est_active_tokens, "context_window": ctx_budget},
-                )
-                try:
-                    c_res = await _run_compaction(active_conv, keep_recent=6)
-                    if c_res.compacted:
-                        refreshed = await asyncio.to_thread(store.get_conversation, conv_id)
-                        if refreshed:
-                            active_conv = refreshed
-                        yield _sse("compacted", c_res.model_dump())
-                except HTTPException:
-                    pass
-
-            if active_conv.compacted_summary.strip():
-                sys_parts.append(
-                    f"<conversation_summary>\n{active_conv.compacted_summary.strip()}\n</conversation_summary>"
-                )
-
-            mcp_map = await asyncio.to_thread(_load_mcp_configs, eff_mcps)
-            all_installed_mcps = await asyncio.to_thread(_load_all_mcp_configs)
-            tools_payload: list[dict[str, Any]] = []
-            mcp_tools_only: list[dict[str, Any]] = []
-            active_mcp_lines: list[str] = []
-            if active_conv.tools_enabled:
-                tools_payload.extend(WORKSPACE_TOOLS_SCHEMA)
-                tools_payload.extend(MCP_DISCOVERY_TOOLS_SCHEMA)
-                tools_payload.extend(SKILL_DISCOVERY_TOOLS_SCHEMA)
-                for srv in mcp_map.values():
-                    srv_tools = await _fetch_mcp_tools(
-                        srv, active_conv.workspace_subpath, vault=cluster.vault
-                    )
-                    mcp_tools_only.extend(srv_tools)
-                    tools_payload.extend(srv_tools)
-                    t_names = [
-                        str(t.get("function", {}).get("name") or "")
-                        for t in srv_tools
-                        if t.get("function", {}).get("name")
-                    ]
-                    active_mcp_lines.append(
-                        f"- `{srv.id}` ({srv.name}): {srv.description or 'MCP server'}"
-                        + (f" — tools: {', '.join(t_names[:8])}" if t_names else " — (0 tools discovered)")
-                    )
-                inactive_mcps = [s for s in all_installed_mcps if s.id not in mcp_map]
-                mcp_ctx_lines: list[str] = []
-                if active_mcp_lines:
-                    mcp_ctx_lines.append("Enabled MCP Servers (use `mcp__<id>__<tool>` directly):\n" + "\n".join(active_mcp_lines))
-                if inactive_mcps:
-                    mcp_ctx_lines.append(
-                        "Installed-but-Inactive MCP Servers (not enabled in this chat): "
-                        + ", ".join(f"`{s.id}` ({s.name})" for s in inactive_mcps[:12])
-                    )
-                mcp_ctx_lines.append(
-                    "If a task would benefit from an inactive or uninstalled MCP integration, call "
-                    "`suggest_mcp(query, reason)` to search local + registry MCPs and surface a 1-click recommendation card."
-                )
-                all_installed_skills = await asyncio.to_thread(scan_installed_skills, skills_dir)
-                active_skill_set = set(eff_skills)
-                inactive_skills = [s for s in all_installed_skills if s.id not in active_skill_set]
-                if inactive_skills:
-                    mcp_ctx_lines.append(
-                        "Installed-but-Inactive Skills (not enabled in this chat): "
-                        + ", ".join(f"`{s.id}` ({s.name})" for s in inactive_skills[:12])
-                    )
-                mcp_ctx_lines.append(
-                    "If a task would benefit from an inactive or uninstalled workflow skill, call "
-                    "`suggest_skill(query, reason)` to search local + skills.sh skills and surface a 1-click recommendation card."
-                )
-                sys_parts.append("\n".join(mcp_ctx_lines))
-            if active_conv.web_search_enabled:
-                tools_payload.extend(WEB_TOOLS_SCHEMA)
-            if media_service is not None and media_service.has_healthy_backend():
-                tools_payload.extend(MEDIA_TOOLS_SCHEMA)
-            if active_conv.swarm_enabled:
-                tools_payload.extend(SWARM_TOOLS_SCHEMA)
-                sys_parts.append(
-                    "Swarm orchestration is enabled. For multi-part tasks that benefit from parallel "
-                    "research, review, or multi-node execution, call `spawn_agent` to launch focused "
-                    "workers (default `readonly=true`) and `wait_agents` to collect their results."
-                )
-
-            history_records = [
-                m for m in all_history if m.created_at > active_conv.compacted_through_ts
-            ]
-            openai_msgs: list[dict[str, Any]] = [
-                {"role": "system", "content": "\n\n".join(sys_parts)}
-            ]
-            for m in history_records:
-                if m.role == "user":
-                    if m.images:
-                        parts: list[dict[str, Any]] = [{"type": "text", "text": m.content}]
-                        for img in m.images:
-                            parts.append({"type": "image_url", "image_url": {"url": img}})
-                        openai_msgs.append({"role": "user", "content": parts})
-                    else:
-                        openai_msgs.append({"role": "user", "content": m.content})
-                elif m.role == "assistant":
-                    entry: dict[str, Any] = {"role": "assistant", "content": m.content or None}
-                    if m.tool_calls:
-                        entry["tool_calls"] = m.tool_calls
-                    openai_msgs.append(entry)
-                elif m.role == "tool":
-                    openai_msgs.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": m.tool_call_id or "call_0",
-                            "name": m.tool_name or "tool",
-                            "content": m.content,
-                        }
-                    )
+            for pkt in prep_events:
+                yield pkt
+            active_conv = turn.active_conv
+            eff_skills = turn.eff_skills
+            mcp_map = turn.mcp_map
+            mcp_tools_only = turn.mcp_tools_only
+            tools_payload = turn.tools_payload
+            openai_msgs = turn.openai_msgs
 
             active_swarm_run: SwarmRunRecord | None = None
 
@@ -1101,100 +658,15 @@ def build_chat_router(
                             tool_ok, tool_output = await execute_web_fetch(
                                 str(parsed_args.get("url", ""))
                             )
-                        elif t_name == "suggest_mcp":
-                            q_mcp = str(parsed_args.get("query") or "").strip()
-                            reason_mcp = str(parsed_args.get("reason") or "").strip()
-                            if not q_mcp:
-                                tool_ok = False
-                                tool_output = "Missing 'query' argument for suggest_mcp."
-                            else:
-                                q_low = q_mcp.lower()
-                                installed_list = await asyncio.to_thread(_load_all_mcp_configs)
-                                local_matches = [
-                                    {
-                                        "id": s.id,
-                                        "name": s.name,
-                                        "description": s.description,
-                                        "enabled_in_chat": s.id in mcp_map,
-                                        "server_enabled": s.enabled,
-                                    }
-                                    for s in installed_list
-                                    if q_low in s.id.lower()
-                                    or q_low in s.name.lower()
-                                    or q_low in (s.description or "").lower()
-                                ][:6]
-                                reg_matches: list[dict[str, Any]] = []
-                                try:
-                                    found_reg = await search_mcp_registry_items(q_mcp, limit=6)
-                                    reg_matches = [
-                                        {
-                                            "id": r.id,
-                                            "name": r.name,
-                                            "registry_name": r.registry_name,
-                                            "description": r.description,
-                                            "source": r.source,
-                                        }
-                                        for r in found_reg
-                                    ]
-                                except (httpx.HTTPError, ValueError):
-                                    reg_matches = []
-                                tool_ok = True
-                                tool_output = json.dumps(
-                                    {
-                                        "query": q_mcp,
-                                        "reason": reason_mcp,
-                                        "local_matches": local_matches,
-                                        "registry_matches": reg_matches,
-                                    }
-                                )
-                        elif t_name == "suggest_skill":
-                            q_sk = str(parsed_args.get("query") or "").strip()
-                            reason_sk = str(parsed_args.get("reason") or "").strip()
-                            if not q_sk:
-                                tool_ok = False
-                                tool_output = "Missing 'query' argument for suggest_skill."
-                            else:
-                                q_low = q_sk.lower()
-                                installed_skills = await asyncio.to_thread(
-                                    scan_installed_skills, skills_dir
-                                )
-                                active_sk_set = set(eff_skills)
-                                local_matches = [
-                                    {
-                                        "id": s.id,
-                                        "name": s.name,
-                                        "description": s.description,
-                                        "enabled_in_chat": s.id in active_sk_set,
-                                        "server_enabled": s.enabled,
-                                    }
-                                    for s in installed_skills
-                                    if q_low in s.id.lower()
-                                    or q_low in s.name.lower()
-                                    or q_low in (s.description or "").lower()
-                                ][:6]
-                                reg_matches = []
-                                try:
-                                    found_sk = await search_skills_registry_items(q_sk, limit=6)
-                                    reg_matches = [
-                                        {
-                                            "id": r.id,
-                                            "name": r.name,
-                                            "source": r.source,
-                                            "installs": r.installs,
-                                        }
-                                        for r in found_sk
-                                    ]
-                                except (httpx.HTTPError, ValueError):
-                                    reg_matches = []
-                                tool_ok = True
-                                tool_output = json.dumps(
-                                    {
-                                        "query": q_sk,
-                                        "reason": reason_sk,
-                                        "local_matches": local_matches,
-                                        "registry_matches": reg_matches,
-                                    }
-                                )
+                        elif t_name in ("suggest_mcp", "suggest_skill"):
+                            tool_ok, tool_output = await execute_discovery_tool(
+                                t_name,
+                                parsed_args,
+                                data_dir=data_dir,
+                                skills_dir=skills_dir,
+                                mcp_map=mcp_map,
+                                eff_skills=eff_skills,
+                            )
                         elif t_name == "spawn_agent":
                             if not active_conv.swarm_enabled:
                                 tool_ok = False
