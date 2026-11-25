@@ -62,6 +62,9 @@ export interface ChatMessageListProps {
   inspectedSwarmAgentId?: string | null;
   onInspectSwarmAgent?: (runId: string, agentId: string) => void;
   onCancelSwarmAgent?: (agentId: string) => Promise<void>;
+  enabledMcps?: string[];
+  onEnableMcp?: (mcpId: string) => void;
+  onOpenMcpTab?: (query?: string) => void;
 }
 
 function renderApprovalSandboxBadge(approval: PendingApproval) {
@@ -135,7 +138,10 @@ export function ChatMessageList({
   swarmRuns,
   inspectedSwarmAgentId,
   onInspectSwarmAgent,
-  onCancelSwarmAgent
+  onCancelSwarmAgent,
+  enabledMcps,
+  onEnableMcp,
+  onOpenMcpTab
 }: ChatMessageListProps) {
   return (
     <div
@@ -372,6 +378,107 @@ export function ChatMessageList({
                                   // ignore invalid json
                                 }
                                 return null;
+                              })()}
+
+                            {tc.function.name === "suggest_mcp" &&
+                              result?.meta?.ok &&
+                              result.content &&
+                              (() => {
+                                try {
+                                  const rec = JSON.parse(result.content) as {
+                                    query?: string;
+                                    reason?: string;
+                                    local_matches?: Array<{
+                                      id: string;
+                                      name: string;
+                                      description?: string;
+                                      enabled_in_chat?: boolean;
+                                    }>;
+                                    registry_matches?: Array<{
+                                      id: string;
+                                      name: string;
+                                      registry_name?: string;
+                                      description?: string;
+                                      source?: string;
+                                    }>;
+                                  };
+                                  const locals = rec.local_matches ?? [];
+                                  const regs = rec.registry_matches ?? [];
+                                  if (locals.length === 0 && regs.length === 0 && !rec.query) return null;
+                                  return (
+                                    <div className="mcp-rec-card">
+                                      <div className="mcp-rec-card__head">
+                                        <strong>Recommended MCP Integrations</strong>
+                                        {onOpenMcpTab && (
+                                          <button
+                                            type="button"
+                                            className="btn btn--sm btn--ghost"
+                                            onClick={() => onOpenMcpTab(rec.query)}
+                                          >
+                                            Open in MCP Tab
+                                          </button>
+                                        )}
+                                      </div>
+                                      {rec.reason && <p className="muted mcp-rec-card__reason">{rec.reason}</p>}
+                                      <div className="mcp-rec-card__list">
+                                        {locals.map((m) => {
+                                          const isOn =
+                                            Boolean(m.enabled_in_chat) ||
+                                            Boolean(enabledMcps?.includes(m.id));
+                                          return (
+                                            <div key={`loc-${m.id}`} className="mcp-rec-item">
+                                              <div className="mcp-rec-item__info">
+                                                <strong>{m.name}</strong>{" "}
+                                                <span className="pill">Installed</span>
+                                                {m.description && (
+                                                  <div className="muted mcp-rec-item__desc">
+                                                    {m.description}
+                                                  </div>
+                                                )}
+                                              </div>
+                                              <div className="row-actions">
+                                                {onEnableMcp && (
+                                                  <button
+                                                    type="button"
+                                                    className={`btn btn--sm ${isOn ? "" : "btn--accent"}`}
+                                                    disabled={isOn}
+                                                    onClick={() => onEnableMcp(m.id)}
+                                                  >
+                                                    {isOn ? "Enabled" : "Enable in Chat"}
+                                                  </button>
+                                                )}
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                        {regs.slice(0, 4).map((r) => (
+                                          <div key={`reg-${r.source}-${r.name}`} className="mcp-rec-item">
+                                            <div className="mcp-rec-item__info">
+                                              <strong>{r.name}</strong>{" "}
+                                              <span className="pill">{r.source || "registry"}</span>
+                                              {r.description && (
+                                                <div className="muted mcp-rec-item__desc">
+                                                  {r.description}
+                                                </div>
+                                              )}
+                                            </div>
+                                            {onOpenMcpTab && (
+                                              <button
+                                                type="button"
+                                                className="btn btn--sm btn--accent"
+                                                onClick={() => onOpenMcpTab(r.name || rec.query)}
+                                              >
+                                                Install in MCP Tab
+                                              </button>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  );
+                                } catch {
+                                  return null;
+                                }
                               })()}
 
                             {result?.meta?.media_url && (

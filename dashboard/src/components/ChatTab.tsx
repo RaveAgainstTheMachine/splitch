@@ -50,9 +50,10 @@ interface Props {
   snapshot: DashboardSnapshot | null;
   onError: (msg: string | null) => void;
   onConfirm: (state: ConfirmState) => void;
+  onOpenMcpTab?: (query?: string) => void;
 }
 
-export function ChatTab({ snapshot, onError, onConfirm }: Props) {
+export function ChatTab({ snapshot, onError, onConfirm, onOpenMcpTab }: Props) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [trash, setTrash] = useState<ConversationSummary[]>([]);
   const [sidebarView, setSidebarView] = useState<"chats" | "trash">("chats");
@@ -1890,6 +1891,12 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           inspectedSwarmAgentId={inspectedSwarm?.agentId ?? null}
           onInspectSwarmAgent={handleInspectSwarmAgent}
           onCancelSwarmAgent={handleCancelSwarmAgent}
+          enabledMcps={effectiveConfig.enabled_mcps}
+          onEnableMcp={(mcpId) => {
+            const next = Array.from(new Set([...(effectiveConfig.enabled_mcps ?? []), mcpId]));
+            updateConfig({ enabled_mcps: next });
+          }}
+          onOpenMcpTab={onOpenMcpTab}
         />
 
         <ChatComposer

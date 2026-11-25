@@ -167,6 +167,34 @@ WORKSPACE_TOOLS_SCHEMA: list[dict[str, Any]] = [
 
 APPROVAL_REQUIRED_TOOLS = {"write_file", "edit_file", "run_command"}
 
+MCP_DISCOVERY_TOOLS_SCHEMA: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_mcp",
+            "description": (
+                "Search installed (including inactive) MCP servers and the live MCP Registry when a task "
+                "would benefit from an external or specialized MCP tool. Renders an interactive card with "
+                "Enable in Chat / Open in MCP Tab actions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Capability or server keyword (e.g. 'postgres', 'github', 'playwright')",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Concise explanation of how this MCP server helps the current task",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]
+
 SWARM_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "type": "function",

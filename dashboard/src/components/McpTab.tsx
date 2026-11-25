@@ -274,10 +274,12 @@ const MCP_PRESETS: McpPreset[] = [
 
 export function McpTab({
   nodes,
+  initialSearch,
   onError,
   onConfirm
 }: {
   nodes: NodeStatus[];
+  initialSearch?: { query: string; nonce: number } | null;
   onError: (msg: string | null) => void;
   onConfirm: (state: ConfirmState) => void;
 }) {
@@ -432,13 +434,13 @@ export function McpTab({
     dialogRef.current?.showModal();
   };
 
-  const runMcpSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (searchQuery.trim().length < 2) return;
+  const executeMcpSearch = async (queryText: string) => {
+    const trimmed = queryText.trim();
+    if (trimmed.length < 2) return;
     setSearching(true);
     try {
       const res = await fetch(
-        `/api/mcp/search?q=${encodeURIComponent(searchQuery.trim())}&source=${searchSource}&limit=18`
+        `/api/mcp/search?q=${encodeURIComponent(trimmed)}&source=${searchSource}&limit=18`
       );
       if (!res.ok) throw new Error(`MCP search failed: HTTP ${res.status}`);
       setSearchResults(await res.json());
@@ -448,6 +450,18 @@ export function McpTab({
     } finally {
       setSearching(false);
     }
+  };
+
+  useEffect(() => {
+    if (!initialSearch?.query) return;
+    setSearchQuery(initialSearch.query);
+    void executeMcpSearch(initialSearch.query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSearch?.nonce]);
+
+  const runMcpSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeMcpSearch(searchQuery);
   };
 
   const installRegistryResult = (item: McpRegistryResult) => {

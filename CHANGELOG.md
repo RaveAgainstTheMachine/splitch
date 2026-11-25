@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.22.0] - 2026-11-25
+
+### MCP Awareness, Recommendations & Deep-Link Navigation
+- **Explicit MCP System-Prompt Awareness (`backend/router/chat_api.py`):** Summarizes enabled MCP servers (with discovered `mcp__*` tool names) and installed-but-inactive MCP servers in the chat system prompt.
+- **`suggest_mcp` Discovery Tool (`backend/router/chat_store.py`, `mcp_api.py`, `chat_api.py`):** Searches both locally installed MCPs and the live MCP Registry (`registry.modelcontextprotocol.io` + npm) via shared `search_mcp_registry_items()`.
+- **Interactive MCP Recommendation Card & Deep-Link (`dashboard/src/components/chat/ChatMessageList.tsx`, `ChatTab.tsx`, `McpTab.tsx`, `App.tsx`):** Renders 1-click **Enable in Chat** (for installed-but-inactive MCPs) and **Install in MCP Tab** / **Open in MCP Tab** buttons that switch directly to **MCP Servers** and pre-run the registry search.
+
 ## [0.21.1] - 2026-11-25
 
 ### Router-to-Agent HTTPS CA Bundle Fix

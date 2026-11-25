@@ -31,12 +31,13 @@ from backend.router.chat_mcp import (
 )
 from backend.router.chat_store import (
     APPROVAL_REQUIRED_TOOLS,
+    MCP_DISCOVERY_TOOLS_SCHEMA,
     MEDIA_TOOLS_SCHEMA,
     SWARM_TOOLS_SCHEMA,
     WORKSPACE_TOOLS_SCHEMA,
     ChatStore,
 )
-from backend.router.mcp_api import annotate_mcp_egress
+from backend.router.mcp_api import annotate_mcp_egress, search_mcp_registry_items
 from backend.router.media_api import MediaService
 from backend.router.policy import resolve_route
 from backend.router.swarm import SwarmManager
@@ -201,6 +202,20 @@ def build_chat_router(
                 with contextlib.suppress(OSError):
                     blocks.append(f"<skill id=\"{sid}\">\n{md.read_text(encoding='utf-8')[:8000]}\n</skill>")
         return "\n\n".join(blocks)
+
+    def _load_all_mcp_configs() -> list[McpServerConfig]:
+        reg = data_dir / "mcp_servers.json"
+        if not reg.exists():
+            return []
+        try:
+            raw = json.loads(reg.read_text(encoding="utf-8"))
+            return [
+                annotate_mcp_egress(McpServerConfig.model_validate(item))
+                for item in raw
+                if isinstance(item, dict) and item.get("id")
+            ]
+        except (OSError, ValueError):
+            return []
 
     def _load_mcp_configs(mcp_ids: list[str]) -> dict[str, McpServerConfig]:
         reg = data_dir / "mcp_servers.json"
@@ -636,16 +651,42 @@ def build_chat_router(
                 )
 
             mcp_map = await asyncio.to_thread(_load_mcp_configs, eff_mcps)
+            all_installed_mcps = await asyncio.to_thread(_load_all_mcp_configs)
             tools_payload: list[dict[str, Any]] = []
             mcp_tools_only: list[dict[str, Any]] = []
+            active_mcp_lines: list[str] = []
             if active_conv.tools_enabled:
                 tools_payload.extend(WORKSPACE_TOOLS_SCHEMA)
+                tools_payload.extend(MCP_DISCOVERY_TOOLS_SCHEMA)
                 for srv in mcp_map.values():
                     srv_tools = await _fetch_mcp_tools(
                         srv, active_conv.workspace_subpath, vault=cluster.vault
                     )
                     mcp_tools_only.extend(srv_tools)
                     tools_payload.extend(srv_tools)
+                    t_names = [
+                        str(t.get("function", {}).get("name") or "")
+                        for t in srv_tools
+                        if t.get("function", {}).get("name")
+                    ]
+                    active_mcp_lines.append(
+                        f"- `{srv.id}` ({srv.name}): {srv.description or 'MCP server'}"
+                        + (f" — tools: {', '.join(t_names[:8])}" if t_names else " — (0 tools discovered)")
+                    )
+                inactive_mcps = [s for s in all_installed_mcps if s.id not in mcp_map]
+                mcp_ctx_lines: list[str] = []
+                if active_mcp_lines:
+                    mcp_ctx_lines.append("Enabled MCP Servers (use `mcp__<id>__<tool>` directly):\n" + "\n".join(active_mcp_lines))
+                if inactive_mcps:
+                    mcp_ctx_lines.append(
+                        "Installed-but-Inactive MCP Servers (not enabled in this chat): "
+                        + ", ".join(f"`{s.id}` ({s.name})" for s in inactive_mcps[:12])
+                    )
+                mcp_ctx_lines.append(
+                    "If a task would benefit from an inactive or uninstalled MCP integration, call "
+                    "`suggest_mcp(query, reason)` to search local + registry MCPs and surface a 1-click recommendation card."
+                )
+                sys_parts.append("\n".join(mcp_ctx_lines))
             if active_conv.web_search_enabled:
                 tools_payload.extend(WEB_TOOLS_SCHEMA)
             if media_service is not None and media_service.has_healthy_backend():
@@ -1044,6 +1085,52 @@ def build_chat_router(
                             tool_ok, tool_output = await execute_web_fetch(
                                 str(parsed_args.get("url", ""))
                             )
+                        elif t_name == "suggest_mcp":
+                            q_mcp = str(parsed_args.get("query") or "").strip()
+                            reason_mcp = str(parsed_args.get("reason") or "").strip()
+                            if not q_mcp:
+                                tool_ok = False
+                                tool_output = "Missing 'query' argument for suggest_mcp."
+                            else:
+                                q_low = q_mcp.lower()
+                                installed_list = await asyncio.to_thread(_load_all_mcp_configs)
+                                local_matches = [
+                                    {
+                                        "id": s.id,
+                                        "name": s.name,
+                                        "description": s.description,
+                                        "enabled_in_chat": s.id in mcp_map,
+                                        "server_enabled": s.enabled,
+                                    }
+                                    for s in installed_list
+                                    if q_low in s.id.lower()
+                                    or q_low in s.name.lower()
+                                    or q_low in (s.description or "").lower()
+                                ][:6]
+                                reg_matches: list[dict[str, Any]] = []
+                                try:
+                                    found_reg = await search_mcp_registry_items(q_mcp, limit=6)
+                                    reg_matches = [
+                                        {
+                                            "id": r.id,
+                                            "name": r.name,
+                                            "registry_name": r.registry_name,
+                                            "description": r.description,
+                                            "source": r.source,
+                                        }
+                                        for r in found_reg
+                                    ]
+                                except (httpx.HTTPError, ValueError):
+                                    reg_matches = []
+                                tool_ok = True
+                                tool_output = json.dumps(
+                                    {
+                                        "query": q_mcp,
+                                        "reason": reason_mcp,
+                                        "local_matches": local_matches,
+                                        "registry_matches": reg_matches,
+                                    }
+                                )
                         elif t_name == "spawn_agent":
                             if not active_conv.swarm_enabled:
                                 tool_ok = False

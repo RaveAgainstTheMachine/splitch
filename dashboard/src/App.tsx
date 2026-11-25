@@ -70,6 +70,10 @@ export default function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("chat");
+  const [pendingMcpSearch, setPendingMcpSearch] = useState<{
+    query: string;
+    nonce: number;
+  } | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse>({
     auth_required: false,
@@ -592,7 +596,17 @@ export default function App() {
             aria-labelledby={tabIds.chat}
             hidden={activeTab !== "chat" ? ("until-found" as unknown as boolean) : undefined}
           >
-            <ChatTab snapshot={snapshot} onError={setErrorMsg} onConfirm={setConfirmState} />
+            <ChatTab
+              snapshot={snapshot}
+              onError={setErrorMsg}
+              onConfirm={setConfirmState}
+              onOpenMcpTab={(query) => {
+                if (query) {
+                  setPendingMcpSearch({ query, nonce: Date.now() });
+                }
+                setActiveTab("mcp");
+              }}
+            />
           </div>
 
           <div
@@ -865,6 +879,7 @@ export default function App() {
           >
             <McpTab
               nodes={snapshot?.nodes ?? []}
+              initialSearch={pendingMcpSearch}
               onError={setErrorMsg}
               onConfirm={setConfirmState}
             />

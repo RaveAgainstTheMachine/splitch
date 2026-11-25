@@ -728,6 +728,78 @@ def _score_mcp_result(item: McpRegistryResult, query_tokens: list[str]) -> tuple
     )
 
 
+async def search_mcp_registry_items(
+    q: str,
+    source: Literal["all", "official", "npm"] = "all",
+    limit: int = 18,
+) -> list[McpRegistryResult]:
+    query = q.strip()
+    if len(query) < 2:
+        return []
+    capped = min(limit, 30)
+    query_tokens = [
+        t
+        for t in re.split(r"[\s/\-_]+", query.lower())
+        if len(t) >= 2 and t != "mcp"
+    ] or [query.lower()]
+
+    async def _search_official(client: httpx.AsyncClient) -> list[McpRegistryResult]:
+        variants = _official_registry_query_variants(query)
+        seen: dict[str, McpRegistryResult] = {}
+
+        async def _fetch(term: str) -> None:
+            resp = await client.get(
+                "https://registry.modelcontextprotocol.io/v0.1/servers",
+                params={"search": term, "limit": capped},
+            )
+            resp.raise_for_status()
+            for entry in resp.json().get("servers") or []:
+                parsed = parse_official_registry_item(entry)
+                if parsed and parsed.registry_name not in seen:
+                    seen[parsed.registry_name] = parsed
+
+        await asyncio.gather(*(_fetch(v) for v in variants), return_exceptions=True)
+        return list(seen.values())
+
+    async def _search_npm(client: httpx.AsyncClient) -> list[McpRegistryResult]:
+        has_mcp = bool(re.search(r"\bmcp\b", query, flags=re.IGNORECASE))
+        text = query if has_mcp else f"mcp {query}"
+        resp = await client.get(
+            "https://registry.npmjs.org/-/v1/search",
+            params={"text": text, "size": capped},
+        )
+        resp.raise_for_status()
+        out: list[McpRegistryResult] = []
+        for obj in resp.json().get("objects") or []:
+            parsed = parse_npm_mcp_item(obj)
+            if parsed:
+                out.append(parsed)
+        return out
+
+    async with httpx.AsyncClient(timeout=12.0) as client:
+        if source == "official":
+            items = await _search_official(client)
+        elif source == "npm":
+            items = await _search_npm(client)
+        else:
+            off_res, npm_res = await asyncio.gather(
+                _search_official(client),
+                _search_npm(client),
+                return_exceptions=True,
+            )
+            combined: dict[str, McpRegistryResult] = {}
+            for batch in (off_res, npm_res):
+                if isinstance(batch, list):
+                    for item in batch:
+                        key = f"{item.source}:{item.registry_name.lower()}"
+                        if key not in combined:
+                            combined[key] = item
+            items = list(combined.values())
+
+    items.sort(key=lambda r: _score_mcp_result(r, query_tokens))
+    return items[:capped]
+
+
 def build_mcp_router(
     cluster: ClusterState, data_dir: Path, scripts_dir: Path | None = None
 ) -> APIRouter:
@@ -765,72 +837,8 @@ def build_mcp_router(
         source: Literal["all", "official", "npm"] = "all",
         limit: int = 18,
     ) -> list[McpRegistryResult]:
-        query = q.strip()
-        if len(query) < 2:
-            return []
-        capped = min(limit, 30)
-        query_tokens = [
-            t
-            for t in re.split(r"[\s/\-_]+", query.lower())
-            if len(t) >= 2 and t != "mcp"
-        ] or [query.lower()]
-
-        async def _search_official(client: httpx.AsyncClient) -> list[McpRegistryResult]:
-            variants = _official_registry_query_variants(query)
-            seen: dict[str, McpRegistryResult] = {}
-
-            async def _fetch(term: str) -> None:
-                resp = await client.get(
-                    "https://registry.modelcontextprotocol.io/v0.1/servers",
-                    params={"search": term, "limit": capped},
-                )
-                resp.raise_for_status()
-                for entry in resp.json().get("servers") or []:
-                    parsed = parse_official_registry_item(entry)
-                    if parsed and parsed.registry_name not in seen:
-                        seen[parsed.registry_name] = parsed
-
-            await asyncio.gather(*(_fetch(v) for v in variants), return_exceptions=True)
-            return list(seen.values())
-
-        async def _search_npm(client: httpx.AsyncClient) -> list[McpRegistryResult]:
-            has_mcp = bool(re.search(r"\bmcp\b", query, flags=re.IGNORECASE))
-            text = query if has_mcp else f"mcp {query}"
-            resp = await client.get(
-                "https://registry.npmjs.org/-/v1/search",
-                params={"text": text, "size": capped},
-            )
-            resp.raise_for_status()
-            out: list[McpRegistryResult] = []
-            for obj in resp.json().get("objects") or []:
-                parsed = parse_npm_mcp_item(obj)
-                if parsed:
-                    out.append(parsed)
-            return out
-
         try:
-            async with httpx.AsyncClient(timeout=12.0) as client:
-                if source == "official":
-                    items = await _search_official(client)
-                elif source == "npm":
-                    items = await _search_npm(client)
-                else:
-                    off_res, npm_res = await asyncio.gather(
-                        _search_official(client),
-                        _search_npm(client),
-                        return_exceptions=True,
-                    )
-                    combined: dict[str, McpRegistryResult] = {}
-                    for batch in (off_res, npm_res):
-                        if isinstance(batch, list):
-                            for item in batch:
-                                key = f"{item.source}:{item.registry_name.lower()}"
-                                if key not in combined:
-                                    combined[key] = item
-                    items = list(combined.values())
-
-            items.sort(key=lambda r: _score_mcp_result(r, query_tokens))
-            return items[:capped]
+            return await search_mcp_registry_items(q, source=source, limit=limit)
         except (httpx.HTTPError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=f"MCP search failed: {exc}") from exc
 

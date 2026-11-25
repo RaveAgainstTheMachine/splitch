@@ -830,4 +830,311 @@ def test_compaction_falls_back_to_fast_when_gpu_gaming(tmp_path: Path) -> None:
     assert req["chat_template_kwargs"] == {"enable_thinking": False}
 
 
+def test_mcp_awareness_system_prompt_and_suggest_mcp_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _offline_get(self: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
+        raise httpx.ConnectError("registry unreachable in test")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _offline_get)
+
+    captured_reqs: list[dict[str, Any]] = []
+    round_deltas: list[dict[str, Any]] = [
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_pg",
+                    "type": "function",
+                    "function": {
+                        "name": "suggest_mcp",
+                        "arguments": json.dumps(
+                            {"query": "postgres", "reason": "Need SQL database"}
+                        ),
+                    },
+                }
+            ]
+        },
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_gh",
+                    "type": "function",
+                    "function": {
+                        "name": "suggest_mcp",
+                        "arguments": json.dumps(
+                            {"query": "github", "reason": "Check GitHub issues"}
+                        ),
+                    },
+                }
+            ]
+        },
+        {"content": "Done."},
+    ]
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            payload = json.loads(raw.decode("utf-8"))
+            if self.path == "/mcp":
+                rpc_resp = json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": payload.get("id", 2),
+                        "result": {
+                            "tools": [
+                                {
+                                    "name": "list_issues",
+                                    "description": "List repo issues",
+                                    "inputSchema": {"type": "object", "properties": {}},
+                                }
+                            ]
+                        },
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(rpc_resp)))
+                self.end_headers()
+                self.wfile.write(rpc_resp)
+                return
+
+            captured_reqs.append(payload)
+            delta = round_deltas.pop(0) if round_deltas else {"content": "fallback"}
+            sse_chunk = (
+                f"data: {json.dumps({'choices': [{'delta': delta}]})}\n\n"
+                "data: [DONE]\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(sse_chunk)))
+            self.end_headers()
+            self.wfile.write(sse_chunk)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        host, port = srv.server_address
+        engine_url = f"http://{host}:{port}"
+
+        (tmp_path / "mcp_servers.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "github",
+                        "name": "GitHub",
+                        "description": "GitHub repositories and issues",
+                        "transport": "http",
+                        "url": f"{engine_url}/mcp",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "postgres",
+                        "name": "Postgres",
+                        "description": "PostgreSQL database queries",
+                        "transport": "stdio",
+                        "enabled": False,
+                    },
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        cfg = SplitchConfig()
+        cluster = ClusterState(cfg, data_dir=tmp_path)
+        cluster.nodes["gpu-1"] = NodeStatus(
+            node_id="gpu-1",
+            display_name="GPU 1",
+            role="gpu",
+            agent_url=engine_url,
+            engine_url=engine_url,
+            online=True,
+            telemetry=NodeTelemetry(
+                node_id="gpu-1",
+                role="gpu",
+                platform="linux",
+                timestamp=1.0,
+                online=True,
+                engine="llama-server",
+                engine_healthy=True,
+                context_length=32768,
+                models=[LoadedModel(id="qwen-32b", status="loaded")],
+            ),
+        )
+
+        @asynccontextmanager
+        async def _lifespan(_app: FastAPI):
+            cluster._proxy_client = httpx.AsyncClient()
+            try:
+                yield
+            finally:
+                await cluster._proxy_client.aclose()
+
+        app = FastAPI(lifespan=_lifespan)
+        app.include_router(build_chat_router(cluster, tmp_path, tmp_path / "skills"))
+        with TestClient(app) as tc:
+            conv = tc.post(
+                "/api/chat/conversations",
+                json={
+                    "title": "MCP Awareness Test",
+                    "model": "qwen-32b",
+                    "tools_enabled": True,
+                    "enabled_mcps": ["github"],
+                    "auto_approve": True,
+                },
+            ).json()
+            resp = tc.post(
+                f"/api/chat/conversations/{conv['id']}/send",
+                json={"content": "Query postgres and check github"},
+            )
+            assert resp.status_code == 200, resp.text
+            events = _parse_sse_events(resp.text)
+
+        assert len(captured_reqs) == 3
+        first_req = captured_reqs[0]
+        tool_names = [t["function"]["name"] for t in first_req.get("tools", [])]
+        assert "suggest_mcp" in tool_names
+        assert "mcp__github__list_issues" in tool_names
+
+        sys_prompt = first_req["messages"][0]["content"]
+        assert "Enabled MCP Servers" in sys_prompt
+        assert "`github` (GitHub)" in sys_prompt
+        assert "mcp__github__list_issues" in sys_prompt
+        assert "Installed-but-Inactive MCP Servers" in sys_prompt
+        assert "`postgres` (Postgres)" in sys_prompt
+        assert "suggest_mcp(query, reason)" in sys_prompt
+
+        tool_results = [
+            json.loads(data["output"])
+            for ev, data in events
+            if ev == "tool_result" and data.get("name") == "suggest_mcp"
+        ]
+        assert len(tool_results) == 2
+
+        pg_res, gh_res = tool_results
+        assert pg_res["query"] == "postgres"
+        assert pg_res["registry_matches"] == []
+        assert len(pg_res["local_matches"]) == 1
+        assert pg_res["local_matches"][0]["id"] == "postgres"
+        assert pg_res["local_matches"][0]["enabled_in_chat"] is False
+        assert pg_res["local_matches"][0]["server_enabled"] is False
+
+        assert gh_res["query"] == "github"
+        assert gh_res["registry_matches"] == []
+        assert len(gh_res["local_matches"]) == 1
+        assert gh_res["local_matches"][0]["id"] == "github"
+        assert gh_res["local_matches"][0]["enabled_in_chat"] is True
+        assert gh_res["local_matches"][0]["server_enabled"] is True
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=2.0)
+
+
+def test_mcp_awareness_omits_suggest_mcp_when_tools_disabled(tmp_path: Path) -> None:
+    captured_reqs: list[dict[str, Any]] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            captured_reqs.append(json.loads(raw.decode("utf-8")))
+            sse_chunk = (
+                f"data: {json.dumps({'choices': [{'delta': {'content': 'No tools.'}}]})}\n\n"
+                "data: [DONE]\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(sse_chunk)))
+            self.end_headers()
+            self.wfile.write(sse_chunk)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        host, port = srv.server_address
+        engine_url = f"http://{host}:{port}"
+        (tmp_path / "mcp_servers.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "id": "postgres",
+                        "name": "Postgres",
+                        "description": "PostgreSQL database queries",
+                        "transport": "stdio",
+                        "enabled": True,
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        cluster = ClusterState(SplitchConfig(), data_dir=tmp_path)
+        cluster.nodes["gpu-1"] = NodeStatus(
+            node_id="gpu-1",
+            display_name="GPU 1",
+            role="gpu",
+            agent_url=engine_url,
+            engine_url=engine_url,
+            online=True,
+            telemetry=NodeTelemetry(
+                node_id="gpu-1",
+                role="gpu",
+                platform="linux",
+                timestamp=1.0,
+                online=True,
+                engine="llama-server",
+                engine_healthy=True,
+                context_length=32768,
+                models=[LoadedModel(id="qwen-32b", status="loaded")],
+            ),
+        )
+
+        @asynccontextmanager
+        async def _lifespan(_app: FastAPI):
+            cluster._proxy_client = httpx.AsyncClient()
+            try:
+                yield
+            finally:
+                await cluster._proxy_client.aclose()
+
+        app = FastAPI(lifespan=_lifespan)
+        app.include_router(build_chat_router(cluster, tmp_path, tmp_path / "skills"))
+        with TestClient(app) as tc:
+            conv = tc.post(
+                "/api/chat/conversations",
+                json={
+                    "title": "No Tools Test",
+                    "model": "qwen-32b",
+                    "tools_enabled": False,
+                },
+            ).json()
+            resp = tc.post(
+                f"/api/chat/conversations/{conv['id']}/send",
+                json={"content": "Hello"},
+            )
+            assert resp.status_code == 200, resp.text
+
+        assert len(captured_reqs) == 1
+        tool_names = [t["function"]["name"] for t in captured_reqs[0].get("tools", [])]
+        assert "suggest_mcp" not in tool_names
+        sys_prompt = captured_reqs[0]["messages"][0]["content"]
+        assert "Enabled MCP Servers" not in sys_prompt
+        assert "Installed-but-Inactive MCP Servers" not in sys_prompt
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=2.0)
+
+
+
 
