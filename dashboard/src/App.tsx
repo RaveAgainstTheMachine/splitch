@@ -74,6 +74,10 @@ export default function App() {
     query: string;
     nonce: number;
   } | null>(null);
+  const [pendingSkillSearch, setPendingSkillSearch] = useState<{
+    query: string;
+    nonce: number;
+  } | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatusResponse>({
     auth_required: false,
@@ -606,6 +610,12 @@ export default function App() {
                 }
                 setActiveTab("mcp");
               }}
+              onOpenSkillsTab={(query) => {
+                if (query) {
+                  setPendingSkillSearch({ query, nonce: Date.now() });
+                }
+                setActiveTab("skills");
+              }}
             />
           </div>
 
@@ -893,7 +903,11 @@ export default function App() {
             aria-labelledby={tabIds.skills}
             hidden={activeTab !== "skills" ? ("until-found" as unknown as boolean) : undefined}
           >
-            <SkillsTab onError={setErrorMsg} onConfirm={setConfirmState} />
+            <SkillsTab
+              initialSearch={pendingSkillSearch}
+              onError={setErrorMsg}
+              onConfirm={setConfirmState}
+            />
           </div>
         </div>
       </div>

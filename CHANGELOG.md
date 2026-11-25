@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.23.0] - 2026-11-25
+
+### Skill Awareness, `suggest_skill` Tool & Deep-Link Cards
+- **Skill Awareness in System Prompt (`backend/router/skills_api.py`, `chat_api.py`):** Scans installed `SKILL.md` folders via `scan_installed_skills()`, summarizes installed-but-inactive skills in the chat system prompt, and instructs the agent to use `suggest_skill(query, reason)`.
+- **`suggest_skill` Discovery Tool (`backend/router/chat_store.py`, `skills_api.py`, `chat_api.py`):** Searches locally installed skills (`enabled_in_chat` status) and `skills.sh` via shared `search_skills_registry_items()`.
+- **Interactive Skill Recommendation Card & Deep-Link (`dashboard/src/components/chat/ChatMessageList.tsx`, `ChatTab.tsx`, `SkillsTab.tsx`, `App.tsx`):** Unified recommendation card rendering 1-click **Enable in Chat** (for installed skills) and **Install in Skills Tab** / **Open in Skills Tab** buttons that switch straight to **Skills Library** and pre-run the `skills.sh` search.
+
 ## [0.22.0] - 2026-11-25
 
 ### MCP Awareness, Recommendations & Deep-Link Navigation

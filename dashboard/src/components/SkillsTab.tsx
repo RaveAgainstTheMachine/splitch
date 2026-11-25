@@ -36,9 +36,11 @@ function fmtInstalls(n: number): string {
 }
 
 export function SkillsTab({
+  initialSearch,
   onError,
   onConfirm
 }: {
+  initialSearch?: { query: string; nonce: number } | null;
   onError: (msg: string | null) => void;
   onConfirm: (state: ConfirmState) => void;
 }) {
@@ -104,13 +106,13 @@ export function SkillsTab({
     loadSkills();
   }, []);
 
-  const searchRegistry = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (searchQuery.trim().length < 2) return;
+  const executeSkillSearch = async (queryText: string) => {
+    const trimmed = queryText.trim();
+    if (trimmed.length < 2) return;
     setSearching(true);
     try {
       const res = await fetch(
-        `/api/skills/search?q=${encodeURIComponent(searchQuery.trim())}&limit=24`
+        `/api/skills/search?q=${encodeURIComponent(trimmed)}&limit=24`
       );
       if (!res.ok) throw new Error(`skills.sh search failed: HTTP ${res.status}`);
       setRegistryResults(await res.json());
@@ -120,6 +122,18 @@ export function SkillsTab({
     } finally {
       setSearching(false);
     }
+  };
+
+  useEffect(() => {
+    if (!initialSearch?.query) return;
+    setSearchQuery(initialSearch.query);
+    void executeSkillSearch(initialSearch.query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialSearch?.nonce]);
+
+  const searchRegistry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executeSkillSearch(searchQuery);
   };
 
   const sortedRegistry = useMemo(() => {

@@ -195,6 +195,34 @@ MCP_DISCOVERY_TOOLS_SCHEMA: list[dict[str, Any]] = [
     }
 ]
 
+SKILL_DISCOVERY_TOOLS_SCHEMA: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_skill",
+            "description": (
+                "Search installed (including inactive) SKILL.md workflows and the skills.sh registry when "
+                "a task would benefit from a specialized engineering skill. Renders an interactive card with "
+                "Enable in Chat / Install in Skills Tab actions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Workflow or technology keyword (e.g. 'nextjs', 'playwright', 'postgres')",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Concise explanation of how this skill helps the current task",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]
+
 SWARM_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "type": "function",

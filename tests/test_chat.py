@@ -1136,5 +1136,272 @@ def test_mcp_awareness_omits_suggest_mcp_when_tools_disabled(tmp_path: Path) -> 
         th.join(timeout=2.0)
 
 
+def test_skill_awareness_system_prompt_and_suggest_skill_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _offline_get(self: Any, url: Any, *args: Any, **kwargs: Any) -> Any:
+        raise httpx.ConnectError("skills.sh unreachable in test")
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", _offline_get)
+
+    captured_reqs: list[dict[str, Any]] = []
+    round_deltas: list[dict[str, Any]] = [
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_pw",
+                    "type": "function",
+                    "function": {
+                        "name": "suggest_skill",
+                        "arguments": json.dumps(
+                            {"query": "playwright", "reason": "Need browser E2E testing"}
+                        ),
+                    },
+                }
+            ]
+        },
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "call_fa",
+                    "type": "function",
+                    "function": {
+                        "name": "suggest_skill",
+                        "arguments": json.dumps(
+                            {"query": "fastapi", "reason": "Check FastAPI conventions"}
+                        ),
+                    },
+                }
+            ]
+        },
+        {"content": "Done."},
+    ]
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            captured_reqs.append(json.loads(raw.decode("utf-8")))
+            delta = round_deltas.pop(0) if round_deltas else {"content": "fallback"}
+            sse_chunk = (
+                f"data: {json.dumps({'choices': [{'delta': delta}]})}\n\n"
+                "data: [DONE]\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(sse_chunk)))
+            self.end_headers()
+            self.wfile.write(sse_chunk)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        host, port = srv.server_address
+        engine_url = f"http://{host}:{port}"
+
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "fastapi-pro").mkdir(parents=True)
+        (skills_dir / "fastapi-pro" / "SKILL.md").write_text(
+            "---\nname: FastAPI Pro\ndescription: Build production FastAPI services\n---\n# FastAPI\n",
+            encoding="utf-8",
+        )
+        (skills_dir / "playwright-e2e").mkdir(parents=True)
+        (skills_dir / "playwright-e2e" / "SKILL.md").write_text(
+            "---\nname: Playwright E2E\ndescription: Headless browser E2E testing\n---\n# Playwright\n",
+            encoding="utf-8",
+        )
+        (skills_dir / ".registry.json").write_text(
+            json.dumps({"playwright-e2e": {"enabled": False}}),
+            encoding="utf-8",
+        )
+
+        cluster = ClusterState(SplitchConfig(), data_dir=tmp_path)
+        cluster.nodes["gpu-1"] = NodeStatus(
+            node_id="gpu-1",
+            display_name="GPU 1",
+            role="gpu",
+            agent_url=engine_url,
+            engine_url=engine_url,
+            online=True,
+            telemetry=NodeTelemetry(
+                node_id="gpu-1",
+                role="gpu",
+                platform="linux",
+                timestamp=1.0,
+                online=True,
+                engine="llama-server",
+                engine_healthy=True,
+                context_length=32768,
+                models=[LoadedModel(id="qwen-32b", status="loaded")],
+            ),
+        )
+
+        @asynccontextmanager
+        async def _lifespan(_app: FastAPI):
+            cluster._proxy_client = httpx.AsyncClient()
+            try:
+                yield
+            finally:
+                await cluster._proxy_client.aclose()
+
+        app = FastAPI(lifespan=_lifespan)
+        app.include_router(build_chat_router(cluster, tmp_path, skills_dir))
+        with TestClient(app) as tc:
+            conv = tc.post(
+                "/api/chat/conversations",
+                json={
+                    "title": "Skill Awareness Test",
+                    "model": "qwen-32b",
+                    "tools_enabled": True,
+                    "enabled_skills": ["fastapi-pro"],
+                    "auto_approve": True,
+                },
+            ).json()
+            resp = tc.post(
+                f"/api/chat/conversations/{conv['id']}/send",
+                json={"content": "Test FastAPI and Playwright"},
+            )
+            assert resp.status_code == 200, resp.text
+            events = _parse_sse_events(resp.text)
+
+        assert len(captured_reqs) == 3
+        first_req = captured_reqs[0]
+        tool_names = [t["function"]["name"] for t in first_req.get("tools", [])]
+        assert "suggest_skill" in tool_names
+
+        sys_prompt = first_req["messages"][0]["content"]
+        inactive_lines = [
+            ln for ln in sys_prompt.splitlines() if ln.startswith("Installed-but-Inactive Skills")
+        ]
+        assert len(inactive_lines) == 1
+        assert "`playwright-e2e` (Playwright E2E)" in inactive_lines[0]
+        assert "fastapi-pro" not in inactive_lines[0]
+        assert "suggest_skill(query, reason)" in sys_prompt
+
+        tool_results = [
+            json.loads(data["output"])
+            for ev, data in events
+            if ev == "tool_result" and data.get("name") == "suggest_skill"
+        ]
+        assert len(tool_results) == 2
+
+        pw_res, fa_res = tool_results
+        assert pw_res["query"] == "playwright"
+        assert pw_res["registry_matches"] == []
+        assert len(pw_res["local_matches"]) == 1
+        assert pw_res["local_matches"][0]["id"] == "playwright-e2e"
+        assert pw_res["local_matches"][0]["name"] == "Playwright E2E"
+        assert pw_res["local_matches"][0]["enabled_in_chat"] is False
+        assert pw_res["local_matches"][0]["server_enabled"] is False
+
+        assert fa_res["query"] == "fastapi"
+        assert fa_res["registry_matches"] == []
+        assert len(fa_res["local_matches"]) == 1
+        assert fa_res["local_matches"][0]["id"] == "fastapi-pro"
+        assert fa_res["local_matches"][0]["name"] == "FastAPI Pro"
+        assert fa_res["local_matches"][0]["enabled_in_chat"] is True
+        assert fa_res["local_matches"][0]["server_enabled"] is True
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=2.0)
+
+
+def test_skill_awareness_omits_suggest_skill_when_tools_disabled(tmp_path: Path) -> None:
+    captured_reqs: list[dict[str, Any]] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            captured_reqs.append(json.loads(raw.decode("utf-8")))
+            sse_chunk = (
+                f"data: {json.dumps({'choices': [{'delta': {'content': 'No tools.'}}]})}\n\n"
+                "data: [DONE]\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(sse_chunk)))
+            self.end_headers()
+            self.wfile.write(sse_chunk)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        host, port = srv.server_address
+        engine_url = f"http://{host}:{port}"
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "playwright-e2e").mkdir(parents=True)
+        (skills_dir / "playwright-e2e" / "SKILL.md").write_text(
+            "---\nname: Playwright E2E\ndescription: Headless browser E2E testing\n---\n# Playwright\n",
+            encoding="utf-8",
+        )
+        cluster = ClusterState(SplitchConfig(), data_dir=tmp_path)
+        cluster.nodes["gpu-1"] = NodeStatus(
+            node_id="gpu-1",
+            display_name="GPU 1",
+            role="gpu",
+            agent_url=engine_url,
+            engine_url=engine_url,
+            online=True,
+            telemetry=NodeTelemetry(
+                node_id="gpu-1",
+                role="gpu",
+                platform="linux",
+                timestamp=1.0,
+                online=True,
+                engine="llama-server",
+                engine_healthy=True,
+                context_length=32768,
+                models=[LoadedModel(id="qwen-32b", status="loaded")],
+            ),
+        )
+
+        @asynccontextmanager
+        async def _lifespan(_app: FastAPI):
+            cluster._proxy_client = httpx.AsyncClient()
+            try:
+                yield
+            finally:
+                await cluster._proxy_client.aclose()
+
+        app = FastAPI(lifespan=_lifespan)
+        app.include_router(build_chat_router(cluster, tmp_path, skills_dir))
+        with TestClient(app) as tc:
+            conv = tc.post(
+                "/api/chat/conversations",
+                json={
+                    "title": "No Tools Skill Test",
+                    "model": "qwen-32b",
+                    "tools_enabled": False,
+                },
+            ).json()
+            resp = tc.post(
+                f"/api/chat/conversations/{conv['id']}/send",
+                json={"content": "Hello"},
+            )
+            assert resp.status_code == 200, resp.text
+
+        assert len(captured_reqs) == 1
+        tool_names = [t["function"]["name"] for t in captured_reqs[0].get("tools", [])]
+        assert "suggest_skill" not in tool_names
+        sys_prompt = captured_reqs[0]["messages"][0]["content"]
+        assert "Installed-but-Inactive Skills" not in sys_prompt
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=2.0)
+
+
 
 

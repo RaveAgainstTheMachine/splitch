@@ -65,6 +65,9 @@ export interface ChatMessageListProps {
   enabledMcps?: string[];
   onEnableMcp?: (mcpId: string) => void;
   onOpenMcpTab?: (query?: string) => void;
+  enabledSkills?: string[];
+  onEnableSkill?: (skillId: string) => void;
+  onOpenSkillsTab?: (query?: string) => void;
 }
 
 function renderApprovalSandboxBadge(approval: PendingApproval) {
@@ -141,7 +144,10 @@ export function ChatMessageList({
   onCancelSwarmAgent,
   enabledMcps,
   onEnableMcp,
-  onOpenMcpTab
+  onOpenMcpTab,
+  enabledSkills,
+  onEnableSkill,
+  onOpenSkillsTab
 }: ChatMessageListProps) {
   return (
     <div
@@ -380,11 +386,17 @@ export function ChatMessageList({
                                 return null;
                               })()}
 
-                            {tc.function.name === "suggest_mcp" &&
+                            {(tc.function.name === "suggest_mcp" ||
+                              tc.function.name === "suggest_skill") &&
                               result?.meta?.ok &&
                               result.content &&
                               (() => {
                                 try {
+                                  const isSkill = tc.function.name === "suggest_skill";
+                                  const activeList = isSkill ? enabledSkills : enabledMcps;
+                                  const onEnable = isSkill ? onEnableSkill : onEnableMcp;
+                                  const onOpenTab = isSkill ? onOpenSkillsTab : onOpenMcpTab;
+                                  const tabLabel = isSkill ? "Skills Tab" : "MCP Tab";
                                   const rec = JSON.parse(result.content) as {
                                     query?: string;
                                     reason?: string;
@@ -408,14 +420,18 @@ export function ChatMessageList({
                                   return (
                                     <div className="mcp-rec-card">
                                       <div className="mcp-rec-card__head">
-                                        <strong>Recommended MCP Integrations</strong>
-                                        {onOpenMcpTab && (
+                                        <strong>
+                                          {isSkill
+                                            ? "Recommended Skills"
+                                            : "Recommended MCP Integrations"}
+                                        </strong>
+                                        {onOpenTab && (
                                           <button
                                             type="button"
                                             className="btn btn--sm btn--ghost"
-                                            onClick={() => onOpenMcpTab(rec.query)}
+                                            onClick={() => onOpenTab(rec.query)}
                                           >
-                                            Open in MCP Tab
+                                            Open in {tabLabel}
                                           </button>
                                         )}
                                       </div>
@@ -424,7 +440,7 @@ export function ChatMessageList({
                                         {locals.map((m) => {
                                           const isOn =
                                             Boolean(m.enabled_in_chat) ||
-                                            Boolean(enabledMcps?.includes(m.id));
+                                            Boolean(activeList?.includes(m.id));
                                           return (
                                             <div key={`loc-${m.id}`} className="mcp-rec-item">
                                               <div className="mcp-rec-item__info">
@@ -437,12 +453,12 @@ export function ChatMessageList({
                                                 )}
                                               </div>
                                               <div className="row-actions">
-                                                {onEnableMcp && (
+                                                {onEnable && (
                                                   <button
                                                     type="button"
                                                     className={`btn btn--sm ${isOn ? "" : "btn--accent"}`}
                                                     disabled={isOn}
-                                                    onClick={() => onEnableMcp(m.id)}
+                                                    onClick={() => onEnable(m.id)}
                                                   >
                                                     {isOn ? "Enabled" : "Enable in Chat"}
                                                   </button>
@@ -452,7 +468,7 @@ export function ChatMessageList({
                                           );
                                         })}
                                         {regs.slice(0, 4).map((r) => (
-                                          <div key={`reg-${r.source}-${r.name}`} className="mcp-rec-item">
+                                          <div key={`reg-${r.source}-${r.id}-${r.name}`} className="mcp-rec-item">
                                             <div className="mcp-rec-item__info">
                                               <strong>{r.name}</strong>{" "}
                                               <span className="pill">{r.source || "registry"}</span>
@@ -462,13 +478,13 @@ export function ChatMessageList({
                                                 </div>
                                               )}
                                             </div>
-                                            {onOpenMcpTab && (
+                                            {onOpenTab && (
                                               <button
                                                 type="button"
                                                 className="btn btn--sm btn--accent"
-                                                onClick={() => onOpenMcpTab(r.name || rec.query)}
+                                                onClick={() => onOpenTab(r.name || rec.query)}
                                               >
-                                                Install in MCP Tab
+                                                Install in {tabLabel}
                                               </button>
                                             )}
                                           </div>

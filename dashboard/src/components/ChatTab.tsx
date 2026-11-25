@@ -51,9 +51,16 @@ interface Props {
   onError: (msg: string | null) => void;
   onConfirm: (state: ConfirmState) => void;
   onOpenMcpTab?: (query?: string) => void;
+  onOpenSkillsTab?: (query?: string) => void;
 }
 
-export function ChatTab({ snapshot, onError, onConfirm, onOpenMcpTab }: Props) {
+export function ChatTab({
+  snapshot,
+  onError,
+  onConfirm,
+  onOpenMcpTab,
+  onOpenSkillsTab
+}: Props) {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [trash, setTrash] = useState<ConversationSummary[]>([]);
   const [sidebarView, setSidebarView] = useState<"chats" | "trash">("chats");
@@ -1897,6 +1904,12 @@ export function ChatTab({ snapshot, onError, onConfirm, onOpenMcpTab }: Props) {
             updateConfig({ enabled_mcps: next });
           }}
           onOpenMcpTab={onOpenMcpTab}
+          enabledSkills={effectiveConfig.enabled_skills}
+          onEnableSkill={(skillId) => {
+            const next = Array.from(new Set([...(effectiveConfig.enabled_skills ?? []), skillId]));
+            updateConfig({ enabled_skills: next });
+          }}
+          onOpenSkillsTab={onOpenSkillsTab}
         />
 
         <ChatComposer

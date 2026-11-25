@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import shutil
@@ -72,6 +73,71 @@ def _pick_best_skill_path(paths: list[str], skill_id: str) -> str | None:
     return paths[0] if len(paths) == 1 else None
 
 
+def scan_installed_skills(skills_dir: Path) -> list[SkillItem]:
+    """Scan installed SKILL.md folders and registry metadata under skills_dir."""
+    if not skills_dir.exists():
+        return []
+    meta_file = skills_dir / ".registry.json"
+    meta: dict[str, dict] = {}
+    if meta_file.exists():
+        with contextlib.suppress(OSError, ValueError):
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+    items: list[SkillItem] = []
+    for entry in sorted(skills_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        skill_md = entry / "SKILL.md"
+        if not skill_md.is_file():
+            continue
+        try:
+            content = skill_md.read_text(encoding="utf-8")
+            mtime = skill_md.stat().st_mtime
+        except OSError:
+            continue
+        name, desc = parse_skill_frontmatter(content, entry.name)
+        m = meta.get(entry.name, {})
+        items.append(
+            SkillItem(
+                id=entry.name,
+                name=m.get("name") or name,
+                description=m.get("description") or desc,
+                enabled=bool(m.get("enabled", True)),
+                content=content,
+                source_url=m.get("source_url"),
+                updated_at=mtime,
+            )
+        )
+    return items
+
+
+async def search_skills_registry_items(q: str, limit: int = 24) -> list[SkillRegistryResult]:
+    """Query skills.sh public registry for matching skills."""
+    query = q.strip()
+    if len(query) < 2:
+        return []
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            "https://skills.sh/api/search",
+            params={"q": query, "limit": min(limit, 36)},
+        )
+        r.raise_for_status()
+        raw = r.json().get("skills") or []
+    results: list[SkillRegistryResult] = []
+    for item in raw:
+        if not isinstance(item, dict) or not item.get("source") or not item.get("skillId"):
+            continue
+        results.append(
+            SkillRegistryResult(
+                id=str(item.get("id") or f"{item['source']}/{item['skillId']}"),
+                source=str(item["source"]),
+                skill_id=str(item["skillId"]),
+                name=str(item.get("name") or item["skillId"]),
+                installs=int(item.get("installs") or 0),
+            )
+        )
+    return results
+
+
 def build_skills_router(cluster: ClusterState, skills_dir: Path) -> APIRouter:
     router = APIRouter(prefix="/api/skills", tags=["skills"])
     meta_file = skills_dir / ".registry.json"
@@ -89,66 +155,14 @@ def build_skills_router(cluster: ClusterState, skills_dir: Path) -> APIRouter:
         meta_file.write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     def _scan_skills() -> list[SkillItem]:
-        if not skills_dir.exists():
-            return []
-        meta = _load_meta()
-        items: list[SkillItem] = []
-        for entry in sorted(skills_dir.iterdir()):
-            if not entry.is_dir() or entry.name.startswith("."):
-                continue
-            skill_md = entry / "SKILL.md"
-            if not skill_md.is_file():
-                continue
-            try:
-                content = skill_md.read_text(encoding="utf-8")
-                mtime = skill_md.stat().st_mtime
-            except OSError:
-                continue
-            name, desc = parse_skill_frontmatter(content, entry.name)
-            m = meta.get(entry.name, {})
-            items.append(
-                SkillItem(
-                    id=entry.name,
-                    name=m.get("name") or name,
-                    description=m.get("description") or desc,
-                    enabled=bool(m.get("enabled", True)),
-                    content=content,
-                    source_url=m.get("source_url"),
-                    updated_at=mtime,
-                )
-            )
-        return items
+        return scan_installed_skills(skills_dir)
 
     @router.get("/search", response_model=list[SkillRegistryResult])
     async def search_skills_registry(q: str, limit: int = 24) -> list[SkillRegistryResult]:
-        query = q.strip()
-        if len(query) < 2:
-            return []
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(
-                    "https://skills.sh/api/search",
-                    params={"q": query, "limit": min(limit, 36)},
-                )
-                r.raise_for_status()
-                raw = r.json().get("skills") or []
+            return await search_skills_registry_items(q, limit=limit)
         except (httpx.HTTPError, ValueError) as exc:
             raise HTTPException(status_code=502, detail=f"skills.sh search failed: {exc}") from exc
-
-        results: list[SkillRegistryResult] = []
-        for item in raw:
-            if not isinstance(item, dict) or not item.get("source") or not item.get("skillId"):
-                continue
-            results.append(
-                SkillRegistryResult(
-                    id=str(item.get("id") or f"{item['source']}/{item['skillId']}"),
-                    source=str(item["source"]),
-                    skill_id=str(item["skillId"]),
-                    name=str(item.get("name") or item["skillId"]),
-                    installs=int(item.get("installs") or 0),
-                )
-            )
-        return results
 
     @router.post("/install-registry", response_model=SkillItem)
     async def install_from_registry(req: SkillRegistryInstallRequest) -> SkillItem:

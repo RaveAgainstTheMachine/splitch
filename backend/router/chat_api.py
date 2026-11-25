@@ -33,6 +33,7 @@ from backend.router.chat_store import (
     APPROVAL_REQUIRED_TOOLS,
     MCP_DISCOVERY_TOOLS_SCHEMA,
     MEDIA_TOOLS_SCHEMA,
+    SKILL_DISCOVERY_TOOLS_SCHEMA,
     SWARM_TOOLS_SCHEMA,
     WORKSPACE_TOOLS_SCHEMA,
     ChatStore,
@@ -40,6 +41,7 @@ from backend.router.chat_store import (
 from backend.router.mcp_api import annotate_mcp_egress, search_mcp_registry_items
 from backend.router.media_api import MediaService
 from backend.router.policy import resolve_route
+from backend.router.skills_api import scan_installed_skills, search_skills_registry_items
 from backend.router.swarm import SwarmManager
 from backend.router.telemetry import ClusterState
 from backend.router.web_search import WEB_TOOLS_SCHEMA, execute_web_fetch, execute_web_search
@@ -658,6 +660,7 @@ def build_chat_router(
             if active_conv.tools_enabled:
                 tools_payload.extend(WORKSPACE_TOOLS_SCHEMA)
                 tools_payload.extend(MCP_DISCOVERY_TOOLS_SCHEMA)
+                tools_payload.extend(SKILL_DISCOVERY_TOOLS_SCHEMA)
                 for srv in mcp_map.values():
                     srv_tools = await _fetch_mcp_tools(
                         srv, active_conv.workspace_subpath, vault=cluster.vault
@@ -685,6 +688,18 @@ def build_chat_router(
                 mcp_ctx_lines.append(
                     "If a task would benefit from an inactive or uninstalled MCP integration, call "
                     "`suggest_mcp(query, reason)` to search local + registry MCPs and surface a 1-click recommendation card."
+                )
+                all_installed_skills = await asyncio.to_thread(scan_installed_skills, skills_dir)
+                active_skill_set = set(eff_skills)
+                inactive_skills = [s for s in all_installed_skills if s.id not in active_skill_set]
+                if inactive_skills:
+                    mcp_ctx_lines.append(
+                        "Installed-but-Inactive Skills (not enabled in this chat): "
+                        + ", ".join(f"`{s.id}` ({s.name})" for s in inactive_skills[:12])
+                    )
+                mcp_ctx_lines.append(
+                    "If a task would benefit from an inactive or uninstalled workflow skill, call "
+                    "`suggest_skill(query, reason)` to search local + skills.sh skills and surface a 1-click recommendation card."
                 )
                 sys_parts.append("\n".join(mcp_ctx_lines))
             if active_conv.web_search_enabled:
@@ -1127,6 +1142,54 @@ def build_chat_router(
                                     {
                                         "query": q_mcp,
                                         "reason": reason_mcp,
+                                        "local_matches": local_matches,
+                                        "registry_matches": reg_matches,
+                                    }
+                                )
+                        elif t_name == "suggest_skill":
+                            q_sk = str(parsed_args.get("query") or "").strip()
+                            reason_sk = str(parsed_args.get("reason") or "").strip()
+                            if not q_sk:
+                                tool_ok = False
+                                tool_output = "Missing 'query' argument for suggest_skill."
+                            else:
+                                q_low = q_sk.lower()
+                                installed_skills = await asyncio.to_thread(
+                                    scan_installed_skills, skills_dir
+                                )
+                                active_sk_set = set(eff_skills)
+                                local_matches = [
+                                    {
+                                        "id": s.id,
+                                        "name": s.name,
+                                        "description": s.description,
+                                        "enabled_in_chat": s.id in active_sk_set,
+                                        "server_enabled": s.enabled,
+                                    }
+                                    for s in installed_skills
+                                    if q_low in s.id.lower()
+                                    or q_low in s.name.lower()
+                                    or q_low in (s.description or "").lower()
+                                ][:6]
+                                reg_matches = []
+                                try:
+                                    found_sk = await search_skills_registry_items(q_sk, limit=6)
+                                    reg_matches = [
+                                        {
+                                            "id": r.id,
+                                            "name": r.name,
+                                            "source": r.source,
+                                            "installs": r.installs,
+                                        }
+                                        for r in found_sk
+                                    ]
+                                except (httpx.HTTPError, ValueError):
+                                    reg_matches = []
+                                tool_ok = True
+                                tool_output = json.dumps(
+                                    {
+                                        "query": q_sk,
+                                        "reason": reason_sk,
                                         "local_matches": local_matches,
                                         "registry_matches": reg_matches,
                                     }
