@@ -27,6 +27,7 @@ import {
   X
 } from "lucide-react";
 import type { ConfirmState } from "./ConfirmDialog";
+import { StrataPane } from "./StrataPane";
 import type {
   AliasConfig,
   DownloadJob,
@@ -180,7 +181,7 @@ export function ModelsTab({
 }) {
   const [inventory, setInventory] = useState<NodeModelInventory[]>([]);
   const [query, setQuery] = useState("Qwen3-Coder");
-  const [searchFormat, setSearchFormat] = useState<"gguf" | "mlx">("gguf");
+  const [searchFormat, setSearchFormat] = useState<"gguf" | "mlx" | "strata">("gguf");
   const [sortBy, setSortBy] = useState<SortKey>("downloads");
   const [sortDesc, setSortDesc] = useState(true);
   const [sortStatusText, setSortStatusText] = useState("");
@@ -312,7 +313,7 @@ export function ModelsTab({
     q: string,
     sortKey: SortKey,
     desc: boolean,
-    fmt: "gguf" | "mlx" = searchFormat
+    fmt: "gguf" | "mlx" = searchFormat === "mlx" ? "mlx" : "gguf"
   ) => {
     const trimmed = q.trim();
     if (trimmed.length < 2) return;
@@ -727,16 +728,17 @@ export function ModelsTab({
                 aria-label="Model format"
                 value={searchFormat}
                 onChange={(e) => {
-                  const nextFmt = e.target.value as "gguf" | "mlx";
+                  const nextFmt = e.target.value as "gguf" | "mlx" | "strata";
                   setSearchFormat(nextFmt);
                   setSelectedRepo(null);
-                  if (repos.length > 0) {
+                  if (nextFmt !== "strata" && repos.length > 0) {
                     void executeHfSearch(query, sortBy, sortDesc, nextFmt);
                   }
                 }}
               >
                 <option value="gguf">GGUF (llama.cpp)</option>
                 <option value="mlx">MLX (Apple Silicon)</option>
+                <option value="strata">Strata (Sparse MoE)</option>
               </select>
             </label>
 
@@ -804,7 +806,17 @@ export function ModelsTab({
           </div>
         </div>
 
-        <form className="hf-controls" onSubmit={searchHf}>
+        {searchFormat === "strata" ? (
+          <StrataPane
+            nodes={nodes}
+            targetNode={targetNode}
+            onAssignAlias={openAssignAliasesDialog}
+            onStatusRefresh={onStatusRefresh}
+            onConfirm={onConfirm}
+          />
+        ) : (
+          <>
+            <form className="hf-controls" onSubmit={searchHf}>
           <input
             type="search"
             value={query}
@@ -1304,6 +1316,8 @@ export function ModelsTab({
               </div>
             )}
           </div>
+        )}
+          </>
         )}
 
       </section>

@@ -35,7 +35,7 @@ from backend.shared.models import GpuDevice
 from backend.shared.progress import TerminalProgress, null_download, null_step
 
 EngineBackend = Literal["auto", "cuda", "rocm", "vulkan", "metal", "cpu"]
-EngineTarget = Literal["llama.cpp", "ollama", "sd.cpp", "mlx-lm"]
+EngineTarget = Literal["llama.cpp", "ollama", "sd.cpp", "mlx-lm", "strata"]
 
 LLAMA_RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases"
 SD_RELEASES_API = "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases"
@@ -376,6 +376,26 @@ def detect_installed_engines() -> list[EngineBinaryInfo]:
                     backend="metal",
                 )
             )
+
+    # 6. Managed or system Strata (`strata`)
+    from backend.shared.strata_manager import read_strata_engine_meta, resolve_strata_bin
+
+    strata_meta = read_strata_engine_meta()
+    strata_bin = resolve_strata_bin()
+    if strata_bin is not None:
+        is_managed_strata = bool(strata_meta.get("install_dir")) and str(strata_bin).startswith(
+            str(default_data_root() / "engines" / "strata")
+        )
+        found.append(
+            EngineBinaryInfo(
+                engine="strata",
+                path=str(strata_bin),
+                version=str(strata_meta.get("version") or ("managed" if is_managed_strata else "system")),
+                build_tag=str(strata_meta.get("version") or ""),
+                managed=is_managed_strata,
+                backend="strata",
+            )
+        )
 
     return found
 
@@ -974,6 +994,16 @@ def install_or_update_engine(
         return _install_or_update_ollama(dry_run=dry_run, progress=progress)
     if engine == "mlx-lm":
         return _install_or_update_mlx(
+            version=version,
+            bin_dir=bin_dir,
+            force=force,
+            dry_run=dry_run,
+            progress=progress,
+        )
+    if engine == "strata":
+        from backend.shared.strata_manager import install_or_update_strata
+
+        return install_or_update_strata(
             version=version,
             bin_dir=bin_dir,
             force=force,

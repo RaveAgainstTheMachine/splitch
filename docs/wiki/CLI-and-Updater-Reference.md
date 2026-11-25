@@ -141,13 +141,15 @@ splitch engine status --check-remote
 splitch engine install llama.cpp --dry-run
 splitch engine install sd.cpp --dry-run
 
-# Atomically install or upgrade managed llama.cpp, stable-diffusion.cpp (`sd-server`), or Apple Silicon MLX (`mlx-lm`)
+# Atomically install or upgrade managed llama.cpp, stable-diffusion.cpp (`sd-server`), Apple Silicon MLX (`mlx-lm`), or Strata (`Niko1221/Strata`)
 splitch engine install llama.cpp --backend auto
 splitch engine install sd.cpp --backend auto
 splitch engine install mlx-lm          # macOS arm64 only: isolated uv venv + splitch-mlx-server
+splitch engine install strata          # SHA-256-verified Strata CLI for Linux/macOS arm64/Windows x64
 splitch engine update llama.cpp
 splitch engine update sd.cpp
 splitch engine update mlx-lm
+splitch engine update strata
 
 # Install or update Ollama via official installer / Homebrew / winget
 splitch engine install ollama
@@ -191,14 +193,18 @@ Splitch includes native OS desktop integration and a zero-polling (`/ws/status` 
 # Start Splitch if offline (systemd user service or detached router), start system tray, and open Web UI
 splitch launch [--url http://localhost:8080] [--no-tray] [--no-browser]
 
-# Run the system tray icon daemon (foreground or --detach)
-splitch tray [--url http://localhost:8080] [--detach]
+# Run the system tray icon daemon (accepts optional --api-key)
+splitch tray [--url http://localhost:8080] [--api-key KEY]
+
+# Store or clear router SPLITCH_API_KEY in encrypted SecretVault for tray & desktop icon sync
+splitch desktop set-api-key [--value KEY | --clear]
 
 # Gracefully stop managed Splitch router/agent processes and system tray
 splitch stop [--keep-tray]
 
-# Install, inspect, or remove Application Menu / Start Menu / Desktop shortcuts & login autostart
-splitch desktop install [--autostart] [--no-desktop-icon] [--url http://localhost:8080] [--mode local|remote] [--service splitch-agent.service]
+# Install, inspect, sync, or remove Application Menu / Start Menu / Desktop shortcuts & login autostart
+splitch desktop install [--autostart] [--no-desktop-icon] [--url http://localhost:8080] [--mode local|remote] [--service splitch-agent.service] [--api-key KEY]
+splitch desktop sync-icon [--url URL] [--accent HEX] [--scheme system|dark|light] [--surface default|oled|slate|charcoal]
 splitch desktop status [--json]
 splitch desktop check-updates
 splitch desktop uninstall

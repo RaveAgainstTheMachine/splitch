@@ -159,9 +159,18 @@ async def forward_inference(
             attempted_nodes.add(active_decision.node.node_id)
             active_decision.node.in_flight += 1
             outbound_body = {**body, "model": active_decision.target_model}
-            target_url = f"{active_decision.node.engine_url}{endpoint}"
+            if active_decision.use_strata_proxy:
+                proxy_path = f"/strata/proxy{endpoint}"
+                target_url = f"{active_decision.node.agent_url}{proxy_path}"
+                req_headers = {
+                    **upstream_headers,
+                    **state.agent_headers("POST", proxy_path),
+                }
+            else:
+                target_url = f"{active_decision.node.engine_url}{endpoint}"
+                req_headers = upstream_headers
             req_obj = client.build_request(
-                "POST", target_url, json=outbound_body, headers=upstream_headers or None
+                "POST", target_url, json=outbound_body, headers=req_headers or None
             )
             cand_upstream: httpx.Response | None = None
             try:
@@ -317,9 +326,18 @@ async def forward_inference(
         active_decision.node.in_flight += 1
         try:
             outbound_body = {**body, "model": active_decision.target_model}
-            target_url = f"{active_decision.node.engine_url}{endpoint}"
+            if active_decision.use_strata_proxy:
+                proxy_path = f"/strata/proxy{endpoint}"
+                target_url = f"{active_decision.node.agent_url}{proxy_path}"
+                req_headers = {
+                    **upstream_headers,
+                    **state.agent_headers("POST", proxy_path),
+                }
+            else:
+                target_url = f"{active_decision.node.engine_url}{endpoint}"
+                req_headers = upstream_headers
             resp_cand = await state.proxy_client.post(
-                target_url, json=outbound_body, headers=upstream_headers or None
+                target_url, json=outbound_body, headers=req_headers or None
             )
             if (
                 resp_cand.status_code in (502, 503, 504)
@@ -423,7 +441,7 @@ def build_openai_models_list(state: ClusterState) -> dict[str, Any]:
     for node in state.nodes.values():
         if not node.online or node.telemetry is None:
             continue
-        for m in node.telemetry.models:
+        for m in (*node.telemetry.models, *node.telemetry.strata_models):
             qualified = f"{node.node_id}/{m.id}"
             if qualified not in seen:
                 items.append(

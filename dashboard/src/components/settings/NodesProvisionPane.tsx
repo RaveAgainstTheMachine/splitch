@@ -34,7 +34,7 @@ export function NodesProvisionPane({
     role: "gpu" as NodeRole,
     yield_on_gaming: true,
     yield_gpus: "",
-    engine: "auto" as "auto" | "llama.cpp" | "ollama" | "mlx-lm" | "none",
+    engine: "auto" as "auto" | "llama.cpp" | "ollama" | "mlx-lm" | "strata" | "none",
     backend: "auto" as "auto" | "cuda" | "rocm" | "vulkan" | "metal" | "cpu",
     with_media: false,
     enable_tools: false,
@@ -55,7 +55,7 @@ export function NodesProvisionPane({
     node_id: "",
     role: "gpu" as NodeRole,
     yield_on_gaming: true,
-    engine: "auto" as "auto" | "llama.cpp" | "ollama" | "mlx-lm" | "none",
+    engine: "auto" as "auto" | "llama.cpp" | "ollama" | "mlx-lm" | "strata" | "none",
     backend: "auto" as "auto" | "cuda" | "rocm" | "vulkan" | "metal" | "cpu",
     with_media: false,
     enable_tools: false,
@@ -375,6 +375,7 @@ export function NodesProvisionPane({
                   <option value="auto">auto</option>
                   <option value="llama.cpp">llama.cpp</option>
                   <option value="mlx-lm">mlx-lm (Apple Silicon)</option>
+                  <option value="strata">strata (Sparse MoE)</option>
                   <option value="ollama">ollama</option>
                   <option value="none">none</option>
                 </select>
@@ -544,6 +545,7 @@ export function NodesProvisionPane({
                   <option value="auto">auto</option>
                   <option value="llama.cpp">llama.cpp</option>
                   <option value="mlx-lm">mlx-lm (Apple Silicon)</option>
+                  <option value="strata">strata (Sparse MoE)</option>
                   <option value="ollama">ollama</option>
                   <option value="none">none</option>
                 </select>

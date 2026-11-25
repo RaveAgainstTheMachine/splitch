@@ -1054,7 +1054,7 @@ def main() -> None:
         help="Auto-install/update missing inference engine and rebuild missing dashboard UI",
     )
     p_doc.add_argument(
-        "--engine", choices=["llama.cpp", "ollama", "sd.cpp", "mlx-lm"], default="llama.cpp"
+        "--engine", choices=["llama.cpp", "ollama", "sd.cpp", "mlx-lm", "strata"], default="llama.cpp"
     )
     p_doc.add_argument(
         "--with-media",
@@ -1081,10 +1081,10 @@ def main() -> None:
     p_eng_st.set_defaults(func=_cmd_engine)
 
     p_eng_in = eng_sub.add_parser(
-        "install", help="Install managed llama.cpp, sd.cpp, mlx-lm, or ollama backend"
+        "install", help="Install managed llama.cpp, sd.cpp, mlx-lm, strata, or ollama backend"
     )
     p_eng_in.add_argument(
-        "target", nargs="?", choices=["llama.cpp", "ollama", "sd.cpp", "mlx-lm"], default="llama.cpp"
+        "target", nargs="?", choices=["llama.cpp", "ollama", "sd.cpp", "mlx-lm", "strata"], default="llama.cpp"
     )
     p_eng_in.add_argument(
         "--backend", choices=["auto", "cuda", "rocm", "vulkan", "metal", "cpu"], default="auto"
@@ -1096,10 +1096,10 @@ def main() -> None:
     p_eng_in.set_defaults(func=_cmd_engine)
 
     p_eng_up = eng_sub.add_parser(
-        "update", help="Update managed llama.cpp, sd.cpp, mlx-lm, or ollama backend"
+        "update", help="Update managed llama.cpp, sd.cpp, mlx-lm, strata, or ollama backend"
     )
     p_eng_up.add_argument(
-        "target", nargs="?", choices=["llama.cpp", "ollama", "sd.cpp", "mlx-lm"], default="llama.cpp"
+        "target", nargs="?", choices=["llama.cpp", "ollama", "sd.cpp", "mlx-lm", "strata"], default="llama.cpp"
     )
     p_eng_up.add_argument(
         "--backend", choices=["auto", "cuda", "rocm", "vulkan", "metal", "cpu"], default="auto"

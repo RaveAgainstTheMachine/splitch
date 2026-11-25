@@ -1,4 +1,4 @@
-﻿# Splitch Universal Installer & Updater for Windows (PowerShell)
+# Splitch Universal Installer & Updater for Windows (PowerShell)
 #
 # Install or update in one command:
 #   irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.ps1 | iex
@@ -379,7 +379,7 @@ $EngMetaPath = Join-Path $DataRoot "engine_meta.json"
 $env:SPLITCH_DATA_ROOT = $DataRoot
 if ($TargetEngine -eq "none") {
     Write-Ok "Skipped inference engine install (-Engine none)"
-} elseif ($TargetEngine -in @("llama.cpp", "ollama")) {
+} elseif ($TargetEngine -in @("llama.cpp", "ollama", "strata")) {
     Write-Step "Installing / updating inference engine ($TargetEngine, backend=$TargetBackend)..."
     & $VenvExe engine install $TargetEngine --backend $TargetBackend --bin-dir $BinDir
 } else {

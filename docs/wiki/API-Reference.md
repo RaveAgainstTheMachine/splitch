@@ -196,6 +196,14 @@ Authenticated with `SPLITCH_AGENT_TOKEN` when configured:
 | `POST` | `/workspace/git/commit` | Commit staged changes with message. |
 | `POST` | `/system/update` | Signed self-update endpoint for worker node agents (`splitch-router` → `splitch-agent`). |
 | `POST` | `/system/rollback` | Signed rollback endpoint for worker node agents. |
+| `POST` | `/desktop/sync-theme` | Signed router → agent push to sync local desktop/app-menu/`.icns`/`.lnk` icons. |
+| `GET` | `/strata/status` | Inspect node's managed Strata CLI install, sidecar `:8085` health, presets & active job. |
+| `POST` | `/strata/install` | Background SHA-256-verified install/update of Strata CLI. |
+| `POST` | `/strata/plan` | Run `strata launch --plan --output json` dry-run preview. |
+| `POST` | `/strata/launch` | Launch/switch managed Strata model on loopback `:8085` (optional primary VRAM eviction). |
+| `POST` | `/strata/calibrate` | Run exclusive-GPU Quick/Thorough Tune (`--tune quick\|thorough`). |
+| `POST` | `/strata/stop` | Terminate active Strata job/server and release VRAM + RAM. |
+| `ANY` | `/strata/proxy/{path}` | Signed zero-copy SSE streaming proxy to loopback `strata-server`. |
 | `POST` | `/tools/execute` | Execute a sandboxed Agent Chat workspace tool (requires `SPLITCH_ENABLE_TOOLS=1`). |
 
 ---
@@ -254,6 +262,21 @@ Authenticated with `SPLITCH_AGENT_TOKEN` when configured:
 | `POST` | `/api/nodes/{node_id}/git/discard` | Discard uncommitted changes on target node. |
 | `POST` | `/api/nodes/{node_id}/git/commit` | Commit staged changes on target node. |
 | `POST` | `/api/nodes/{node_id}/git/generate-commit-message` | Summarize staged/working diff into a Conventional Commit message via `/v1/chat/completions`. |
+
+---
+
+## 10. Strata Sparse-MoE Control Plane
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/api/strata/catalog` | Curated Strata MoE catalog enriched with live 4-tier per-node fit assessments. |
+| `GET` | `/api/strata/status` | Aggregate `NodeStrataStatus` across all online nodes. |
+| `POST` | `/api/strata/nodes/{node_id}/install` | Trigger SHA-256-verified Strata CLI install/update on target node. |
+| `POST` | `/api/strata/nodes/{node_id}/plan` | Dry-run `strata launch --plan` preview on target node. |
+| `POST` | `/api/strata/nodes/{node_id}/launch` | Launch/switch a Strata MoE model on target node's loopback `:8085` sidecar. |
+| `POST` | `/api/strata/nodes/{node_id}/calibrate` | Run 1-click Quick Tune (`--tune quick`) or Thorough Tune on target node. |
+| `POST` | `/api/strata/nodes/{node_id}/stop` | Stop Strata sidecar or active calibration job on target node. |
+| `POST` | `/api/strata/nodes/{node_id}/import-plan` | Preview importing local GGUF shards inside `SPLITCH_STORAGE_PATH` into Strata. |
 
 ---
 

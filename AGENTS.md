@@ -1,6 +1,6 @@
 # AGENTS.md — Splitch Engineering & Agent Harness Guide
 
-This repository contains **Splitch** (`v0.12.0`), a multi-node local AI orchestrator, OpenAI/Anthropic-compatible gateway, 3-column Agent Chat IDE, and Media Studio.
+This repository contains **Splitch** (`v0.13.0`), a multi-node local AI orchestrator, OpenAI/Anthropic-compatible gateway, 3-column Agent Chat IDE, and Media Studio.
 
 ## 1. Mandatory Pre-Flight Harness
 

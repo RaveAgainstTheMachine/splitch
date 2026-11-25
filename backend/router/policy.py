@@ -59,6 +59,14 @@ class RouteDecision:
     target_model: str
     requested_model: str
     fallback_reason: str | None = None
+    use_strata_proxy: bool = False
+
+
+def _node_serves_strata_model(node: NodeStatus, target_model: str) -> bool:
+    t = node.telemetry
+    if t is None or not t.strata_healthy:
+        return False
+    return any(m.id == target_model for m in t.strata_models)
 
 
 def _extract_text_len(value: Any) -> int:
@@ -139,7 +147,7 @@ def check_node_eligibility(
         return f"{node.node_id}_upstream_error"
     if not node.online or node.telemetry is None:
         return f"{node.node_id}_offline"
-    if not node.telemetry.engine_healthy:
+    if not node.telemetry.engine_healthy and not node.telemetry.strata_healthy:
         return f"{node.node_id}_engine_down"
     if control.force_node != "auto" and node.node_id != control.force_node:
         return f"forced_{control.force_node}"
@@ -147,7 +155,10 @@ def check_node_eligibility(
         return "gaming_mode"
 
     t = node.telemetry
-    model_loaded = any(m.id == target_model and m.status == "loaded" for m in t.models)
+    model_loaded = any(
+        m.id == target_model and m.status == "loaded"
+        for m in (*t.models, *t.strata_models)
+    )
 
     if node.role == "gpu":
         non_llm_mb, gpu_util, vram_total, vram_free = watched_gpu_metrics(node)
@@ -215,7 +226,12 @@ def resolve_route(
                 node, real_model, control, guards, exclude_nodes=exclude_nodes
             )
             if block is None:
-                return RouteDecision(node=node, target_model=real_model, requested_model=req), reasons
+                return RouteDecision(
+                    node=node,
+                    target_model=real_model,
+                    requested_model=req,
+                    use_strata_proxy=_node_serves_strata_model(node, real_model),
+                ), reasons
             reasons.append(f"{prefix}:{block}")
             return None, reasons
 
@@ -238,6 +254,9 @@ def resolve_route(
                     node=primary_node,
                     target_model=alias_cfg.primary_model,
                     requested_model=req,
+                    use_strata_proxy=_node_serves_strata_model(
+                        primary_node, alias_cfg.primary_model
+                    ),
                 ),
                 reasons,
             )
@@ -255,6 +274,9 @@ def resolve_route(
                         target_model=alias_cfg.fallback_model,
                         requested_model=req,
                         fallback_reason=primary_block,
+                        use_strata_proxy=_node_serves_strata_model(
+                            fb_node, alias_cfg.fallback_model
+                        ),
                     ),
                     reasons,
                 )
@@ -262,22 +284,35 @@ def resolve_route(
         return None, reasons
 
     # 3. Direct model ID lookup across online nodes (prefer loaded, lowest in_flight)
-    direct_candidates: list[tuple[int, int, NodeStatus]] = []
+    direct_candidates: list[tuple[int, int, NodeStatus, bool]] = []
     for node in nodes.values():
         block = check_node_eligibility(node, req, control, guards, exclude_nodes=exclude_nodes)
         if block is not None:
             reasons.append(f"{node.node_id}:{block}")
             continue
         assert node.telemetry is not None
-        known = [m for m in node.telemetry.models if m.id == req]
-        if known:
-            loaded_rank = 0 if known[0].status == "loaded" else 1
-            direct_candidates.append((loaded_rank, node.in_flight, node))
+        known_primary = [m for m in node.telemetry.models if m.id == req]
+        known_strata = [m for m in node.telemetry.strata_models if m.id == req]
+        if known_primary:
+            loaded_rank = 0 if known_primary[0].status == "loaded" else 1
+            direct_candidates.append((loaded_rank, node.in_flight, node, False))
+        elif known_strata:
+            loaded_rank = 0 if known_strata[0].status == "loaded" else 1
+            direct_candidates.append((loaded_rank, node.in_flight, node, True))
 
     if direct_candidates:
         direct_candidates.sort(key=lambda item: (item[0], item[1]))
         chosen = direct_candidates[0][2]
-        return RouteDecision(node=chosen, target_model=req, requested_model=req), reasons
+        use_strata = direct_candidates[0][3]
+        return (
+            RouteDecision(
+                node=chosen,
+                target_model=req,
+                requested_model=req,
+                use_strata_proxy=use_strata,
+            ),
+            reasons,
+        )
 
     # 4. Zero-config / auto fallback when no aliases are configured: pick first loaded model on eligible node
     eligible_any = [
@@ -288,10 +323,20 @@ def resolve_route(
     if eligible_any:
         eligible_any.sort(key=lambda n: n.in_flight)
         chosen = eligible_any[0]
-        if req in ("auto", "splitch/auto", "") and chosen.telemetry and chosen.telemetry.models:
-            loaded = next((m.id for m in chosen.telemetry.models if m.status == "loaded"), None)
-            chosen_model = loaded or chosen.telemetry.models[0].id
-            return RouteDecision(node=chosen, target_model=chosen_model, requested_model=req), reasons
+        if req in ("auto", "splitch/auto", "") and chosen.telemetry:
+            all_models = [*chosen.telemetry.models, *chosen.telemetry.strata_models]
+            if all_models:
+                loaded = next((m.id for m in all_models if m.status == "loaded"), None)
+                chosen_model = loaded or all_models[0].id
+                return (
+                    RouteDecision(
+                        node=chosen,
+                        target_model=chosen_model,
+                        requested_model=req,
+                        use_strata_proxy=_node_serves_strata_model(chosen, chosen_model),
+                    ),
+                    reasons,
+                )
         return RouteDecision(node=chosen, target_model=req, requested_model=req), reasons
 
     return None, reasons

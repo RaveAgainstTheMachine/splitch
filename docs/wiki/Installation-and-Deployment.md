@@ -121,7 +121,9 @@ Point your agent to `--engine-url http://127.0.0.1:11434` (Splitch auto-detects 
 Any server implementing `/v1/models` and `/v1/chat/completions` works out of the box:
 - **LM Studio:** Enable Local Server (`http://0.0.0.0:1234`), pass `--engine-url http://127.0.0.1:1234`.
 - **vLLM:** `vllm serve <model> --host 0.0.0.0 --port 8000`, pass `--engine-url http://127.0.0.1:8000`.
-- **Strata (`Niko1221/Strata`):** Note that `strata-server` defaults to `:8080`, which collides with `splitch-router`. Run Strata on `:8081` (`--port 8081`) and pass `--engine-url http://127.0.0.1:8081` (auto-detected as `engine="strata"` and excluded from false GPU Auto-Yield).
+- **Strata (`Niko1221/Strata` — Sparse MoE):**
+  - **Managed Sidecar (Recommended):** Install directly from **Models → Format: Strata (Sparse MoE) → Install Strata CLI** or `splitch engine install strata`. Splitch verifies the official `strata-control` SHA-256 manifest, runs Strata on loopback `127.0.0.1:8085` alongside `llama-server`/`mlx-lm`, auto-evicts primary VRAM on launch, supports 1-click **Quick Tune (`--tune quick`)**, and routes requests via `splitch-agent`'s signed `/strata/proxy/*` endpoint with zero firewall changes.
+  - **External Manual Server:** If running `strata-server` manually instead of `llama-server`, note Strata defaults to `:8080` (colliding with `splitch-router`); start Strata on `--port 8081` and pass `--engine-url http://127.0.0.1:8081`.
 
 ---
 

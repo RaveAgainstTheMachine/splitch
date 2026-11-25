@@ -33,7 +33,7 @@
 
 1. **Multiple Computers, One Local AI Cluster:** Pool an NVIDIA gaming PC, an AMD/Intel compute box, an Apple Silicon Mac, and an always-on Linux server behind a single hardware-aware router. Start on one machine (`splitch up`) and add nodes without changing client URLs.
 2. **Automatic GPU Yielding When Gaming:** Live GPU telemetry (`nvidia-smi pmon`, ROCm, Vulkan, Apple Silicon) detects 3D games or creative workloads, yields the busy GPU, and transparently fails over active requests to your standby node.
-3. **One Unified Endpoint for Every Tool:** Exposes OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), Embeddings (`/v1/embeddings`), FIM (`/infill`), and Images/Videos (`/v1/images/generations`) over **`llama-server`**, **Apple Silicon `mlx-lm`**, **Ollama**, **LM Studio**, **vLLM**, **Strata**, **`sd-server`**, and **ComfyUI** — plus a built-in **Agent Chat IDE** (with **Workspace File Tree**, **Git Review & AI Commit**, and **Artifact Preview**), **Media Studio**, **MCP/Skills control plane**, **UI Cluster Update & Rollback**, and **Benchmark harness**.
+3. **One Unified Endpoint for Every Tool:** Exposes OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), Embeddings (`/v1/embeddings`), FIM (`/infill`), and Images/Videos (`/v1/images/generations`) over **`llama-server`**, **Apple Silicon `mlx-lm`**, **Strata (Sparse MoE)**, **Ollama**, **LM Studio**, **vLLM**, **`sd-server`**, and **ComfyUI** — plus a built-in **Agent Chat IDE** (with **Workspace File Tree**, **Git Review & AI Commit**, and **Artifact Preview**), **Media Studio**, **MCP/Skills control plane**, **UI Cluster Update & Rollback**, **Vault-Backed Cross-OS Tray/Desktop Icon Sync**, and **Benchmark harness**.
 
 ---
 
@@ -189,7 +189,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 ## Acknowledgments
 
 - **𝔍𝔞𝔠𝔨𝔞𝔩𝔬𝔭𝔢 𝔐𝔬𝔬𝔫 (Jackalope Moon)** — UI/UX architecture and 3-column IDE layout improvements.
-- Upstream open-source projects: [`llama.cpp`](https://github.com/ggml-org/llama.cpp), [`stable-diffusion.cpp`](https://github.com/leejet/stable-diffusion.cpp), [`ComfyUI`](https://github.com/comfyanonymous/ComfyUI), [`Ollama`](https://github.com/ollama/ollama), [`Graphify`](https://pypi.org/project/graphifyy/), [`MCP`](https://modelcontextprotocol.io/), [`skills.sh`](https://skills.sh/), [`Unsloth`](https://github.com/unslothai/unsloth), [`Hugging Face`](https://huggingface.co/), [`uv`](https://github.com/astral-sh/uv), [`FastAPI`](https://fastapi.tiangolo.com/), [`React`](https://react.dev/), and [`Vite`](https://vite.dev/).
+- Upstream open-source projects: [`llama.cpp`](https://github.com/ggml-org/llama.cpp), [`Strata`](https://github.com/Niko1221/Strata), [`mlx-lm`](https://github.com/ml-explore/mlx-lm), [`stable-diffusion.cpp`](https://github.com/leejet/stable-diffusion.cpp), [`ComfyUI`](https://github.com/comfyanonymous/ComfyUI), [`Ollama`](https://github.com/ollama/ollama), [`Graphify`](https://pypi.org/project/graphifyy/), [`MCP`](https://modelcontextprotocol.io/), [`skills.sh`](https://skills.sh/), [`Unsloth`](https://github.com/unslothai/unsloth), [`Hugging Face`](https://huggingface.co/), [`uv`](https://github.com/astral-sh/uv), [`FastAPI`](https://fastapi.tiangolo.com/), [`React`](https://react.dev/), and [`Vite`](https://vite.dev/).
 
 ## License
 

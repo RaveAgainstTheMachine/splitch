@@ -939,6 +939,15 @@ def perform_update(
             result.steps.extend(mlx_res.steps)
             if mlx_res.ok and mlx_res.action in ("install", "update"):
                 result.updated = True
+        from backend.shared.strata_manager import read_strata_engine_meta
+
+        if read_strata_engine_meta():
+            st_res = install_or_update_engine(
+                "strata", backend=engine_backend, force=force, progress=progress
+            )
+            result.steps.extend(st_res.steps)
+            if st_res.ok and st_res.action in ("install", "update"):
+                result.updated = True
 
     if restart_services and (result.updated or result.ui_rebuilt):
         with step_ctx("Restarting active services"):

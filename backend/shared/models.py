@@ -85,6 +85,10 @@ class NodeTelemetry(BaseModel):
     workspace_root: str = ""
     cmd_sandbox: str = ""
     models: list[LoadedModel] = Field(default_factory=list)
+    strata_installed: bool = False
+    strata_healthy: bool = False
+    strata_active_model: str = ""
+    strata_models: list[LoadedModel] = Field(default_factory=list)
 
 
 class NodeStatus(BaseModel):
@@ -800,7 +804,7 @@ class JoinTokenCreateRequest(BaseModel):
     node_id: str = ""
     role: NodeRole = "gpu"
     yield_on_gaming: bool = True
-    engine: Literal["auto", "llama.cpp", "ollama", "mlx-lm", "none"] = "auto"
+    engine: Literal["auto", "llama.cpp", "ollama", "mlx-lm", "strata", "none"] = "auto"
     backend: Literal["auto", "cuda", "rocm", "vulkan", "metal", "cpu"] = "auto"
     with_media: bool = False
     enable_tools: bool = False
@@ -847,7 +851,7 @@ class NodeSshProvisionRequest(BaseModel):
     role: NodeRole = "gpu"
     yield_on_gaming: bool = True
     yield_gpu_indices: list[int] = Field(default_factory=list)
-    engine: Literal["auto", "llama.cpp", "ollama", "mlx-lm", "none"] = "auto"
+    engine: Literal["auto", "llama.cpp", "ollama", "mlx-lm", "strata", "none"] = "auto"
     backend: Literal["auto", "cuda", "rocm", "vulkan", "metal", "cpu"] = "auto"
     with_media: bool = False
     enable_tools: bool = False
@@ -981,3 +985,107 @@ class GitActionResponse(BaseModel):
     output: str = ""
     commit_sha: str = ""
     error: str | None = None
+
+
+# ── Strata Sparse-MoE Engine Schemas ─────────────────────────────────────────
+
+
+StrataFitTier = Literal["optimal", "low_ram", "tight", "insufficient"]
+
+
+class StrataModelSpec(BaseModel):
+    family: str
+    model: str
+    label: str
+    provider: str = ""
+    download_gb: float = 0.0
+    experts_ram_gb: float = 0.0
+    min_vram_gb: float = 0.0
+    ssd_shard_gb: float = 0.0
+    supports_vision: bool = False
+    supports_dflash2: bool = False
+    notes: str = ""
+
+
+class StrataFitAssessment(BaseModel):
+    node_id: str
+    tier: StrataFitTier = "insufficient"
+    reason: str = ""
+    vram_gb: float = 0.0
+    ram_gb: float = 0.0
+    ssd_free_gb: float = 0.0
+    is_unified: bool = False
+
+
+class StrataCatalogEntry(BaseModel):
+    spec: StrataModelSpec
+    fits: dict[str, StrataFitAssessment] = Field(default_factory=dict)
+
+
+class StrataInstalledModel(BaseModel):
+    id: str
+    family: str = ""
+    config_path: str = ""
+    component_status: str = ""
+    is_active: bool = False
+
+
+class StrataJobState(BaseModel):
+    job_id: str = ""
+    action: Literal["idle", "install", "launch", "plan", "stop", "calibrate"] = "idle"
+    status: Literal["idle", "running", "completed", "failed"] = "idle"
+    step: str = ""
+    log_tail: list[str] = Field(default_factory=list)
+    plan_json: dict | None = None
+    error: str | None = None
+    started_at: float = 0.0
+    finished_at: float | None = None
+
+
+class NodeStrataStatus(BaseModel):
+    node_id: str
+    installed: bool = False
+    version: str = ""
+    binary_path: str = ""
+    running: bool = False
+    healthy: bool = False
+    port: int = 8085
+    active_model: str = ""
+    models: list[LoadedModel] = Field(default_factory=list)
+    installed_models: list[StrataInstalledModel] = Field(default_factory=list)
+    presets: list[str] = Field(default_factory=list)
+    job: StrataJobState = Field(default_factory=StrataJobState)
+    error: str | None = None
+
+
+class StrataInstallRequest(BaseModel):
+    force: bool = False
+    version: str = "latest"
+
+
+class StrataLaunchRequest(BaseModel):
+    family: str = ""
+    model: str = ""
+    preset: str = ""
+    model_path: str = ""
+    context: str = "64k"
+    kv: Literal["int8", "q4_0", "k8v4", "fp16"] = "int8"
+    vision: Literal["auto", "on", "off", "gpu", "cpu"] = "auto"
+    drafting: Literal["auto", "mtp", "dflash2", "off"] = "auto"
+    parallel: int | None = Field(default=None, ge=1, le=64)
+    evict_primary_vram: bool = True
+    plan_only: bool = False
+
+
+class StrataCalibrateRequest(BaseModel):
+    family: str = ""
+    model: str = ""
+    preset: str = ""
+    context: str = "64k"
+    kv: Literal["int8", "q4_0", "k8v4", "fp16"] = "int8"
+    mode: Literal["quick", "thorough"] = "quick"
+    evict_primary_vram: bool = True
+
+
+class StrataImportPlanRequest(BaseModel):
+    model_path: str

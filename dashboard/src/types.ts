@@ -74,6 +74,10 @@ export interface NodeTelemetry {
   workspace_root: string;
   cmd_sandbox?: string;
   models: LoadedModel[];
+  strata_installed?: boolean;
+  strata_healthy?: boolean;
+  strata_active_model?: string;
+  strata_models?: LoadedModel[];
 }
 
 export interface NodeStatus {
@@ -724,5 +728,72 @@ export interface GitActionResponse {
   ok: boolean;
   output: string;
   commit_sha: string;
+  error: string | null;
+}
+
+export type StrataFitTier = "optimal" | "low_ram" | "tight" | "insufficient";
+
+export interface StrataModelSpec {
+  family: string;
+  model: string;
+  label: string;
+  provider: string;
+  download_gb: number;
+  experts_ram_gb: number;
+  min_vram_gb: number;
+  ssd_shard_gb: number;
+  supports_vision: boolean;
+  supports_dflash2: boolean;
+  notes: string;
+}
+
+export interface StrataFitAssessment {
+  node_id: string;
+  tier: StrataFitTier;
+  reason: string;
+  vram_gb: number;
+  ram_gb: number;
+  ssd_free_gb: number;
+  is_unified: boolean;
+}
+
+export interface StrataCatalogEntry {
+  spec: StrataModelSpec;
+  fits: Record<string, StrataFitAssessment>;
+}
+
+export interface StrataInstalledModel {
+  id: string;
+  family: string;
+  config_path: string;
+  component_status: string;
+  is_active: boolean;
+}
+
+export interface StrataJobState {
+  job_id: string;
+  action: "idle" | "install" | "launch" | "plan" | "stop" | "calibrate";
+  status: "idle" | "running" | "completed" | "failed";
+  step: string;
+  log_tail: string[];
+  plan_json: Record<string, unknown> | null;
+  error: string | null;
+  started_at: number;
+  finished_at: number | null;
+}
+
+export interface NodeStrataStatus {
+  node_id: string;
+  installed: boolean;
+  version: string;
+  binary_path: string;
+  running: boolean;
+  healthy: boolean;
+  port: number;
+  active_model: string;
+  models: LoadedModel[];
+  installed_models: StrataInstalledModel[];
+  presets: string[];
+  job: StrataJobState;
   error: string | null;
 }

@@ -26,7 +26,8 @@ Welcome to the **Splitch** documentation hub. Splitch is a hardware-aware multi-
 | --- | --- |
 | `splitch up` | Auto-detect local engine and start agent + router + UI on `:8080` |
 | `splitch doctor --check-updates` | Audit Python, `uv`, Node.js, GPU telemetry, LLM & media engines (`--fix --with-media` auto-remediates) |
-| `splitch engine install \| update` | Install or atomically update hardware-matched `llama.cpp`, `sd.cpp` (`sd-server`), or `ollama` |
+| `splitch engine install \| update` | Install or atomically update hardware-matched `llama.cpp`, `strata`, `mlx-lm`, `sd.cpp`, or `ollama` |
+| `splitch desktop set-api-key` | Store router `SPLITCH_API_KEY` in encrypted `SecretVault` for tray & desktop icon sync |
 | `splitch update --with-engine` | Pull latest Splitch commits, sync Python/UI deps, update managed LLM & media engines, and restart active OS services |
 | `splitch update --check` | Check upstream update status without modifying files |
 | `splitch init` | Generate a starter `splitch.toml` for this machine |
@@ -80,10 +81,10 @@ flowchart TB
 
 | Hardware / OS | Telemetry Source | Gaming-Mode Auto-Yield | Supported Engines |
 | --- | --- | --- | --- |
-| **Linux + NVIDIA GPU** | `nvidia-smi` + `nvidia-smi pmon` (per-PID LLM vs non-LLM VRAM) | Automatic (`non_llm_vram_mb`) + Manual | `llama-server`, Ollama, vLLM, LM Studio, OpenAI-compatible |
-| **Linux + AMD GPU** | `rocm-smi` (VRAM, GPU util, temperature) | Automatic (util/VRAM) + Manual | `llama-server`, Ollama, vLLM, OpenAI-compatible |
-| **macOS Apple Silicon** | `sysctl` + `vm_stat` + unified GPU cap (`max_recommended_working_set`) | Manual (typically `yield_on_gaming = false`) | `llama-server`, Ollama, LM Studio, MLX server |
-| **Windows (NVIDIA / CPU)** | `nvidia-smi` + `psutil` | Automatic (NVIDIA) + Manual | `llama-server`, Ollama, LM Studio |
+| **Linux + NVIDIA GPU** | `nvidia-smi` + `nvidia-smi pmon` (per-PID LLM vs non-LLM VRAM) | Automatic (`non_llm_vram_mb`) + Manual | `llama-server`, **Strata (Sparse MoE)**, Ollama, vLLM, LM Studio, OpenAI-compatible |
+| **Linux + AMD GPU** | `rocm-smi` (VRAM, GPU util, temperature) | Automatic (util/VRAM) + Manual | `llama-server`, **Strata (Sparse MoE)**, Ollama, vLLM, OpenAI-compatible |
+| **macOS Apple Silicon** | `sysctl` + `vm_stat` + unified GPU cap (`max_recommended_working_set`) | Manual (typically `yield_on_gaming = false`) | `llama-server`, **Managed `mlx-lm`**, **Strata (Sparse MoE)**, Ollama, LM Studio |
+| **Windows (NVIDIA / CPU)** | `nvidia-smi` + `psutil` | Automatic (NVIDIA) + Manual | `llama-server`, **Strata (Sparse MoE)**, Ollama, LM Studio |
 | **CPU-Only / Mini-PC / VM** | `psutil` (CPU %, RAM, disk storage) | Manual (`role = "cpu"`) | `llama-server`, Ollama, any `/v1` backend |
 
 ---

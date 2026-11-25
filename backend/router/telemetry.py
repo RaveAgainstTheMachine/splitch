@@ -315,6 +315,18 @@ class ClusterState:
                 )
                 if resp.status_code < 400:
                     m.status = "unloaded"
+        if telemetry.strata_healthy:
+            with contextlib.suppress(httpx.HTTPError, OSError):
+                resp = await self._poll_client.post(
+                    f"{node.agent_url}/strata/stop",
+                    json={},
+                    headers=self.agent_headers("POST", "/strata/stop"),
+                    timeout=12.0,
+                )
+                if resp.status_code < 400:
+                    telemetry.strata_healthy = False
+                    telemetry.strata_active_model = ""
+                    telemetry.strata_models = []
 
     async def persist_aliases(self) -> None:
         base_dir = self.data_dir or (default_data_root() / "data")

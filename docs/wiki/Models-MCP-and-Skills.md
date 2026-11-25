@@ -8,8 +8,8 @@ Beyond routing and Agent Chat, Splitch provides a unified management plane acros
 
 ![Splitch Models and Aliases](../assets/screenshots/models.png)
 
-### Hugging Face GGUF & MLX Discovery, Fit Switch & Inline Model Cards
-1. Pick a **Format** (`GGUF (llama.cpp)` or `MLX (Apple Silicon)` — auto-selects `MLX` when targeting an `mlx-lm` node), **Target Node** (and specific **GPU** on multi-GPU nodes, or `All GPUs`) in the **Models & Aliases** tab.
+### 1. Pick a Format (`GGUF`, `MLX`, or `Strata Sparse MoE`)
+1. Pick a **Format** (`GGUF (llama.cpp)`, `MLX (Apple Silicon)`, or `Strata (Sparse MoE)` — auto-selects `MLX` when targeting an `mlx-lm` node), **Target Node** (and specific **GPU** on multi-GPU nodes, or `All GPUs`) in the **Models & Aliases** tab.
 2. Toggle **`Only show models that fit (≤ XX.X GB)`** (`<input type="checkbox" switch>`) to filter both search result repositories and expanded GGUF files to those that fit within the selected GPU or node memory budget.
 3. Search Hugging Face (e.g., `Qwen3-Coder`, `Llama-3.3`, `Gemma-3`) — results render as **full-width horizontal slices** displaying parameter count, estimated minimum GGUF size, fit badge, context length, capabilities, downloads, likes, and recency.
 4. Click any repository slice to expand an inline drawer showing the cleaned **Hugging Face Model Description** (`README.md` excerpt + `Base`, `Arch`, `Context`, `Params` metadata pills) above **full-width horizontal GGUF quantization slices** with single-GPU vs `Multi-GPU` fit badges.
@@ -23,6 +23,12 @@ Beyond routing and Agent Chat, Splitch provides a unified management plane acros
 - **1-Click Starter Bundles:** Inside **Media Studio → Engine & Models**, pull verified ungated Image & Video bundles (**Z-Image-Turbo Q4**, **FLUX.1-schnell Q4**, **SDXL Turbo FP16**, **Wan 2.1 T2V 1.3B**, **Wan 2.1 T2V 14B Q4**). Splitch pulls only missing companion files (reusing shared `ae.safetensors`, `umt5_xxl`, and `wan_2.1_vae`) and auto-wires `--diffusion-model`, `--vae`, `--t5xxl`, `--clip_l`, `--llm`, and `--flash-attn` on launch.
 - **Native `sd-cli -M vid_gen` Video Generation:** Video requests on `sd.cpp` nodes run natively via `sd-cli -M vid_gen` (Wan 2.1/2.2) without requiring ComfyUI, temporarily yielding `sd-server` VRAM during render and returning WebM video. ComfyUI (`:8188`) remains supported for custom node graphs.
 - **Inline Hugging Face Image & Video Browser:** Search Hugging Face directly inside Media Studio (`Image` or `Video` mode, plus quick-pick chips for `Z-Image`, `FLUX`, `SDXL`, `Wan 2.1`, `LTX-Video`), inspect `.gguf`/`.safetensors` file sizes, and click **Pull → `<node>`**.
+
+### Strata (Sparse MoE) — VRAM + Host RAM + SSD Tiering & 1-Click Quick Tune
+Switch **Format** to **`Strata (Sparse MoE)`** inside **Models** to manage large MoE models (`Qwen3.8-Flash-Next`, `Qwen3.6-35B-A3B`, `DeepSeek-V4.1-Flash`, `Tencent Hy4-Flash`, `Inkling-2-Mini`) as a coexisting loopback sidecar (`:8085`):
+- **1-Click SHA-256 Install:** Click **Install Strata CLI** (or `splitch engine install strata`) to download the verified `strata-control` bundle for your OS/architecture.
+- **4-Tier Fit Badges:** Automatically evaluates **Hot VRAM + Host RAM (or Apple Unified Memory) + NVMe/SSD free space** (`Optimal Fit`, `Low-RAM Split`, `Tight Fit`, `Insufficient`).
+- **Launch, Preview & Quick Tune:** Pick Context (`32k`–`256k`), KV (`int8`/`q4_0`/`k8v4`), Vision (`auto`/`cpu`/`gpu`/`off`), and Drafting (`auto`/`dflash2`/`mtp`/`off`), click **Preview Plan** (`--plan`), **Quick Tune (~20m)** (exclusive-GPU `--tune quick` benchmark), or **Launch / Switch Model**. Active Strata models appear on `/v1/models` and auto-stop on Gaming-Mode GPU Yield.
 
 ### Hot-Reloadable Aliases
 Create or edit logical model aliases (`heavy`, `fast`, `fim`, `embed`, or custom names) with a `primary_node/primary_model` and optional `fallback_node/fallback_model`. Changes persist to `SPLITCH_DATA_DIR` and apply immediately to `/v1/models` and all routing decisions without restarting the router.

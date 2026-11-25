@@ -42,6 +42,7 @@ from backend.router.provision_api import JoinTokenManager, build_provision_route
 from backend.router.proxy import build_openai_models_list, forward_inference
 from backend.router.settings_api import build_settings_router
 from backend.router.skills_api import build_skills_router
+from backend.router.strata_api import build_strata_router
 from backend.router.telemetry import VERSION, ClusterState
 from backend.router.workspace_api import build_workspace_router
 from backend.shared.bench import (
@@ -379,6 +380,7 @@ _media_router, _media_service = build_media_router(cluster, DATA_DIR)
 app.include_router(_media_router)
 app.include_router(build_chat_router(cluster, DATA_DIR, SKILLS_DIR, media_service=_media_service))
 app.include_router(build_models_router(cluster, DATA_DIR))
+app.include_router(build_strata_router(cluster))
 app.include_router(build_skills_router(cluster, SKILLS_DIR))
 app.include_router(build_mcp_router(cluster, DATA_DIR, MCP_SCRIPTS_DIR))
 app.include_router(

@@ -3,6 +3,28 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.13.0] - 2026-11-25
+
+### Strata Sparse-MoE Engine Phase 2 (Managed Install, Sidecar Proxy, 4-Tier Fit & Quick Tune)
+- **Managed SHA-256-Verified Strata CLI Installer (`backend/shared/strata_manager.py`, `engines.py`, `updater.py`, `cli.py`):** Added `splitch engine install strata` / `update strata` fetching official `Niko1221/Strata` `strata-control` releases (`linux-x86_64`, `linux-aarch64`, `macos-arm64`, `windows-x86_64`) with strict SHA-256 verification against `install-manifest.txt`.
+- **Loopback Sidecar (`:8085`) + Ed25519-Signed Streaming Proxy (`backend/agent/main.py`, `policy.py`, `proxy.py`, `telemetry.py`):** Runs managed Strata on `127.0.0.1:8085` alongside `llama-server` / `mlx-lm` with optional auto-eviction of primary VRAM on start, Gaming-Mode auto-stop, `/v1/models` discovery, and zero-copy SSE proxying over `/strata/proxy/{path}`.
+- **4-Tier Hardware Fit & Web UI Control Plane (`StrataPane.tsx`, `ModelsTab.tsx`, `strata_api.py`):** Added **Strata (Sparse MoE)** mode in **Models** with curated MoE catalog, 4-tier VRAM+Host RAM+Unified+SSD fit badges (`Optimal`, `Low-RAM`, `Tight`, `Insufficient`), **Preview Plan**, 1-click **Quick Tune (`--tune quick`)**, **Launch / Switch Model**, **Stop Strata**, and live job log streaming.
+
+## [0.12.0] - 2026-11-24
+
+### Bulletproof Cross-OS Desktop & Tray Icon Sync
+- **Atomic Icon Rasterizer & Native macOS `.icns` (`icons.py`, `shortcuts.py`):** Switched all PNG/SVG/ICO/ICNS writes to atomic temp-file + `os.replace()` with LRU caching, multi-resolution Windows `.ico` (16–256px), and pure-Python Apple `.icns` containers (`icp4`–`ic08`) updating `Splitch.app/Contents/Info.plist` `CFBundleIconFile` + LaunchServices/`NSWorkspace`.
+- **Universal API Key Vault Resolution & Dual-Path Sync (`shortcuts.py`, `tray.py`, `telemetry.py`, `agent/main.py`):** Added `resolve_desktop_api_key()` (`SPLITCH_API_KEY` → encrypted `SecretVault` → `tray.env`/`router.env`) + `splitch desktop set-api-key`, signed router → agent `POST /desktop/sync-theme` fan-out, GNOME `metadata::trusted` re-application, and `--extra desktop` preservation in `splitch update`.
+
+## [0.11.2] - 2026-11-24
+- Fixed URL-encoding of special characters (`&`, `%`, `$`) in system tray WebSocket `/ws/status?token=...` queries (`tray.py`).
+
+## [0.11.1] - 2026-11-24
+- Surfaced running cluster version (`vX.Y.Z`) in the topbar and target remote version (`Update → vX.Y.Z`) in the UI and update panel.
+
+## [0.11.0] - 2026-11-24
+- Added **Cluster Self-Update & Rollback** (`POST /api/system/update-cluster`, `rollback-cluster`), **Apple Silicon `mlx-lm`** managed engine (`mlx_server.py`), **Strata Phase 1** external detection & Gaming-Mode allowlist, **Agent Chat Workspace File Tree & Git Review Explorer**, and strict SemVer 2.0.0 preflight enforcement.
+
 ## [0.10.3] - 2026-11-24
 
 ### MCP Discovery

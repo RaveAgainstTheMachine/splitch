@@ -10,15 +10,18 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import json
 import logging
 import os
 import platform
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -26,7 +29,7 @@ from typing import Literal
 import httpx
 import psutil
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from backend.agent.sync import (
     merge_client_config as _merge_client_config,
@@ -88,11 +91,17 @@ from backend.shared.models import (
     NodeMediaEngineStatus,
     NodeModelInventory,
     NodeRole,
+    NodeStrataStatus,
     NodeTelemetry,
     PullModelRequest,
     SdCliVideoRequest,
     SkillSyncPayload,
     StartMediaEngineRequest,
+    StrataCalibrateRequest,
+    StrataImportPlanRequest,
+    StrataInstallRequest,
+    StrataJobState,
+    StrataLaunchRequest,
     ToolExecRequest,
     ToolExecResponse,
     UiThemeConfig,
@@ -107,6 +116,18 @@ from backend.shared.secrets import (
     verify_tool_approval_ed25519,
 )
 from backend.shared.security import is_loopback_host, verify_tool_approval
+from backend.shared.strata_manager import (
+    build_strata_calibrate_cmd,
+    build_strata_launch_cmd,
+    import_strata_gguf_plan,
+    install_or_update_strata,
+    list_installed_strata_models,
+    list_strata_presets,
+    read_strata_engine_meta,
+    resolve_strata_bin,
+    stop_strata_server,
+    strata_env,
+)
 from backend.shared.updater import (
     UpdateResult,
     _restart_active_services,
@@ -131,6 +152,8 @@ NODE_ROLE: NodeRole = (
     else ("unified" if sys.platform == "darwin" else "gpu")
 )
 ENGINE_URL = os.getenv("SPLITCH_ENGINE_URL", "http://127.0.0.1:8081").rstrip("/")
+STRATA_PORT = int(os.getenv("SPLITCH_STRATA_PORT", "8085"))
+STRATA_URL = os.getenv("SPLITCH_STRATA_URL", f"http://127.0.0.1:{STRATA_PORT}").rstrip("/")
 MEDIA_URL = os.getenv("SPLITCH_MEDIA_URL", "").strip().rstrip("/")
 STORAGE_PATH = os.getenv("SPLITCH_STORAGE_PATH", str(default_data_root() / "models"))
 WORKSPACE_ROOT = os.getenv("SPLITCH_WORKSPACE_ROOT", str(Path.home()))
@@ -305,6 +328,34 @@ async def _collect_engine_models(
     return False, "unknown", [], None
 
 
+async def _probe_strata_sidecar(
+    client: httpx.AsyncClient,
+) -> tuple[bool, str, list[LoadedModel]]:
+    """Probe the managed Strata sidecar (`127.0.0.1:8085`) without blocking hot paths."""
+    if STRATA_URL == ENGINE_URL:
+        return False, "", []
+    try:
+        r = await client.get(f"{STRATA_URL}/v1/models", timeout=1.0)
+        if r.status_code == 200:
+            body = r.json()
+            if isinstance(body, dict) and isinstance(body.get("data"), list):
+                models = _normalize_models(body)
+                active = next((m.id for m in models if m.status == "loaded"), models[0].id if models else "")
+                return True, active, models
+    except (httpx.HTTPError, ValueError):
+        pass
+    try:
+        hr = await client.get(f"{STRATA_URL}/health", timeout=0.8)
+        if hr.status_code == 200:
+            hb = hr.json()
+            active = str(hb.get("model") or hb.get("active_model") or "") if isinstance(hb, dict) else ""
+            models = [LoadedModel(id=active, status="loaded")] if active else []
+            return True, active, models
+    except (httpx.HTTPError, ValueError):
+        pass
+    return False, "", []
+
+
 async def _probe_single_media_url(
     client: httpx.AsyncClient, base: str
 ) -> tuple[bool, MediaEngineKind, list[str]]:
@@ -446,6 +497,9 @@ class AgentState:
         self.sd_last_error: str | None = None
         self.sd_install_busy: bool = False
         self.sd_install_step: str = ""
+        self.strata_proc: asyncio.subprocess.Process | None = None
+        self.strata_log_tail: deque[str] = deque(maxlen=80)
+        self.strata_job: StrataJobState = StrataJobState()
         self.snapshot: NodeTelemetry = NodeTelemetry(
             node_id=NODE_ID,
             role=NODE_ROLE,
@@ -483,6 +537,10 @@ class AgentState:
             self.client
         )
         media_healthy, media_engine, media_url, media_models = await _collect_media_engine(
+            self.client
+        )
+        strata_installed = await asyncio.to_thread(lambda: resolve_strata_bin() is not None)
+        strata_healthy, strata_active_model, strata_models = await _probe_strata_sidecar(
             self.client
         )
 
@@ -533,6 +591,10 @@ class AgentState:
             workspace_root=WORKSPACE_ROOT if ENABLE_TOOLS else "",
             cmd_sandbox=effective_sandbox,
             models=models,
+            strata_installed=strata_installed,
+            strata_healthy=strata_healthy,
+            strata_active_model=strata_active_model,
+            strata_models=strata_models,
         )
 
     async def _loop(self) -> None:
@@ -1411,6 +1473,352 @@ async def proxy_local_media_engine(path: str, request: Request) -> Response:
         status_code=resp.status_code,
         media_type=resp.headers.get("content-type"),
     )
+
+
+# ── Managed Strata Sparse-MoE Lifecycle, Quick Tune & Signed Streaming Proxy ─
+
+_STRATA_PROXY_ALLOWLIST = frozenset(
+    {
+        "v1/chat/completions",
+        "v1/completions",
+        "v1/messages",
+        "v1/responses",
+        "v1/models",
+        "health",
+    }
+)
+
+
+async def _evict_primary_engine_models() -> None:
+    """Unload any resident models on primary `ENGINE_URL` before Strata claims GPU VRAM."""
+    if not state.client or not state.snapshot.engine_healthy:
+        return
+    loaded = [m.id for m in state.snapshot.models if m.status == "loaded"]
+    for mid in loaded:
+        with contextlib.suppress(httpx.HTTPError):
+            if state.snapshot.engine == "ollama":
+                await state.client.post(
+                    f"{ENGINE_URL}/api/generate",
+                    json={"model": mid, "prompt": "", "keep_alive": 0},
+                    timeout=10.0,
+                )
+            else:
+                await state.client.post(
+                    f"{ENGINE_URL}/models/unload",
+                    json={"model": mid},
+                    timeout=10.0,
+                )
+
+
+def _build_strata_status() -> NodeStrataStatus:
+    strata_bin = resolve_strata_bin()
+    meta = read_strata_engine_meta()
+    storage_root = Path(STORAGE_PATH)
+    installed_models = list_installed_strata_models(storage_root) if strata_bin else []
+    active = state.snapshot.strata_active_model
+    for im in installed_models:
+        if active and im.id == active:
+            im.is_active = True
+    presets = list_strata_presets(storage_root) if strata_bin else []
+    job = state.strata_job.model_copy()
+    job.log_tail = list(state.strata_log_tail)
+    return NodeStrataStatus(
+        node_id=NODE_ID,
+        installed=strata_bin is not None,
+        version=str(meta.get("version") or ""),
+        binary_path=str(strata_bin) if strata_bin else "",
+        running=bool(
+            state.snapshot.strata_healthy
+            or (state.strata_proc is not None and state.strata_proc.returncode is None)
+        ),
+        healthy=state.snapshot.strata_healthy,
+        port=STRATA_PORT,
+        active_model=active,
+        models=list(state.snapshot.strata_models),
+        installed_models=installed_models,
+        presets=presets,
+        job=job,
+        error=job.error,
+    )
+
+
+async def _run_strata_cli_job(
+    *,
+    action: Literal["launch", "calibrate"],
+    cmd: list[str],
+    step_label: str,
+    timeout_s: float,
+) -> None:
+    storage_root = Path(STORAGE_PATH)
+    state.strata_log_tail.clear()
+    state.strata_job = StrataJobState(
+        job_id=uuid.uuid4().hex[:10],
+        action=action,
+        status="running",
+        step=step_label,
+        started_at=time.time(),
+    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            env=strata_env(storage_root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        state.strata_proc = proc
+
+        async def _drain() -> None:
+            assert proc.stdout is not None
+            while True:
+                line_b = await proc.stdout.readline()
+                if not line_b:
+                    break
+                line = line_b.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    state.strata_log_tail.append(line)
+
+        await asyncio.wait_for(_drain(), timeout=timeout_s)
+        rc = await proc.wait()
+        if rc == 0:
+            await state.poll_once()
+            state.strata_job.status = "completed"
+            state.strata_job.step = (
+                "Quick Tune complete" if action == "calibrate" else "Strata serving"
+            )
+        else:
+            state.strata_job.status = "failed"
+            tail = state.strata_log_tail[-1] if state.strata_log_tail else f"exit code {rc}"
+            state.strata_job.error = tail
+            state.strata_job.step = f"{action} failed"
+    except TimeoutError:
+        if state.strata_proc and state.strata_proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                state.strata_proc.terminate()
+        state.strata_job.status = "failed"
+        state.strata_job.error = f"Timed out after {int(timeout_s)}s"
+        state.strata_job.step = f"{action} timed out"
+    except (OSError, ValueError) as exc:
+        state.strata_job.status = "failed"
+        state.strata_job.error = str(exc)
+        state.strata_job.step = f"{action} error"
+    finally:
+        state.strata_job.finished_at = time.time()
+        state.strata_job.log_tail = list(state.strata_log_tail)
+
+
+@app.get("/strata/status", response_model=NodeStrataStatus)
+async def get_strata_status() -> NodeStrataStatus:
+    return await asyncio.to_thread(_build_strata_status)
+
+
+@app.post("/strata/install", response_model=NodeStrataStatus)
+async def install_strata_endpoint(req: StrataInstallRequest | None = None) -> NodeStrataStatus:
+    if state.strata_job.status == "running":
+        return await asyncio.to_thread(_build_strata_status)
+    body = req or StrataInstallRequest()
+    state.strata_log_tail.clear()
+    state.strata_job = StrataJobState(
+        job_id=uuid.uuid4().hex[:10],
+        action="install",
+        status="running",
+        step="Downloading SHA-256-verified Strata CLI...",
+        started_at=time.time(),
+    )
+
+    async def _worker() -> None:
+        try:
+            res = await asyncio.to_thread(
+                install_or_update_strata,
+                version=body.version,
+                force=body.force,
+            )
+            state.strata_log_tail.extend(res.steps)
+            if res.ok:
+                state.strata_job.status = "completed"
+                state.strata_job.step = f"Strata v{res.current_tag} ready"
+            else:
+                state.strata_job.status = "failed"
+                state.strata_job.error = res.error or "Install failed"
+                state.strata_job.step = "Install failed"
+        except (OSError, RuntimeError, ValueError) as exc:
+            state.strata_job.status = "failed"
+            state.strata_job.error = str(exc)
+            state.strata_job.step = "Install failed"
+        finally:
+            state.strata_job.finished_at = time.time()
+            state.strata_job.log_tail = list(state.strata_log_tail)
+            await state.poll_once()
+
+    asyncio.create_task(_worker())
+    return await asyncio.to_thread(_build_strata_status)
+
+
+@app.post("/strata/plan")
+async def plan_strata_endpoint(req: StrataLaunchRequest) -> dict:
+    strata_bin = resolve_strata_bin()
+    if strata_bin is None:
+        raise HTTPException(status_code=400, detail="Strata is not installed on this node")
+    plan_req = req.model_copy(update={"plan_only": True})
+    try:
+        cmd = build_strata_launch_cmd(
+            strata_bin, plan_req, storage_root=Path(STORAGE_PATH), port=STRATA_PORT
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def _run_plan() -> dict:
+        proc = subprocess.run(
+            cmd,
+            env=strata_env(STORAGE_PATH),
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(proc.stderr or proc.stdout or "strata launch --plan failed").strip()[:400],
+            )
+        try:
+            return json.loads(proc.stdout or "{}")
+        except ValueError:
+            return {"raw": proc.stdout.strip()}
+
+    return await asyncio.to_thread(_run_plan)
+
+
+@app.post("/strata/launch", response_model=NodeStrataStatus)
+async def launch_strata_endpoint(req: StrataLaunchRequest) -> NodeStrataStatus:
+    if state.strata_job.status == "running":
+        raise HTTPException(status_code=409, detail="Another Strata job is currently running")
+    strata_bin = resolve_strata_bin()
+    if strata_bin is None:
+        raise HTTPException(status_code=400, detail="Strata is not installed on this node")
+    launch_req = req.model_copy(update={"plan_only": False})
+    try:
+        cmd = build_strata_launch_cmd(
+            strata_bin, launch_req, storage_root=Path(STORAGE_PATH), port=STRATA_PORT
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if req.evict_primary_vram:
+        await _evict_primary_engine_models()
+
+    label = req.preset or (
+        f"{req.family}/{req.model}" if req.family or req.model else Path(req.model_path).name
+    )
+    asyncio.create_task(
+        _run_strata_cli_job(
+            action="launch",
+            cmd=cmd,
+            step_label=f"Launching Strata ({label})...",
+            timeout_s=1800.0,
+        )
+    )
+    return await asyncio.to_thread(_build_strata_status)
+
+
+@app.post("/strata/calibrate", response_model=NodeStrataStatus)
+async def calibrate_strata_endpoint(req: StrataCalibrateRequest) -> NodeStrataStatus:
+    if state.strata_job.status == "running":
+        raise HTTPException(status_code=409, detail="Another Strata job is currently running")
+    strata_bin = resolve_strata_bin()
+    if strata_bin is None:
+        raise HTTPException(status_code=400, detail="Strata is not installed on this node")
+    try:
+        cmd = build_strata_calibrate_cmd(
+            strata_bin, req, storage_root=Path(STORAGE_PATH), port=STRATA_PORT
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if req.evict_primary_vram:
+        await _evict_primary_engine_models()
+    await asyncio.to_thread(stop_strata_server, Path(STORAGE_PATH))
+
+    label = req.preset or f"{req.family}/{req.model}"
+    timeout_s = 7800.0 if req.mode == "thorough" else 1800.0
+    asyncio.create_task(
+        _run_strata_cli_job(
+            action="calibrate",
+            cmd=cmd,
+            step_label=f"Running {req.mode} tune on {label} (exclusive GPU)...",
+            timeout_s=timeout_s,
+        )
+    )
+    return await asyncio.to_thread(_build_strata_status)
+
+
+@app.post("/strata/stop", response_model=NodeStrataStatus)
+async def stop_strata_endpoint() -> NodeStrataStatus:
+    if state.strata_proc is not None and state.strata_proc.returncode is None:
+        state.strata_proc.terminate()
+        with contextlib.suppress(TimeoutError, ProcessLookupError):
+            await asyncio.wait_for(state.strata_proc.wait(), timeout=4.0)
+    await asyncio.to_thread(stop_strata_server, Path(STORAGE_PATH))
+    if state.strata_job.status == "running":
+        state.strata_job.status = "failed"
+        state.strata_job.error = "Stopped by user"
+        state.strata_job.step = "Stopped"
+        state.strata_job.finished_at = time.time()
+    await state.poll_once()
+    return await asyncio.to_thread(_build_strata_status)
+
+
+@app.post("/strata/import-plan")
+async def import_strata_plan_endpoint(req: StrataImportPlanRequest) -> dict:
+    try:
+        return await asyncio.to_thread(import_strata_gguf_plan, req.model_path, Path(STORAGE_PATH))
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.api_route("/strata/proxy/{path:path}", methods=["GET", "POST"])
+async def proxy_local_strata_engine(path: str, request: Request) -> Response:
+    """Zero-copy streaming SSE proxy from router to local loopback `strata-server`."""
+    clean_path = path.lstrip("/")
+    if clean_path not in _STRATA_PROXY_ALLOWLIST:
+        raise HTTPException(status_code=403, detail=f"Strata proxy path not allowlisted: {clean_path}")
+
+    target = f"{STRATA_URL}/{clean_path}"
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+
+    fwd_headers: dict[str, str] = {}
+    for hname in ("content-type", "accept", "anthropic-version", "anthropic-beta"):
+        val = request.headers.get(hname)
+        if val:
+            fwd_headers[hname] = val
+
+    body = await request.body()
+    client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
+    try:
+        req_obj = client.build_request(
+            request.method,
+            target,
+            content=body if body else None,
+            headers=fwd_headers,
+        )
+        upstream = await client.send(req_obj, stream=True)
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"Local Strata server unreachable: {exc}") from exc
+
+    async def _stream():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                if chunk:
+                    yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    ct = upstream.headers.get("content-type") or "application/json"
+    return StreamingResponse(_stream(), status_code=upstream.status_code, media_type=ct)
 
 
 @app.delete("/files/models/{filename}")
