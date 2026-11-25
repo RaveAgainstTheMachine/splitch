@@ -212,6 +212,16 @@ def _validate_http_url(raw: str, field_name: str, *, allow_empty: bool = False) 
             status_code=400, detail=f"{field_name} must not contain embedded credentials"
         )
     host = parsed.hostname.lower()
+    if (
+        field_name == "agent_url"
+        and host not in ("localhost", "127.0.0.1", "::1")
+        and parsed.scheme != "https"
+        and os.getenv("SPLITCH_ALLOW_INSECURE_HTTP", "").strip() != "1"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must use https:// for non-loopback hosts",
+        )
     if host in ("metadata.google.internal", "instance-data", "169.254.169.254"):
         raise HTTPException(
             status_code=400,

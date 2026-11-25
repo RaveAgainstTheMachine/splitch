@@ -67,8 +67,9 @@ class RouterSettings(BaseModel):
 
 
 class TlsSettings(BaseModel):
-    enabled: bool = False
-    self_signed: bool = False
+    enabled: bool = True
+    self_signed: bool = True
+    behind_proxy: bool = False
     certfile: str = ""
     keyfile: str = ""
     letsencrypt_domain: str = ""

@@ -30,10 +30,11 @@ yield_cooldown_s = 60.0
 # Automatically unload loaded GPU LLM models from VRAM when yielding
 auto_evict_on_yield = true
 
-# Optional Native HTTPS / TLS (use direct TLS OR terminate TLS at an external reverse proxy)
+# Native HTTPS / TLS (enabled by default with auto-generated SAN self-signed ECDSA certs)
 [tls]
-enabled = false
-self_signed = false                  # Set true (or run `splitch tls init`) for LAN HTTPS without Let's Encrypt
+enabled = true
+self_signed = true                   # Auto-generates SAN ECDSA cert (`splitch tls init`) when no certfile is set
+behind_proxy = false                 # Set true only when terminating TLS at an external reverse proxy (Nginx/Caddy)
 certfile = ""                        # Custom PEM certificate / fullchain path
 keyfile = ""                         # Custom PEM private key path (chmod 600)
 letsencrypt_domain = ""              # Auto-loads /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem
@@ -54,7 +55,7 @@ display_name = "GPU Workstation"
 role = "gpu"
 yield_on_gaming = true
 # yield_gpu_indices = [0]            # Optional: only monitor specific GPU indices for Gaming Yield (e.g. [0] if GPU 1 is headless compute)
-agent_url = "http://192.168.1.50:8090"
+agent_url = "https://192.168.1.50:8090"
 engine_url = "http://192.168.1.50:8081" # Or point to external Strata (:8081); managed Strata sidecar (:8085) is auto-proxied via agent_url
 media_url = ""                       # Optional override (auto-detects sd-server :8082 / ComfyUI :8188)
 storage_path = "/path/to/models"

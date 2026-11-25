@@ -685,10 +685,10 @@ esac
 echo ""
 if [ "$SPLITCH_AGENT_ONLY" = "1" ]; then
   printf '  Next step (join an existing Splitch router):\n'
-  printf '    splitch agent --yield-on-gaming --join http://<ROUTER_IP>:8080\n'
+  printf '    splitch agent --yield-on-gaming --join https://<ROUTER_IP>:8080\n'
 else
   printf '  Next steps:\n'
   printf '    splitch doctor --check-updates   # inspect hardware, engines, and updates\n'
-  printf '    splitch up                       # launch local agent + router + UI on http://localhost:8080\n'
+  printf '    splitch up                       # launch local agent + router + UI on https://localhost:8080\n'
   printf '    splitch update --with-engine     # update Splitch + inference engine anytime\n'
 fi

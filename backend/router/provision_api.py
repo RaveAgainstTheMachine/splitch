@@ -166,11 +166,17 @@ def resolve_router_public_url(cluster: ClusterState, request: Request, override:
     ).rstrip("/")
     parsed = urlparse(candidate)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise HTTPException(status_code=400, detail="router_url must be a valid http:// or https:// URL")
+        raise HTTPException(status_code=400, detail="router_url must be a valid https:// URL")
+    if parsed.hostname not in ("localhost", "127.0.0.1", "0.0.0.0", "::1") and parsed.scheme != "https":
+        raise HTTPException(
+            status_code=400,
+            detail="router_url must use https:// for non-loopback hosts",
+        )
     if parsed.hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
         lan = _guess_lan_ip()
         port_part = f":{parsed.port}" if parsed.port else ""
-        return f"{parsed.scheme}://{lan}{port_part}"
+        scheme = "https" if (cluster.config.tls.enabled or cluster.config.tls.self_signed) else parsed.scheme
+        return f"{scheme}://{lan}{port_part}"
     return candidate
 
 

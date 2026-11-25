@@ -151,13 +151,17 @@ def _uvicorn_tls_and_proxy_kwargs(args: argparse.Namespace) -> dict:
     certfile = getattr(args, "ssl_certfile", None) or (cfg.tls.certfile or None)
     keyfile = getattr(args, "ssl_keyfile", None) or (cfg.tls.keyfile or None)
     le_domain = getattr(args, "letsencrypt_domain", None) or (cfg.tls.letsencrypt_domain or None)
-    self_signed = bool(getattr(args, "tls_self_signed", False) or cfg.tls.self_signed)
+    behind_proxy = bool(getattr(args, "behind_proxy", False) or cfg.tls.behind_proxy)
+    self_signed = bool(
+        getattr(args, "tls_self_signed", False) or cfg.tls.self_signed or not behind_proxy
+    )
 
     ssl_cert, ssl_key = resolve_tls_files(
         certfile=certfile,
         keyfile=keyfile,
         letsencrypt_domain=le_domain,
         self_signed=self_signed,
+        behind_proxy=behind_proxy,
     )
     proxy_headers = not bool(getattr(args, "no_proxy_headers", False))
     fwd_ips = (
@@ -240,11 +244,6 @@ def _enforce_auth_on_exposed_bind(
 def _cmd_router(args: argparse.Namespace) -> int:
     if args.config:
         os.environ["SPLITCH_CONFIG"] = str(args.config)
-    try:
-        extra = _uvicorn_tls_and_proxy_kwargs(args)
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"[splitch] TLS configuration error: {exc}", file=sys.stderr)
-        return 1
     if not _enforce_auth_on_exposed_bind(
         "splitch router",
         args.host,
@@ -252,6 +251,11 @@ def _cmd_router(args: argparse.Namespace) -> int:
         allow_unauthenticated=bool(getattr(args, "allow_unauthenticated", False)),
     ):
         return 2
+    try:
+        extra = _uvicorn_tls_and_proxy_kwargs(args)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[splitch] TLS configuration error: {exc}", file=sys.stderr)
+        return 1
     scheme = "https" if "ssl_certfile" in extra else "http"
     print(f"[splitch] Router listening on {scheme}://{args.host}:{args.port}")
     uvicorn.run("backend.router.app:app", host=args.host, port=args.port, **extra)
@@ -281,18 +285,6 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     if args.enable_tools:
         os.environ["SPLITCH_ENABLE_TOOLS"] = "1"
 
-    try:
-        ssl_cert, ssl_key = resolve_tls_files(
-            certfile=getattr(args, "ssl_certfile", None),
-            keyfile=getattr(args, "ssl_keyfile", None),
-            letsencrypt_domain=getattr(args, "letsencrypt_domain", None),
-            self_signed=bool(getattr(args, "tls_self_signed", False)),
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"[splitch] TLS configuration error: {exc}", file=sys.stderr)
-        return 1
-    agent_scheme = "https" if (ssl_cert and ssl_key) else "http"
-
     if not getattr(args, "join_only", False) and not _enforce_auth_on_exposed_bind(
         "splitch agent",
         args.host,
@@ -300,6 +292,20 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         allow_unauthenticated=bool(getattr(args, "allow_unauthenticated", False)),
     ):
         return 2
+
+    behind_proxy = bool(getattr(args, "behind_proxy", False))
+    try:
+        ssl_cert, ssl_key = resolve_tls_files(
+            certfile=getattr(args, "ssl_certfile", None),
+            keyfile=getattr(args, "ssl_keyfile", None),
+            letsencrypt_domain=getattr(args, "letsencrypt_domain", None),
+            self_signed=bool(getattr(args, "tls_self_signed", False) or not behind_proxy),
+            behind_proxy=behind_proxy,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[splitch] TLS configuration error: {exc}", file=sys.stderr)
+        return 1
+    agent_scheme = "https" if (ssl_cert and ssl_key) else "http"
 
     if args.join:
         lan_ip = args.advertise_host or _guess_lan_ip()
@@ -368,11 +374,6 @@ def _cmd_up(args: argparse.Namespace) -> int:
     if args.config:
         env["SPLITCH_CONFIG"] = str(args.config)
 
-    try:
-        extra = _uvicorn_tls_and_proxy_kwargs(args)
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"[splitch] TLS configuration error: {exc}", file=sys.stderr)
-        return 1
     if not _enforce_auth_on_exposed_bind(
         "splitch up",
         args.host,
@@ -380,6 +381,11 @@ def _cmd_up(args: argparse.Namespace) -> int:
         allow_unauthenticated=bool(getattr(args, "allow_unauthenticated", False)),
     ):
         return 2
+    try:
+        extra = _uvicorn_tls_and_proxy_kwargs(args)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[splitch] TLS configuration error: {exc}", file=sys.stderr)
+        return 1
     scheme = "https" if "ssl_certfile" in extra else "http"
 
     # Auto-mint an ephemeral Ed25519 keypair for local router <-> agent auth & signed tool approvals
@@ -404,20 +410,25 @@ def _cmd_up(args: argparse.Namespace) -> int:
         _, pub_compact = generate_ed25519_keypair(data_dir / "router_ed25519.pem")
         agent_env["SPLITCH_ROUTER_PUBLIC_KEY"] = pub_compact
 
+    agent_cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "backend.agent.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(args.agent_port),
+        "--log-level",
+        "warning",
+    ]
+    if "ssl_certfile" in extra and "ssl_keyfile" in extra:
+        agent_cmd.extend(
+            ["--ssl-certfile", extra["ssl_certfile"], "--ssl-keyfile", extra["ssl_keyfile"]]
+        )
     print(f"[splitch] Starting local agent (:{args.agent_port}) -> engine {engine_url}")
     agent_proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "backend.agent.main:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(args.agent_port),
-            "--log-level",
-            "warning",
-        ],
+        agent_cmd,
         env=agent_env,
     )
     time.sleep(0.8)
@@ -901,7 +912,12 @@ def main() -> None:
         p.add_argument(
             "--tls-self-signed",
             action="store_true",
-            help="Auto-generate and serve an ECDSA P-256 self-signed HTTPS certificate",
+            help="Auto-generate and serve an ECDSA P-256 self-signed HTTPS certificate (default)",
+        )
+        p.add_argument(
+            "--behind-proxy",
+            action="store_true",
+            help="Bind plain HTTP locally for an external TLS-terminating reverse proxy (Nginx/Caddy/Traefik)",
         )
         p.add_argument(
             "--letsencrypt-domain",

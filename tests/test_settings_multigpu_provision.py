@@ -339,7 +339,7 @@ def test_join_token_lifecycle_and_self_hosted_installers(tmp_path: Path) -> None
     # Mint single-use join token
     r_tok = client.post(
         "/api/provision/join-token",
-        json={"node_id": "win-rig", "role": "gpu", "backend": "vulkan", "router_url": "http://192.168.1.10:8080"},
+        json={"node_id": "win-rig", "role": "gpu", "backend": "vulkan", "router_url": "https://192.168.1.10:8080"},
     )
     assert r_tok.status_code == 200
     data = r_tok.json()
@@ -395,7 +395,7 @@ def test_router_app_join_token_allows_node_registration_under_api_key(monkeypatc
         "role": "gpu",
         "yield_on_gaming": True,
         "yield_gpu_indices": [1],
-        "agent_url": "http://192.168.1.99:8090",
+        "agent_url": "https://192.168.1.99:8090",
         "engine_url": "http://192.168.1.99:8081",
     }
     r_unauth = client.post("/api/nodes", json=payload)
@@ -405,7 +405,7 @@ def test_router_app_join_token_allows_node_registration_under_api_key(monkeypatc
     r_mint = client.post(
         "/api/provision/join-token",
         headers={"Authorization": "Bearer master-secret-key"},
-        json={"node_id": "tok-test-node", "router_url": "http://192.168.1.10:8080"},
+        json={"node_id": "tok-test-node", "router_url": "https://192.168.1.10:8080"},
     )
     assert r_mint.status_code == 200
     jtok = r_mint.json()["token"]

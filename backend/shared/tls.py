@@ -325,7 +325,8 @@ def resolve_tls_files(
     certfile: str | None = None,
     keyfile: str | None = None,
     letsencrypt_domain: str | None = None,
-    self_signed: bool = False,
+    self_signed: bool = True,
+    behind_proxy: bool = False,
 ) -> tuple[str | None, str | None]:
     """Resolve effective `(ssl_certfile, ssl_keyfile)` from CLI flags, env vars, or defaults."""
     eff_cert = (certfile or os.getenv("SPLITCH_TLS_CERT", "")).strip()
@@ -350,6 +351,10 @@ def resolve_tls_files(
                 f"Run `splitch tls letsencrypt {le_dom} --email you@example.com` first."
             )
         return str(found[0]), str(found[1])
+
+    env_proxy = os.getenv("SPLITCH_BEHIND_PROXY", "").strip().lower() in ("1", "true", "yes")
+    if behind_proxy or env_proxy:
+        return None, None
 
     env_self = os.getenv("SPLITCH_TLS_SELF_SIGNED", "").strip().lower() in ("1", "true", "yes")
     if self_signed or env_self:

@@ -408,12 +408,32 @@ async def execute_web_fetch(url: str) -> tuple[bool, str]:
     if not ok_host:
         return False, reason
 
+    candidates: list[str] = []
+    if clean_url.lower().startswith("http://"):
+        https_url = "https://" + clean_url[7:]
+        ok_https, _ = await asyncio.to_thread(_is_public_url, https_url)
+        if ok_https:
+            candidates.append(https_url)
+    candidates.append(clean_url)
+
     try:
         async with httpx.AsyncClient(
             timeout=12.0, follow_redirects=True, headers={"User-Agent": USER_AGENT}
         ) as client:
-            r = await client.get(clean_url)
-            r.raise_for_status()
+            r: httpx.Response | None = None
+            last_exc: httpx.HTTPError | None = None
+            for target_url in candidates:
+                try:
+                    resp = await client.get(target_url)
+                    resp.raise_for_status()
+                    r = resp
+                    break
+                except httpx.HTTPError as exc:
+                    last_exc = exc
+                    continue
+            if r is None:
+                assert last_exc is not None
+                raise last_exc
             final_ok, final_reason = await asyncio.to_thread(_is_public_url, str(r.url))
             if not final_ok:
                 return False, f"Redirect blocked: {final_reason}"

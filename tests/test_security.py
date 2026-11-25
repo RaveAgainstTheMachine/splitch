@@ -981,3 +981,207 @@ def test_ui_update_cluster_security_gate(monkeypatch: pytest.MonkeyPatch) -> Non
     # 4) Authenticated router allows non-loopback (auth middleware enforces Bearer/cookie)
     monkeypatch.setattr(router_mod, "API_KEY", "test-secret-key")
     router_mod._assert_ui_update_allowed(_DummyReq("198.51.100.42"))  # type: ignore[arg-type]
+
+
+def test_tls_defaults_and_behind_proxy_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.router.config import TlsSettings
+
+    tls_cfg = TlsSettings()
+    assert tls_cfg.enabled is True
+    assert tls_cfg.self_signed is True
+    assert tls_cfg.behind_proxy is False
+
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path))
+    for var in (
+        "SPLITCH_TLS_CERT",
+        "SPLITCH_TLS_KEY",
+        "SPLITCH_LETSENCRYPT_DOMAIN",
+        "SPLITCH_BEHIND_PROXY",
+        "SPLITCH_TLS_SELF_SIGNED",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    # Default resolves/auto-generates self-signed ECDSA SAN cert
+    cert, key = resolve_tls_files()
+    assert cert is not None and key is not None
+    assert Path(cert).is_file() and Path(key).is_file()
+    info = inspect_certificate(Path(cert))
+    assert info["exists"] is True
+
+    # behind_proxy=True disables local TLS termination
+    assert resolve_tls_files(behind_proxy=True) == (None, None)
+
+    # SPLITCH_BEHIND_PROXY=1 disables local TLS termination
+    monkeypatch.setenv("SPLITCH_BEHIND_PROXY", "1")
+    assert resolve_tls_files() == (None, None)
+
+
+def test_non_loopback_https_enforcement_across_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(router_mod, "API_KEY", "https-enforce-key")
+    monkeypatch.delenv("SPLITCH_ALLOW_INSECURE_HTTP", raising=False)
+    headers = {"Authorization": "Bearer https-enforce-key"}
+    tc = TestClient(router_mod.app)
+
+    old_nodes = dict(router_mod.cluster.nodes)
+    old_public_url = router_mod.cluster.config.router.public_url
+    try:
+        # 1) POST /api/nodes rejects non-loopback http:// agent_url
+        r_bad_post = tc.post(
+            "/api/nodes",
+            headers=headers,
+            json={
+                "id": "remote-http-node",
+                "display_name": "Remote HTTP",
+                "role": "gpu",
+                "agent_url": "http://198.51.100.10:8090",
+                "engine_url": "http://198.51.100.10:8081",
+            },
+        )
+        assert r_bad_post.status_code == 400
+        assert "must use https:// for non-loopback hosts" in r_bad_post.json()["detail"]
+
+        # POST /api/nodes allows https:// agent_url with http:// engine_url
+        r_ok_https = tc.post(
+            "/api/nodes",
+            headers=headers,
+            json={
+                "id": "remote-https-node",
+                "display_name": "Remote HTTPS",
+                "role": "gpu",
+                "agent_url": "https://198.51.100.10:8090",
+                "engine_url": "http://198.51.100.10:8081",
+            },
+        )
+        assert r_ok_https.status_code == 200
+
+        # POST /api/nodes allows loopback http://127.0.0.1 agent_url
+        r_ok_loop = tc.post(
+            "/api/nodes",
+            headers=headers,
+            json={
+                "id": "local-http-node",
+                "display_name": "Local HTTP",
+                "role": "cpu",
+                "agent_url": "http://127.0.0.1:8090",
+                "engine_url": "http://127.0.0.1:8081",
+            },
+        )
+        assert r_ok_loop.status_code == 200
+
+        # 2) PATCH /api/nodes/{id} rejects non-loopback http:// agent_url and allows https://
+        r_bad_patch = tc.patch(
+            "/api/nodes/remote-https-node",
+            headers=headers,
+            json={"agent_url": "http://198.51.100.11:8090"},
+        )
+        assert r_bad_patch.status_code == 400
+        assert "must use https:// for non-loopback hosts" in r_bad_patch.json()["detail"]
+
+        r_ok_patch = tc.patch(
+            "/api/nodes/remote-https-node",
+            headers=headers,
+            json={"agent_url": "https://198.51.100.11:8090"},
+        )
+        assert r_ok_patch.status_code == 200
+        assert r_ok_patch.json()["agent_url"] == "https://198.51.100.11:8090"
+
+        # 3) POST /api/provision/join-token rejects non-loopback http:// router_url
+        r_bad_join = tc.post(
+            "/api/provision/join-token",
+            headers=headers,
+            json={"node_id": "join-node", "router_url": "http://198.51.100.20:8000"},
+        )
+        assert r_bad_join.status_code == 400
+        assert "must use https:// for non-loopback hosts" in r_bad_join.json()["detail"]
+
+        r_ok_join = tc.post(
+            "/api/provision/join-token",
+            headers=headers,
+            json={"node_id": "join-node", "router_url": "https://198.51.100.20:8000"},
+        )
+        assert r_ok_join.status_code == 200
+        assert r_ok_join.json()["router_url"] == "https://198.51.100.20:8000"
+
+        # 4) PATCH /api/settings rejects non-loopback http:// public_url and allows https:// & loopback
+        r_bad_settings = tc.patch(
+            "/api/settings",
+            headers=headers,
+            json={"public_url": "http://198.51.100.30:8000"},
+        )
+        assert r_bad_settings.status_code == 400
+        assert "must use https:// for non-loopback hosts" in r_bad_settings.json()["detail"]
+
+        r_ok_settings = tc.patch(
+            "/api/settings",
+            headers=headers,
+            json={"public_url": "https://198.51.100.30:8000"},
+        )
+        assert r_ok_settings.status_code == 200
+        assert r_ok_settings.json()["public_url"] == "https://198.51.100.30:8000"
+
+        r_loop_settings = tc.patch(
+            "/api/settings",
+            headers=headers,
+            json={"public_url": "http://127.0.0.1:8000"},
+        )
+        assert r_loop_settings.status_code == 200
+        assert r_loop_settings.json()["public_url"] == "http://127.0.0.1:8000"
+    finally:
+        router_mod.cluster.nodes.clear()
+        router_mod.cluster.nodes.update(old_nodes)
+        router_mod.cluster.config.router.public_url = old_public_url
+
+
+def test_web_fetch_prefers_https_with_http_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    import httpx
+
+    from backend.router.web_search import execute_web_fetch
+
+    requested: list[str] = []
+    fail_https = False
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str) -> httpx.Response:
+            requested.append(url)
+            req = httpx.Request("GET", url)
+            if fail_https and url.startswith("https://"):
+                raise httpx.ConnectError("TLS handshake failed", request=req)
+            return httpx.Response(
+                200,
+                request=req,
+                headers={"content-type": "text/html"},
+                text="<html><body><p>Hello Splitch</p></body></html>",
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    # 1) When given http://, tries https:// first and succeeds without hitting http://
+    ok, body = asyncio.run(execute_web_fetch("http://93.184.216.34/docs"))
+    assert ok is True
+    assert "Fetched https://93.184.216.34/docs:" in body
+    assert "Hello Splitch" in body
+    assert requested == ["https://93.184.216.34/docs"]
+
+    # 2) When https:// fails with httpx.HTTPError, falls back to http://
+    requested.clear()
+    fail_https = True
+    ok_fb, body_fb = asyncio.run(execute_web_fetch("http://93.184.216.34/docs"))
+    assert ok_fb is True
+    assert "Fetched http://93.184.216.34/docs:" in body_fb
+    assert "Hello Splitch" in body_fb
+    assert requested == ["https://93.184.216.34/docs", "http://93.184.216.34/docs"]

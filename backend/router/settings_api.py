@@ -45,6 +45,15 @@ def _validate_optional_http_url(raw: str, field_name: str) -> str:
         raise HTTPException(
             status_code=400, detail=f"{field_name} must be a valid http:// or https:// URL"
         )
+    if (
+        field_name == "public_url"
+        and parsed.hostname.lower() not in ("localhost", "127.0.0.1", "::1")
+        and parsed.scheme != "https"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} must use https:// for non-loopback hosts",
+        )
     return cleaned
 
 

@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.20.0] - 2026-11-25
+
+### HTTPS-Only Enforcement & Web Fetch HTTPS Preference
+- **Native TLS by Default (`backend/router/config.py`, `backend/shared/tls.py`, `backend/cli.py`, `splitch.example.toml`):** Enabled `TlsSettings.enabled` and `TlsSettings.self_signed` by default so `splitch up`, `splitch router`, and `splitch agent` automatically serve HTTPS with SAN-equipped ECDSA certs unless `--behind-proxy` / `tls.behind_proxy = true` is set for an external reverse proxy.
+- **Non-Loopback HTTPS Enforcement (`backend/router/app.py`, `backend/router/provision_api.py`, `backend/router/settings_api.py`):** Rejects plain `http://` for non-loopback `agent_url`, `router_url`, and `public_url` (while preserving loopback `http://127.0.0.1` for local inference engines).
+- **Web Fetch HTTPS Preference (`backend/router/web_search.py`):** `execute_web_fetch` tries `https://` first for `http://` URLs and falls back to `http://` only if `https://` fails.
+
 ## [0.19.0] - 2026-11-25
 
 ### Live Agent Status Bar & Max-Steps Notice
