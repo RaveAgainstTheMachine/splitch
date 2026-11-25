@@ -42,25 +42,30 @@
 ## Screenshots
 
 <p align="center">
-  <a href="docs/assets/screenshots/chat-preview.webp">
-    <img src="docs/assets/screenshots/chat-preview.webp" alt="Splitch Agent Chat IDE with Swarm Inspector" width="100%" />
+  <a href="docs/assets/screenshots/chat-preview.png">
+    <img src="docs/assets/screenshots/chat-preview.png" alt="Splitch Agent Chat IDE with Swarm Inspector" width="100%" />
   </a>
   <br />
-  <strong>Agent Chat IDE &amp; Swarm Inspector</strong> — <sub>Sandboxed workspace tools, parallel multi-node agent swarms, scoped MCP/Skills &amp; live inspector · <em>cycles Midnight, OLED Black, Nordic Slate, Warm Graphite &amp; Light themes</em></sub>
+  <strong>Agent Chat IDE &amp; Swarm Inspector</strong> — <sub>Sandboxed workspace tools, parallel multi-node agent swarms, scoped MCP/Skills &amp; live inspector · <em>click for full resolution</em></sub>
 </p>
+
+<details>
+<summary><strong>Screenshots Gallery (10 Views · Live Theme &amp; Accent Cycling)</strong> — Overview, Media Studio, Models, Workspace &amp; Git, MCP, Skills &amp; Settings</summary>
+
+<br />
 
 <table>
   <tr>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/overview.webp">
-        <img src="docs/assets/screenshots/overview.webp" alt="Cluster Overview" width="100%" />
+        <img src="docs/assets/screenshots/overview.webp" alt="Cluster Overview" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>Cluster Overview</strong> — <sub>Multi-GPU &amp; Apple Silicon MLX telemetry, Gaming Auto-Yield &amp; live traces</sub>
     </td>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/media-studio.webp">
-        <img src="docs/assets/screenshots/media-studio.webp" alt="Media Studio" width="100%" />
+        <img src="docs/assets/screenshots/media-studio.webp" alt="Media Studio" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>Media Studio</strong> — <sub>Managed <code>sd-server</code> &amp; ComfyUI with auto-LLM VRAM eviction</sub>
@@ -69,54 +74,46 @@
   <tr>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/models.webp">
-        <img src="docs/assets/screenshots/models.webp" alt="Models & Aliases" width="100%" />
+        <img src="docs/assets/screenshots/models.webp" alt="Models & Aliases" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>Models &amp; Aliases</strong> — <sub>Hugging Face GGUF &amp; MLX pulls, hardware-fit checks &amp; aliases</sub>
     </td>
     <td width="50%" valign="top">
-      <a href="docs/assets/screenshots/settings.webp">
-        <img src="docs/assets/screenshots/settings.webp" alt="Settings & Client Setup" width="100%" />
-      </a>
-      <br />
-      <strong>Settings &amp; Client Setup</strong> — <sub>One-click configs for Hermes, Claude Code, Codex CLI, OpenCode &amp; live protocol probes</sub>
-    </td>
-  </tr>
-</table>
-
-<details>
-<summary><strong>More Screenshots Gallery (6 Views)</strong> — Workspace &amp; Git, MCP Servers, Skills Library, Agent &amp; Routing Settings, Appearance</summary>
-
-<br />
-
-<table>
-  <tr>
-    <td width="50%" valign="top">
       <a href="docs/assets/screenshots/workspace-git.webp">
-        <img src="docs/assets/screenshots/workspace-git.webp" alt="Workspace File Tree & Git Review" width="100%" />
+        <img src="docs/assets/screenshots/workspace-git.webp" alt="Workspace File Tree & Git Review" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>Workspace &amp; Git Review</strong> — <sub>IDE file tree, live diff staging &amp; AI commit generator</sub>
     </td>
+  </tr>
+  <tr>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/mcp-servers.webp">
-        <img src="docs/assets/screenshots/mcp-servers.webp" alt="MCP Servers" width="100%" />
+        <img src="docs/assets/screenshots/mcp-servers.webp" alt="MCP Servers" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>MCP Servers</strong> — <sub>Local-first MCP registry, encrypted env vault &amp; node sync</sub>
     </td>
-  </tr>
-  <tr>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/skills.webp">
-        <img src="docs/assets/screenshots/skills.webp" alt="Skills Library" width="100%" />
+        <img src="docs/assets/screenshots/skills.webp" alt="Skills Library" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>Skills Library</strong> — <sub><code>skills.sh</code> discovery, GitHub <code>SKILL.md</code> import &amp; per-chat toggles</sub>
     </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/settings.webp">
+        <img src="docs/assets/screenshots/settings.webp" alt="Settings & Client Setup" width="100%" loading="lazy" />
+      </a>
+      <br />
+      <strong>Settings &amp; Client Setup</strong> — <sub>One-click configs for Hermes, Claude Code, Codex CLI, OpenCode &amp; live protocol probes</sub>
+    </td>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/settings-agent.webp">
-        <img src="docs/assets/screenshots/settings-agent.webp" alt="Agent & Chat Settings" width="100%" />
+        <img src="docs/assets/screenshots/settings-agent.webp" alt="Agent & Chat Settings" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>Agent &amp; Chat Settings</strong> — <sub>Web search (Open Web / Tavily / Brave), context compaction &amp; max-round guardrails</sub>
@@ -125,14 +122,14 @@
   <tr>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/settings-routing.webp">
-        <img src="docs/assets/screenshots/settings-routing.webp" alt="Routing & GPU Yield Guards" width="100%" />
+        <img src="docs/assets/screenshots/settings-routing.webp" alt="Routing & GPU Yield Guards" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>Routing &amp; GPU Yield Guards</strong> — <sub>Auto-heavy thresholds, Gaming-Mode VRAM limits &amp; fallback rules</sub>
     </td>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/appearance.webp">
-        <img src="docs/assets/screenshots/appearance.webp" alt="Appearance & Theme Settings" width="100%" />
+        <img src="docs/assets/screenshots/appearance.webp" alt="Appearance & Theme Settings" width="100%" loading="lazy" />
       </a>
       <br />
       <strong>Appearance &amp; Theme</strong> — <sub>System/Dark/Light, 4 surface presets &amp; live favicon/tray accent sync</sub>
