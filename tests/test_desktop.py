@@ -1145,3 +1145,164 @@ def test_tray_poll_once_sync_tls_ca_bundle_upgrade_and_error(tmp_path: Path, mon
     ctrl_http.poll_once_sync()
     assert ctrl_http.online is True
     assert ctrl_http.tls_error is False
+
+
+def test_doctor_desktop_router_checks_and_auto_upgrade(tmp_path: Path, monkeypatch) -> None:
+    import ssl
+
+    import httpx
+
+    from backend.shared.updater import fix_doctor_issues, run_doctor
+
+    data_root = tmp_path / "splitch-data"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(data_root))
+    monkeypatch.delenv("SPLITCH_CA_BUNDLE", raising=False)
+
+    app_dir = tmp_path / "app"
+    app_dir.mkdir(parents=True)
+
+    # Provide a managed dummy llama-server so fix_doctor_issues() does not try to download engines
+    llama_dir = data_root / "engines" / "llama.cpp"
+    llama_dir.mkdir(parents=True)
+    llama_bin = llama_dir / "llama-server"
+    llama_bin.write_text("#!/bin/sh\necho 'version: b5000'\n", encoding="utf-8")
+    llama_bin.chmod(0o755)
+
+    certs_dir = data_root / "certs"
+    certs_dir.mkdir(parents=True)
+    ca_file = certs_dir / "cluster-ca.pem"
+    ca_file.write_text("dummy-ca", encoding="utf-8")
+
+    seen_verify: list[tuple[str, object]] = []
+
+    def _unreachable_all(url: str, **kwargs):
+        seen_verify.append((url, kwargs.get("verify")))
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "get", _unreachable_all)
+
+    # 1. Without desktop.json, no desktop_router check is emitted
+    rep0 = run_doctor(app_dir=app_dir)
+    assert all(c.name != "desktop_router" for c in rep0.checks)
+
+    # 2. desktop.json has http:// while https:// /health returns 200 -> warn "uses http://"
+    save_desktop_config(DesktopConfig(mode="remote", router_url="http://127.0.0.1:8443"))
+
+    def _http_fails_https_ok(url: str, **kwargs):
+        seen_verify.append((url, kwargs.get("verify")))
+        if url == "https://127.0.0.1:8443/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if url == "http://127.0.0.1:8443/health":
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        raise httpx.ConnectError("not running")
+
+    monkeypatch.setattr(httpx, "get", _http_fails_https_ok)
+    rep_warn = run_doctor(app_dir=app_dir)
+    chk_warn = next(c for c in rep_warn.checks if c.name == "desktop_router")
+    assert chk_warn.status == "warn"
+    assert "uses http://" in chk_warn.summary
+    assert ("https://127.0.0.1:8443/health", str(ca_file)) in seen_verify
+
+    # fix_doctor_issues() auto-upgrades desktop.json router_url from http:// to https://
+    actions = fix_doctor_issues(app_dir=app_dir)
+    assert any("https://127.0.0.1:8443" in a for a in actions)
+    assert load_desktop_config().router_url == "https://127.0.0.1:8443"
+
+    # 3. After upgrade, https:// is reachable -> status "ok"
+    rep_ok = run_doctor(app_dir=app_dir)
+    chk_ok = next(c for c in rep_ok.checks if c.name == "desktop_router")
+    assert chk_ok.status == "ok"
+    assert "reachable" in chk_ok.summary.lower()
+
+    # 4. SSLCertVerificationError on https:// /health -> warn "TLS cert untrusted"
+    def _tls_untrusted(url: str, **kwargs):
+        seen_verify.append((url, kwargs.get("verify")))
+        if url == "https://127.0.0.1:8443/health":
+            err = httpx.ConnectError("TLS handshake failed")
+            err.__cause__ = ssl.SSLCertVerificationError(1, "certificate verify failed")
+            raise err
+        raise httpx.ConnectError("not running")
+
+    monkeypatch.setattr(httpx, "get", _tls_untrusted)
+    rep_tls = run_doctor(app_dir=app_dir)
+    chk_tls = next(c for c in rep_tls.checks if c.name == "desktop_router")
+    assert chk_tls.status == "warn"
+    assert "TLS cert untrusted" in chk_tls.summary
+
+    # 5. Non-TLS failure on https:// /health -> warn "unreachable"
+    monkeypatch.setattr(httpx, "get", _unreachable_all)
+    rep_unreach = run_doctor(app_dir=app_dir)
+    chk_unreach = next(c for c in rep_unreach.checks if c.name == "desktop_router")
+    assert chk_unreach.status == "warn"
+    assert "unreachable" in chk_unreach.summary.lower()
+
+
+def test_cli_desktop_sync_icon_ca_bundle_and_https_fallback(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+
+    import httpx
+    import pytest
+
+    from backend import cli as cli_mod
+
+    data_root = tmp_path / "splitch-data"
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(data_root))
+    monkeypatch.delenv("SPLITCH_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("SPLITCH_API_KEY", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    (tmp_path / "Desktop").mkdir()
+
+    certs_dir = data_root / "certs"
+    certs_dir.mkdir(parents=True)
+    ca_file = certs_dir / "cluster-ca.pem"
+    ca_file.write_text("dummy-ca", encoding="utf-8")
+
+    save_desktop_config(DesktopConfig(mode="remote", router_url="http://127.0.0.1:8443"))
+
+    calls: list[tuple[str, object]] = []
+
+    def _fallback_get(url: str, **kwargs):
+        calls.append((url, kwargs.get("verify")))
+        if url.startswith("http://"):
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        if url == "https://127.0.0.1:8443/api/theme":
+            return httpx.Response(
+                200,
+                json={"scheme": "light", "accent": "#22d3ee", "surface": "oled", "resolved_light": True},
+            )
+        return httpx.Response(
+            200,
+            json={"scheme": "dark", "accent": "#34d399", "surface": "slate", "resolved_light": False},
+        )
+
+    monkeypatch.setattr(httpx, "get", _fallback_get)
+    monkeypatch.setattr(sys, "argv", ["splitch", "desktop", "sync-icon"])
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.main()
+    assert exc_info.value.code == 0
+
+    assert calls == [
+        ("http://127.0.0.1:8443/api/theme", str(ca_file)),
+        ("https://127.0.0.1:8443/api/theme", str(ca_file)),
+    ]
+    updated = load_desktop_config()
+    assert updated.theme.accent == "#22d3ee"
+    assert updated.theme.scheme == "light"
+    assert updated.theme.surface == "oled"
+
+    # SPLITCH_CA_BUNDLE override is honored for explicit --url https://...
+    custom_ca = tmp_path / "override-ca.pem"
+    custom_ca.write_text("override-ca", encoding="utf-8")
+    monkeypatch.setenv("SPLITCH_CA_BUNDLE", str(custom_ca))
+    calls.clear()
+    monkeypatch.setattr(sys, "argv", ["splitch", "desktop", "sync-icon", "--url", "https://127.0.0.1:9443"])
+    with pytest.raises(SystemExit) as exc_info2:
+        cli_mod.main()
+    assert exc_info2.value.code == 0
+    assert calls == [("https://127.0.0.1:9443/api/theme", str(custom_ca))]
+    assert load_desktop_config().theme.accent == "#34d399"

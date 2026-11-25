@@ -639,20 +639,32 @@ def _cmd_desktop(args: argparse.Namespace) -> int:
                 cur["surface"] = args.surface
             theme_payload = cur
         else:
+            from backend.desktop.shortcuts import _resolve_ca_bundle
+
             target_url = (args.url or load_desktop_config().router_url or "http://127.0.0.1:8080").rstrip("/")
             api_key = resolve_desktop_api_key()
             headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-            try:
-                r = httpx.get(f"{target_url}/api/theme", headers=headers, timeout=3.0)
-                if r.status_code == 200:
-                    theme_payload = r.json()
-                elif r.status_code in (401, 403):
-                    print(
-                        "[splitch] Router rejected /api/theme (auth required) — run: splitch desktop set-api-key",
-                        file=sys.stderr,
-                    )
-            except (httpx.HTTPError, ValueError):
-                pass
+            verify = _resolve_ca_bundle()
+            candidates = [target_url]
+            if target_url.startswith("http://"):
+                candidates.append("https://" + target_url.removeprefix("http://"))
+            for cand in candidates:
+                try:
+                    req_kwargs: dict[str, object] = {"headers": headers, "timeout": 3.0}
+                    if cand.startswith("https://") or verify is not True:
+                        req_kwargs["verify"] = verify
+                    r = httpx.get(f"{cand}/api/theme", **req_kwargs)
+                    if r.status_code == 200:
+                        theme_payload = r.json()
+                        break
+                    if r.status_code in (401, 403):
+                        print(
+                            "[splitch] Router rejected /api/theme (auth required) — run: splitch desktop set-api-key",
+                            file=sys.stderr,
+                        )
+                        break
+                except (httpx.HTTPError, ValueError):
+                    continue
         res = sync_desktop_icons(theme_payload)
         print(f"[splitch] Synced desktop & tray icons ({res['platform']}, tag={res['tag']}):")
         for p in res["updated_paths"]:

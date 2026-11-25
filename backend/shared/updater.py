@@ -9,6 +9,7 @@ Powers:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
@@ -518,6 +519,68 @@ def run_doctor(
             ),
         )
     )
+
+    # 8. Desktop / Tray router TLS & reachability (if desktop.json exists)
+    if (data_root / "desktop.json").is_file():
+        with contextlib.suppress(ImportError, OSError, ValueError):
+            import ssl
+
+            import httpx
+
+            from backend.desktop.shortcuts import (
+                _check_router_healthy,
+                _resolve_ca_bundle,
+                load_desktop_config,
+            )
+
+            dcfg = load_desktop_config()
+            rurl = dcfg.router_url.rstrip("/")
+            if _check_router_healthy(rurl, timeout=1.5):
+                checks.append(
+                    DoctorCheck(
+                        name="desktop_router",
+                        status="ok",
+                        summary=f"Desktop router reachable ({rurl})",
+                    )
+                )
+            elif rurl.startswith("http://") and _check_router_healthy(
+                "https://" + rurl.removeprefix("http://"), timeout=1.5
+            ):
+                https_url = "https://" + rurl.removeprefix("http://")
+                checks.append(
+                    DoctorCheck(
+                        name="desktop_router",
+                        status="warn",
+                        summary=f"desktop.json uses http:// while router serves {https_url}",
+                        fix="Run: splitch doctor --fix (auto-upgrades desktop.json to https://)",
+                    )
+                )
+            else:
+                tls_untrusted = False
+                if rurl.startswith("https://"):
+                    try:
+                        httpx.get(f"{rurl}/health", timeout=1.5, verify=_resolve_ca_bundle())
+                    except httpx.HTTPError as exc:
+                        if "CERTIFICATE_VERIFY_FAILED" in str(exc) or isinstance(
+                            getattr(exc, "__cause__", None), ssl.SSLCertVerificationError
+                        ):
+                            tls_untrusted = True
+                checks.append(
+                    DoctorCheck(
+                        name="desktop_router",
+                        status="warn",
+                        summary=(
+                            f"Desktop router TLS cert untrusted ({rurl})"
+                            if tls_untrusted
+                            else f"Desktop router unreachable ({rurl})"
+                        ),
+                        fix=(
+                            f"Copy cluster-ca.pem to {data_root / 'certs' / 'cluster-ca.pem'} or set SPLITCH_CA_BUNDLE"
+                            if tls_untrusted
+                            else "Ensure the target router is running or update router_url via `splitch desktop install --url ...`"
+                        ),
+                    )
+                )
 
     overall_ok = all(c.status != "error" for c in checks)
     return DoctorReport(
@@ -1153,6 +1216,23 @@ def fix_doctor_issues(
             actions.extend(sd_res.steps)
         else:
             actions.append(f"Media engine (sd.cpp) install failed: {sd_res.error}")
+
+    desk_chk = by_name.get("desktop_router")
+    if desk_chk and desk_chk.status == "warn" and "uses http://" in desk_chk.summary:
+        with contextlib.suppress(ImportError, OSError, ValueError):
+            from backend.desktop.shortcuts import (
+                _check_router_healthy,
+                load_desktop_config,
+                save_desktop_config,
+            )
+
+            dcfg = load_desktop_config()
+            if dcfg.router_url.startswith("http://"):
+                https_url = "https://" + dcfg.router_url.removeprefix("http://").rstrip("/")
+                if _check_router_healthy(https_url, timeout=1.5):
+                    dcfg.router_url = https_url
+                    save_desktop_config(dcfg)
+                    actions.append(f"Upgraded desktop.json router_url to {https_url}")
 
     if not actions:
         actions.append("Nothing to fix — all auto-remediable checks are already healthy")
