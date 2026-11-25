@@ -61,6 +61,7 @@ class RouterSettings(BaseModel):
     shell_allowlist: list[str] = Field(default_factory=lambda: list(DEFAULT_SHELL_ALLOWLIST))
     shell_denylist: list[str] = Field(default_factory=lambda: list(DEFAULT_SHELL_DENYLIST))
     max_agent_steps: int = 8
+    max_parallel_agents: int = 2
     auto_compact_threshold: float = 0.80
     thinking_display: ThinkingDisplay = "collapsed"
     completion_notifications: bool = False

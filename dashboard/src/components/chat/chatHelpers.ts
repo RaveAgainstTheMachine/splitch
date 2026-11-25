@@ -4,6 +4,7 @@ export interface DraftChatConfig {
   workspace_subpath: string;
   tools_enabled: boolean;
   web_search_enabled: boolean;
+  swarm_enabled: boolean;
   auto_approve: boolean;
   auto_compact: boolean;
   enabled_skills: string[];
@@ -22,6 +23,7 @@ export const DEFAULT_DRAFT: DraftChatConfig = {
   workspace_subpath: "",
   tools_enabled: true,
   web_search_enabled: false,
+  swarm_enabled: false,
   auto_approve: false,
   auto_compact: true,
   enabled_skills: [],

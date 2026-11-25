@@ -485,6 +485,7 @@ class ConversationSummary(BaseModel):
     workspace_subpath: str = ""
     tools_enabled: bool = True
     web_search_enabled: bool = False
+    swarm_enabled: bool = False
     auto_approve: bool = False
     auto_compact: bool = True
     pinned: bool = False
@@ -505,6 +506,7 @@ class ConversationCreate(BaseModel):
     workspace_subpath: str = ""
     tools_enabled: bool = True
     web_search_enabled: bool = False
+    swarm_enabled: bool | None = None
     auto_approve: bool = False
     auto_compact: bool = True
     pinned: bool = False
@@ -527,6 +529,7 @@ class ConversationUpdate(BaseModel):
     workspace_subpath: str | None = None
     tools_enabled: bool | None = None
     web_search_enabled: bool | None = None
+    swarm_enabled: bool | None = None
     auto_approve: bool | None = None
     auto_compact: bool | None = None
     pinned: bool | None = None
@@ -588,6 +591,54 @@ class ChatSendRequest(BaseModel):
 
 class ApprovalDecision(BaseModel):
     approved: bool
+
+
+SwarmAgentStatus = Literal[
+    "queued", "running", "waiting_approval", "done", "error", "cancelled"
+]
+
+
+class SwarmAgentRecord(BaseModel):
+    id: str
+    run_id: str
+    conversation_id: str
+    role: str
+    task: str
+    model: str = "auto"
+    node_id: str = ""
+    readonly: bool = True
+    status: SwarmAgentStatus = "queued"
+    round: int = 0
+    max_rounds: int = 8
+    phase: str = "queued"
+    active_tool: str | None = None
+    result: str = ""
+    error: str | None = None
+    tokens_per_sec: float | None = None
+    created_at: float
+    updated_at: float
+
+
+class SwarmRunRecord(BaseModel):
+    id: str
+    conversation_id: str
+    status: Literal["running", "done", "error", "cancelled"] = "running"
+    agents: list[SwarmAgentRecord] = Field(default_factory=list)
+    created_at: float
+    updated_at: float
+
+
+class SwarmWorkerMessage(BaseModel):
+    id: str
+    agent_id: str
+    role: Literal["user", "assistant", "tool"]
+    content: str = ""
+    reasoning: str = ""
+    tool_calls: list[dict] = Field(default_factory=list)
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    meta: dict = Field(default_factory=dict)
+    created_at: float
 
 
 # ── Image & Video Generation (Unified Media Plane) ───────────────────────────
@@ -820,6 +871,7 @@ class RuntimeSettings(BaseModel):
     shell_allowlist: list[str] = Field(default_factory=lambda: list(DEFAULT_SHELL_ALLOWLIST))
     shell_denylist: list[str] = Field(default_factory=lambda: list(DEFAULT_SHELL_DENYLIST))
     max_agent_steps: int = 8
+    max_parallel_agents: int = 2
     auto_compact_threshold: float = 0.80
     thinking_display: ThinkingDisplay = "collapsed"
     completion_notifications: bool = False
@@ -846,6 +898,7 @@ class RuntimeSettingsPatch(BaseModel):
     shell_allowlist: list[str] | None = None
     shell_denylist: list[str] | None = None
     max_agent_steps: int | None = Field(default=None, ge=1, le=32)
+    max_parallel_agents: int | None = Field(default=None, ge=1, le=6)
     auto_compact_threshold: float | None = Field(default=None, ge=0.50, le=0.95)
     thinking_display: ThinkingDisplay | None = None
     completion_notifications: bool | None = None

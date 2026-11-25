@@ -165,6 +165,18 @@ export function AgentChatSettingsPane({
               />
             </label>
             <label className="media-field">
+              <span>Max Parallel Swarm Agents</span>
+              <input
+                type="number"
+                min={1}
+                max={6}
+                value={settings.max_parallel_agents}
+                onChange={(e) =>
+                  setSettings({ ...settings, max_parallel_agents: Number(e.target.value) })
+                }
+              />
+            </label>
+            <label className="media-field">
               <span>
                 Auto-Compact Trigger ({Math.round(settings.auto_compact_threshold * 100)}%)
               </span>

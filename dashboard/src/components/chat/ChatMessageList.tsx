@@ -23,11 +23,13 @@ import {
 } from "../ArtifactPreview";
 import { SplitchLogo } from "../SplitchLogo";
 import { DiffViewer } from "./ChatCodeBlocks";
+import { SwarmCard } from "./SwarmCard";
 import type {
   ChatMessageRecord,
   ConversationSummary,
   NodeStatus,
-  PendingApproval
+  PendingApproval,
+  SwarmRunRecord
 } from "../../types";
 import type { ThinkingDisplay } from "../../types";
 
@@ -56,6 +58,10 @@ export interface ChatMessageListProps {
   regenerateFromAssistant: (idx: number) => Promise<void>;
   clearCompaction: () => Promise<void>;
   onContinueTurn?: () => void;
+  swarmRuns?: SwarmRunRecord[];
+  inspectedSwarmAgentId?: string | null;
+  onInspectSwarmAgent?: (runId: string, agentId: string) => void;
+  onCancelSwarmAgent?: (agentId: string) => Promise<void>;
 }
 
 function renderApprovalSandboxBadge(approval: PendingApproval) {
@@ -125,7 +131,11 @@ export function ChatMessageList({
   copyMessage,
   regenerateFromAssistant,
   clearCompaction,
-  onContinueTurn
+  onContinueTurn,
+  swarmRuns,
+  inspectedSwarmAgentId,
+  onInspectSwarmAgent,
+  onCancelSwarmAgent
 }: ChatMessageListProps) {
   return (
     <div
@@ -514,6 +524,21 @@ export function ChatMessageList({
           );
         })
       )}
+      {swarmRuns &&
+        swarmRuns.length > 0 &&
+        onInspectSwarmAgent &&
+        onCancelSwarmAgent &&
+        swarmRuns.map((run) => (
+          <SwarmCard
+            key={run.id}
+            run={run}
+            pendingApprovals={pendingApprovals}
+            inspectedAgentId={inspectedSwarmAgentId ?? null}
+            onInspectAgent={onInspectSwarmAgent}
+            onCancelAgent={onCancelSwarmAgent}
+            onResolveApproval={resolveApproval}
+          />
+        ))}
       <div ref={bottomSentinelRef} className="scroll-sentinel" aria-hidden="true" />
       {visibleMessages.length > 0 && (
         <button

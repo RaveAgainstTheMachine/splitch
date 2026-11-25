@@ -16,6 +16,9 @@ from backend.shared.models import (
     ConversationCreate,
     ConversationSummary,
     ConversationUpdate,
+    SwarmAgentRecord,
+    SwarmRunRecord,
+    SwarmWorkerMessage,
 )
 
 MEDIA_TOOLS_SCHEMA: list[dict[str, Any]] = [
@@ -164,6 +167,90 @@ WORKSPACE_TOOLS_SCHEMA: list[dict[str, Any]] = [
 
 APPROVAL_REQUIRED_TOOLS = {"write_file", "edit_file", "run_command"}
 
+SWARM_TOOLS_SCHEMA: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn_agent",
+            "description": (
+                "Spawn an asynchronous worker agent in the active swarm run to execute a focused "
+                "subtask in parallel (e.g. across cluster nodes). Returns the worker's agent_id immediately."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "role": {
+                        "type": "string",
+                        "description": "Short worker role label, e.g. 'Researcher', 'Coder', 'Verifier'",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Clear, self-contained task prompt and expected output for the worker",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional model or alias override (e.g. 'auto', 'fast', 'heavy'). Defaults to 'auto'.",
+                    },
+                    "node_id": {
+                        "type": "string",
+                        "description": "Optional target node ID (e.g. 'pc', 'mac') for tool/inference affinity.",
+                    },
+                    "readonly": {
+                        "type": "boolean",
+                        "description": "If true (default), worker cannot call write_file/edit_file/run_command.",
+                    },
+                },
+                "required": ["role", "task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "wait_agents",
+            "description": (
+                "Wait for spawned worker agents in the current swarm run to finish and return their results."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of agent_ids to wait on; omit to wait for all active workers in the run.",
+                    },
+                    "timeout_s": {
+                        "type": "number",
+                        "description": "Maximum seconds to wait (default 180).",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_agents",
+            "description": "List all worker agents in the current swarm run with their status, node, and step progress.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_agent",
+            "description": "Cancel a queued or running worker agent in the current swarm run.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string", "description": "ID of the worker agent to cancel"}
+                },
+                "required": ["agent_id"],
+            },
+        },
+    },
+]
+
 
 class ChatStore:
     def __init__(self, db_path: Path) -> None:
@@ -190,6 +277,7 @@ class ChatStore:
                     workspace_subpath TEXT NOT NULL DEFAULT '',
                     tools_enabled INTEGER NOT NULL DEFAULT 1,
                     web_search_enabled INTEGER NOT NULL DEFAULT 0,
+                    swarm_enabled INTEGER NOT NULL DEFAULT 0,
                     auto_approve INTEGER NOT NULL DEFAULT 0,
                     auto_compact INTEGER NOT NULL DEFAULT 1,
                     pinned INTEGER NOT NULL DEFAULT 0,
@@ -217,6 +305,51 @@ class ChatStore:
                     FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
+                CREATE TABLE IF NOT EXISTS swarm_runs (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_swarm_runs_conv ON swarm_runs(conversation_id, created_at);
+                CREATE TABLE IF NOT EXISTS swarm_agents (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    task TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT 'auto',
+                    node_id TEXT NOT NULL DEFAULT '',
+                    readonly INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    round INTEGER NOT NULL DEFAULT 0,
+                    max_rounds INTEGER NOT NULL DEFAULT 8,
+                    phase TEXT NOT NULL DEFAULT 'queued',
+                    active_tool TEXT,
+                    result TEXT NOT NULL DEFAULT '',
+                    error TEXT,
+                    tokens_per_sec REAL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES swarm_runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_swarm_agents_run ON swarm_agents(run_id, created_at);
+                CREATE TABLE IF NOT EXISTS swarm_agent_messages (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    reasoning TEXT NOT NULL DEFAULT '',
+                    tool_calls_json TEXT NOT NULL DEFAULT '[]',
+                    tool_call_id TEXT,
+                    tool_name TEXT,
+                    meta_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY (agent_id) REFERENCES swarm_agents(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_swarm_msgs_agent ON swarm_agent_messages(agent_id, created_at);
                 """
             )
             cols = {
@@ -228,6 +361,10 @@ class ChatStore:
             if "web_search_enabled" not in cols:
                 conn.execute(
                     "ALTER TABLE conversations ADD COLUMN web_search_enabled INTEGER NOT NULL DEFAULT 0"
+                )
+            if "swarm_enabled" not in cols:
+                conn.execute(
+                    "ALTER TABLE conversations ADD COLUMN swarm_enabled INTEGER NOT NULL DEFAULT 0"
                 )
             if "auto_compact" not in cols:
                 conn.execute(
@@ -259,6 +396,7 @@ class ChatStore:
             workspace_subpath=row["workspace_subpath"],
             tools_enabled=bool(row["tools_enabled"]),
             web_search_enabled=bool(row["web_search_enabled"]),
+            swarm_enabled=bool(row["swarm_enabled"]),
             auto_approve=bool(row["auto_approve"]),
             auto_compact=bool(row["auto_compact"]),
             pinned=bool(row["pinned"]),
@@ -316,10 +454,10 @@ class ChatStore:
                 """
                 INSERT INTO conversations
                 (id, title, model, exec_node, workspace_subpath, tools_enabled, web_search_enabled,
-                 auto_approve, auto_compact, pinned, compacted_summary, compacted_through_ts,
+                 swarm_enabled, auto_approve, auto_compact, pinned, compacted_summary, compacted_through_ts,
                  enabled_skills_json, enabled_mcps_json, system_prompt, deleted_at,
                  created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0.0, ?, ?, ?, NULL, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0.0, ?, ?, ?, NULL, ?, ?)
                 """,
                 (
                     conv_id,
@@ -329,6 +467,7 @@ class ChatStore:
                     req.workspace_subpath,
                     int(req.tools_enabled),
                     int(req.web_search_enabled),
+                    int(bool(req.swarm_enabled)),
                     int(req.auto_approve),
                     int(req.auto_compact),
                     int(req.pinned),
@@ -358,7 +497,8 @@ class ChatStore:
                 """
                 UPDATE conversations SET
                   title = ?, model = ?, exec_node = ?, workspace_subpath = ?,
-                  tools_enabled = ?, web_search_enabled = ?, auto_approve = ?, auto_compact = ?,
+                  tools_enabled = ?, web_search_enabled = ?, swarm_enabled = ?,
+                  auto_approve = ?, auto_compact = ?,
                   pinned = ?, enabled_skills_json = ?, enabled_mcps_json = ?,
                   system_prompt = ?, updated_at = ?
                 WHERE id = ?
@@ -370,6 +510,7 @@ class ChatStore:
                     updated.workspace_subpath,
                     int(updated.tools_enabled),
                     int(updated.web_search_enabled),
+                    int(updated.swarm_enabled),
                     int(updated.auto_approve),
                     int(updated.auto_compact),
                     int(updated.pinned),
@@ -557,3 +698,195 @@ class ChatStore:
                 (conv_id, cut_ts),
             )
             return conv_id
+
+    # ── Swarm Persistence ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _row_to_swarm_agent(row: sqlite3.Row) -> SwarmAgentRecord:
+        return SwarmAgentRecord(
+            id=row["id"],
+            run_id=row["run_id"],
+            conversation_id=row["conversation_id"],
+            role=row["role"],
+            task=row["task"],
+            model=row["model"],
+            node_id=row["node_id"],
+            readonly=bool(row["readonly"]),
+            status=row["status"],
+            round=int(row["round"] or 0),
+            max_rounds=int(row["max_rounds"] or 8),
+            phase=row["phase"] or "queued",
+            active_tool=row["active_tool"],
+            result=row["result"] or "",
+            error=row["error"],
+            tokens_per_sec=row["tokens_per_sec"],
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_swarm_msg(row: sqlite3.Row) -> SwarmWorkerMessage:
+        return SwarmWorkerMessage(
+            id=row["id"],
+            agent_id=row["agent_id"],
+            role=row["role"],
+            content=row["content"] or "",
+            reasoning=row["reasoning"] or "",
+            tool_calls=json.loads(row["tool_calls_json"] or "[]"),
+            tool_call_id=row["tool_call_id"],
+            tool_name=row["tool_name"],
+            meta=json.loads(row["meta_json"] or "{}"),
+            created_at=float(row["created_at"]),
+        )
+
+    def create_swarm_run(self, conversation_id: str) -> SwarmRunRecord:
+        now = time.time()
+        run_id = uuid.uuid4().hex[:12]
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO swarm_runs (id, conversation_id, status, created_at, updated_at) "
+                "VALUES (?, ?, 'running', ?, ?)",
+                (run_id, conversation_id, now, now),
+            )
+        return SwarmRunRecord(
+            id=run_id, conversation_id=conversation_id, status="running", agents=[], created_at=now, updated_at=now
+        )
+
+    def update_swarm_run_status(self, run_id: str, status: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE swarm_runs SET status = ?, updated_at = ? WHERE id = ?",
+                (status, time.time(), run_id),
+            )
+
+    def list_swarm_runs(self, conversation_id: str) -> list[SwarmRunRecord]:
+        with self._connect() as conn:
+            runs = conn.execute(
+                "SELECT * FROM swarm_runs WHERE conversation_id = ? ORDER BY created_at ASC",
+                (conversation_id,),
+            ).fetchall()
+            out: list[SwarmRunRecord] = []
+            for r in runs:
+                agents = conn.execute(
+                    "SELECT * FROM swarm_agents WHERE run_id = ? ORDER BY created_at ASC",
+                    (r["id"],),
+                ).fetchall()
+                out.append(
+                    SwarmRunRecord(
+                        id=r["id"],
+                        conversation_id=r["conversation_id"],
+                        status=r["status"],
+                        agents=[self._row_to_swarm_agent(a) for a in agents],
+                        created_at=float(r["created_at"]),
+                        updated_at=float(r["updated_at"]),
+                    )
+                )
+            return out
+
+    def create_swarm_agent(
+        self,
+        *,
+        run_id: str,
+        conversation_id: str,
+        role: str,
+        task: str,
+        model: str = "auto",
+        node_id: str = "",
+        readonly: bool = True,
+        max_rounds: int = 8,
+    ) -> SwarmAgentRecord:
+        now = time.time()
+        agent_id = uuid.uuid4().hex[:12]
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO swarm_agents
+                (id, run_id, conversation_id, role, task, model, node_id, readonly,
+                 status, round, max_rounds, phase, active_tool, result, error, tokens_per_sec,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, 'queued', NULL, '', NULL, NULL, ?, ?)
+                """,
+                (
+                    agent_id,
+                    run_id,
+                    conversation_id,
+                    role,
+                    task,
+                    model,
+                    node_id,
+                    int(readonly),
+                    max_rounds,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM swarm_agents WHERE id = ?", (agent_id,)).fetchone()
+            return self._row_to_swarm_agent(row)
+
+    def update_swarm_agent(self, agent_id: str, **fields: Any) -> SwarmAgentRecord | None:
+        if not fields:
+            return self.get_swarm_agent(agent_id)
+        allowed = {
+            "model",
+            "node_id",
+            "status",
+            "round",
+            "max_rounds",
+            "phase",
+            "active_tool",
+            "result",
+            "error",
+            "tokens_per_sec",
+        }
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        updates["updated_at"] = time.time()
+        cols_sql = ", ".join(f"{k} = ?" for k in updates)
+        vals = list(updates.values()) + [agent_id]
+        with self._connect() as conn:
+            conn.execute(f"UPDATE swarm_agents SET {cols_sql} WHERE id = ?", vals)
+            row = conn.execute("SELECT * FROM swarm_agents WHERE id = ?", (agent_id,)).fetchone()
+            return self._row_to_swarm_agent(row) if row else None
+
+    def get_swarm_agent(self, agent_id: str) -> SwarmAgentRecord | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM swarm_agents WHERE id = ?", (agent_id,)).fetchone()
+            return self._row_to_swarm_agent(row) if row else None
+
+    def list_swarm_agents(self, run_id: str) -> list[SwarmAgentRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM swarm_agents WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            ).fetchall()
+            return [self._row_to_swarm_agent(r) for r in rows]
+
+    def add_swarm_agent_message(self, msg: SwarmWorkerMessage) -> SwarmWorkerMessage:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO swarm_agent_messages
+                (id, agent_id, role, content, reasoning, tool_calls_json, tool_call_id, tool_name, meta_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    msg.id,
+                    msg.agent_id,
+                    msg.role,
+                    msg.content,
+                    msg.reasoning,
+                    json.dumps(msg.tool_calls),
+                    msg.tool_call_id,
+                    msg.tool_name,
+                    json.dumps(msg.meta),
+                    msg.created_at,
+                ),
+            )
+        return msg
+
+    def list_swarm_agent_messages(self, agent_id: str) -> list[SwarmWorkerMessage]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM swarm_agent_messages WHERE agent_id = ? ORDER BY created_at ASC",
+                (agent_id,),
+            ).fetchall()
+            return [self._row_to_swarm_msg(r) for r in rows]

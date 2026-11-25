@@ -352,6 +352,7 @@ export interface ConversationSummary {
   workspace_subpath: string;
   tools_enabled: boolean;
   web_search_enabled: boolean;
+  swarm_enabled: boolean;
   auto_approve: boolean;
   auto_compact: boolean;
   pinned: boolean;
@@ -503,6 +504,59 @@ export interface PendingApproval {
   arguments: Record<string, unknown>;
   exec_node: string;
   sandbox?: string | null;
+  swarm_agent_id?: string | null;
+  swarm_role?: string | null;
+}
+
+export type SwarmAgentStatus =
+  | "queued"
+  | "running"
+  | "waiting_approval"
+  | "done"
+  | "error"
+  | "cancelled";
+
+export interface SwarmAgentRecord {
+  id: string;
+  run_id: string;
+  conversation_id: string;
+  role: string;
+  task: string;
+  model: string;
+  node_id: string;
+  readonly: boolean;
+  status: SwarmAgentStatus;
+  round: number;
+  max_rounds: number;
+  phase: string;
+  active_tool?: string | null;
+  result: string;
+  error?: string | null;
+  tokens_per_sec?: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SwarmRunRecord {
+  id: string;
+  conversation_id: string;
+  status: "running" | "done" | "error" | "cancelled";
+  agents: SwarmAgentRecord[];
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SwarmWorkerMessage {
+  id: string;
+  agent_id: string;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  reasoning: string;
+  tool_calls: ToolCallRecord[];
+  tool_call_id?: string | null;
+  tool_name?: string | null;
+  meta: Record<string, unknown>;
+  created_at: number;
 }
 
 // ── Settings, Connect Clients & Node Provisioning ────────────────────────────
@@ -555,6 +609,7 @@ export interface RuntimeSettings {
   shell_allowlist: string[];
   shell_denylist: string[];
   max_agent_steps: number;
+  max_parallel_agents: number;
   auto_compact_threshold: number;
   thinking_display: ThinkingDisplay;
   completion_notifications: boolean;

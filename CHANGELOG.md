@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.21.0] - 2026-11-25
+
+### Multi-Agent Swarm Orchestration (Phase 1)
+- **Router-Native Swarm Engine (`backend/router/swarm.py`, `chat_store.py`, `chat_api.py`):** Added `SwarmManager` with `spawn_agent`, `wait_agents`, `list_agents`, and `cancel_agent` coordinator tools, SQLite WAL persistence (`swarm_runs`, `swarm_agents`, `swarm_agent_messages`), `asyncio.Semaphore(max_parallel_agents)` concurrency cap, `readonly=True` write/shell tool enforcement, unified HITL approval bubbling, and multi-node routing via `resolve_route()`.
+- **Swarm Chat UI & Inspector (`dashboard/src/components/chat/SwarmCard.tsx`, `SwarmInspectorPane.tsx`, `ChatTab.tsx`, `ChatMessageList.tsx`):** Added per-conversation `Swarm` toolbar toggle (auto-enabled when >1 node is configured), inline Swarm Run Card with live worker status/step/phase + inline approvals/cancel, and right-pane Swarm Inspector showing worker roster and live streaming transcripts.
+- **Settings Integration (`backend/router/config.py`, `settings_api.py`, `AgentChatSettingsPane.tsx`):** Added `Max Parallel Swarm Agents` (`1–6`, default `2`) to **Settings -> Agent & Chat**.
+
 ## [0.20.1] - 2026-11-25
 
 ### Compaction Performance & New-Tab Agent Links

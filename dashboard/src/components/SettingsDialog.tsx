@@ -142,6 +142,7 @@ export function SettingsDialog({
           shell_allowlist: settings.shell_allowlist,
           shell_denylist: settings.shell_denylist,
           max_agent_steps: settings.max_agent_steps,
+          max_parallel_agents: settings.max_parallel_agents,
           auto_compact_threshold: settings.auto_compact_threshold,
           thinking_display: settings.thinking_display,
           completion_notifications: settings.completion_notifications

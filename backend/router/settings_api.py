@@ -175,6 +175,8 @@ def apply_persisted_settings(cluster: ClusterState, data_dir: Path) -> None:
         r.shell_denylist = [str(x).strip() for x in raw["shell_denylist"] if str(x).strip()]
     if isinstance(raw.get("max_agent_steps"), int):
         r.max_agent_steps = max(1, min(32, raw["max_agent_steps"]))
+    if isinstance(raw.get("max_parallel_agents"), int):
+        r.max_parallel_agents = max(1, min(6, raw["max_parallel_agents"]))
     if isinstance(raw.get("auto_compact_threshold"), (int, float)):
         r.auto_compact_threshold = max(0.50, min(0.95, float(raw["auto_compact_threshold"])))
     if raw.get("thinking_display") in ("collapsed", "expanded", "hidden"):
@@ -250,6 +252,7 @@ def build_settings_router(
             shell_allowlist=list(cluster.config.router.shell_allowlist),
             shell_denylist=list(cluster.config.router.shell_denylist),
             max_agent_steps=cluster.config.router.max_agent_steps,
+            max_parallel_agents=cluster.config.router.max_parallel_agents,
             auto_compact_threshold=cluster.config.router.auto_compact_threshold,
             thinking_display=cluster.config.router.thinking_display,
             completion_notifications=cluster.config.router.completion_notifications,
@@ -332,6 +335,8 @@ def build_settings_router(
             r.shell_denylist = [x.strip() for x in patch.shell_denylist if x.strip()]
         if patch.max_agent_steps is not None:
             r.max_agent_steps = patch.max_agent_steps
+        if patch.max_parallel_agents is not None:
+            r.max_parallel_agents = patch.max_parallel_agents
         if patch.auto_compact_threshold is not None:
             r.auto_compact_threshold = patch.auto_compact_threshold
         if patch.thinking_display is not None:
@@ -361,6 +366,7 @@ def build_settings_router(
             "shell_allowlist": current.shell_allowlist,
             "shell_denylist": current.shell_denylist,
             "max_agent_steps": current.max_agent_steps,
+            "max_parallel_agents": current.max_parallel_agents,
             "auto_compact_threshold": current.auto_compact_threshold,
             "thinking_display": current.thinking_display,
             "completion_notifications": current.completion_notifications,

@@ -4,6 +4,7 @@ import {
   Cpu,
   Download,
   Folder,
+  Network,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightOpen,
@@ -18,6 +19,7 @@ import { ChatComposer, DEFAULT_SAMPLING, type SamplingConfig } from "./chat/Chat
 import { ContextMemoryDialog, WorkspaceBrowserDialog } from "./chat/ChatDialogs";
 import { ChatMessageList } from "./chat/ChatMessageList";
 import { ChatSidebar, type SidebarMode } from "./chat/ChatSidebar";
+import { SwarmInspectorPane } from "./chat/SwarmInspectorPane";
 import { WorkspaceViewerPane, type WorkspaceInspectTarget } from "./chat/WorkspaceViewerPane";
 import {
   DEFAULT_DRAFT,
@@ -36,6 +38,9 @@ import type {
   PendingApproval,
   ScopedExtensionsConfig,
   SkillItem,
+  SwarmAgentRecord,
+  SwarmRunRecord,
+  SwarmWorkerMessage,
   ToolCallRecord,
   WorkspaceDirListing,
   WorkspaceFileContent
@@ -85,6 +90,14 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
     "collapsed"
   );
   const [completionNotifications, setCompletionNotifications] = useState(false);
+  const [swarmRuns, setSwarmRuns] = useState<SwarmRunRecord[]>([]);
+  const [inspectedSwarm, setInspectedSwarm] = useState<{ runId: string; agentId: string } | null>(
+    null
+  );
+  const [swarmWorkerMsgs, setSwarmWorkerMsgs] = useState<SwarmWorkerMessage[]>([]);
+  const [swarmLiveText, setSwarmLiveText] = useState<Record<string, string>>({});
+  const [swarmLiveReasoning, setSwarmLiveReasoning] = useState<Record<string, string>>({});
+  const swarmDefaultAppliedRef = useRef(false);
 
   useEffect(() => {
     void (async () => {
@@ -151,6 +164,70 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
       Math.min(Math.floor(totalWidth * 0.68), totalWidth - sidebarW - minChatW)
     );
     return Math.max(280, Math.min(maxW, Math.round(rawW)));
+  };
+
+  useEffect(() => {
+    if (!swarmDefaultAppliedRef.current && snapshot?.nodes) {
+      swarmDefaultAppliedRef.current = true;
+      if (snapshot.nodes.length > 1) {
+        setDraftConfig((prev) => ({ ...prev, swarm_enabled: true }));
+      }
+    }
+  }, [snapshot?.nodes]);
+
+  const loadSwarmRuns = async (convId: string) => {
+    try {
+      const res = await fetch(`/api/chat/conversations/${encodeURIComponent(convId)}/swarms`);
+      if (!res.ok) return;
+      setSwarmRuns((await res.json()) as SwarmRunRecord[]);
+    } catch {
+      // non-fatal
+    }
+  };
+
+  const loadSwarmWorkerMessages = async (agentId: string) => {
+    try {
+      const res = await fetch(`/api/chat/swarms/agents/${encodeURIComponent(agentId)}/messages`);
+      if (!res.ok) return;
+      setSwarmWorkerMsgs((await res.json()) as SwarmWorkerMessage[]);
+    } catch {
+      // non-fatal
+    }
+  };
+
+  useEffect(() => {
+    if (!activeId) {
+      setSwarmRuns([]);
+      setInspectedSwarm(null);
+      setSwarmWorkerMsgs([]);
+      return;
+    }
+    void loadSwarmRuns(activeId);
+  }, [activeId]);
+
+  useEffect(() => {
+    if (!inspectedSwarm?.agentId) {
+      setSwarmWorkerMsgs([]);
+      return;
+    }
+    void loadSwarmWorkerMessages(inspectedSwarm.agentId);
+  }, [inspectedSwarm?.agentId]);
+
+  const handleInspectSwarmAgent = (runId: string, agentId: string) => {
+    setWorkspaceInspect(null);
+    setInspectedArtifact(null);
+    setInspectedSwarm({ runId, agentId });
+  };
+
+  const handleCancelSwarmAgent = async (agentId: string) => {
+    try {
+      await fetch(`/api/chat/swarms/agents/${encodeURIComponent(agentId)}/cancel`, {
+        method: "POST"
+      });
+      if (activeId) void loadSwarmRuns(activeId);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to cancel swarm worker");
+    }
   };
 
   const startPaneResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1164,11 +1241,68 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
               name: String(data.name ?? ""),
               arguments: (data.arguments as Record<string, unknown>) ?? {},
               exec_node: String(data.exec_node ?? ""),
-              sandbox: (data.sandbox as string | null) ?? null
+              sandbox: (data.sandbox as string | null) ?? null,
+              swarm_agent_id: (data.swarm_agent_id as string | null) ?? null,
+              swarm_role: (data.swarm_role as string | null) ?? null
             };
             setPendingApprovals((prev) => ({ ...prev, [appr.tool_call_id]: appr }));
             setAgentStatus((prev) =>
               prev ? { ...prev, phase: "approval", toolName: appr.name } : prev
+            );
+          } else if (event === "swarm_run_started") {
+            const run = data as unknown as SwarmRunRecord;
+            setSwarmRuns((prev) => [...prev.filter((r) => r.id !== run.id), run]);
+          } else if (event === "swarm_agent_update") {
+            const ag = data as unknown as SwarmAgentRecord;
+            setSwarmRuns((prev) =>
+              prev.map((r) =>
+                r.id === ag.run_id
+                  ? {
+                      ...r,
+                      agents: r.agents.some((x) => x.id === ag.id)
+                        ? r.agents.map((x) => (x.id === ag.id ? ag : x))
+                        : [...r.agents, ag]
+                    }
+                  : r
+              )
+            );
+            if (ag.status === "done" || ag.status === "error" || ag.status === "cancelled") {
+              setSwarmLiveText((prev) => {
+                const next = { ...prev };
+                delete next[ag.id];
+                return next;
+              });
+              setSwarmLiveReasoning((prev) => {
+                const next = { ...prev };
+                delete next[ag.id];
+                return next;
+              });
+              if (inspectedSwarm?.agentId === ag.id) {
+                void loadSwarmWorkerMessages(ag.id);
+              }
+            }
+          } else if (event === "swarm_agent_token") {
+            const aid = String(data.agent_id ?? "");
+            const kind = String(data.kind ?? "token");
+            const txt = String(data.text ?? "");
+            if (kind === "reasoning") {
+              setSwarmLiveReasoning((prev) => ({ ...prev, [aid]: (prev[aid] ?? "") + txt }));
+            } else {
+              setSwarmLiveText((prev) => ({ ...prev, [aid]: (prev[aid] ?? "") + txt }));
+            }
+          } else if (event === "swarm_agent_tool") {
+            const aid = String(data.agent_id ?? "");
+            if (inspectedSwarm?.agentId === aid) {
+              void loadSwarmWorkerMessages(aid);
+            }
+          } else if (event === "swarm_run_done") {
+            const rid = String(data.run_id ?? "");
+            const st = String(data.status ?? "done") as SwarmRunRecord["status"];
+            const ags = (data.agents as SwarmAgentRecord[] | undefined) ?? undefined;
+            setSwarmRuns((prev) =>
+              prev.map((r) =>
+                r.id === rid ? { ...r, status: st, agents: ags ?? r.agents } : r
+              )
             );
           } else if (event === "tool_result") {
             const tcId = String(data.id ?? "");
@@ -1215,6 +1349,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
       }
 
       await loadMessages(targetId);
+      await loadSwarmRuns(targetId);
       await loadConversations(false);
       if (
         completionNotifications &&
@@ -1500,7 +1635,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
     textareaRef.current?.focus();
   };
 
-  const rightPaneOpen = Boolean(inspectedArtifact || workspaceInspect);
+  const rightPaneOpen = Boolean(inspectedArtifact || workspaceInspect || inspectedSwarm);
 
   return (
     <div
@@ -1656,6 +1791,38 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
 
             <label
               className="toolbar-switch"
+              title="Enable multi-agent swarm delegation across cluster nodes"
+            >
+              <span>Swarm</span>
+              <input
+                type="checkbox"
+                {...({ switch: "" } as Record<string, string>)}
+                checked={effectiveConfig.swarm_enabled}
+                disabled={streaming}
+                onChange={(e) => updateConfig({ swarm_enabled: e.target.checked })}
+              />
+            </label>
+
+            {swarmRuns.length > 0 && (
+              <button
+                type="button"
+                className="btn btn--sm btn--ghost"
+                onClick={() => {
+                  const lastRun = swarmRuns[swarmRuns.length - 1];
+                  const firstAgent = lastRun?.agents[0];
+                  if (lastRun) {
+                    handleInspectSwarmAgent(lastRun.id, firstAgent?.id ?? "");
+                  }
+                }}
+                title="Open Swarm Inspector"
+                aria-label="Open Swarm Inspector"
+              >
+                <Network size={13} aria-hidden="true" />
+              </button>
+            )}
+
+            <label
+              className="toolbar-switch"
               title="Skip approval prompts for write_file & run_command"
             >
               <span>Auto-Approve</span>
@@ -1719,6 +1886,10 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           regenerateFromAssistant={regenerateFromAssistant}
           clearCompaction={clearCompaction}
           onContinueTurn={() => void sendPrompt("Continue", [])}
+          swarmRuns={swarmRuns}
+          inspectedSwarmAgentId={inspectedSwarm?.agentId ?? null}
+          onInspectSwarmAgent={handleInspectSwarmAgent}
+          onCancelSwarmAgent={handleCancelSwarmAgent}
         />
 
         <ChatComposer
@@ -1776,7 +1947,23 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
               }
             }}
           />
-          {workspaceInspect ? (
+          {inspectedSwarm ? (
+            <SwarmInspectorPane
+              runs={swarmRuns}
+              selectedRunId={inspectedSwarm.runId}
+              selectedAgentId={inspectedSwarm.agentId}
+              workerMessages={swarmWorkerMsgs}
+              liveStreamText={
+                inspectedSwarm.agentId ? (swarmLiveText[inspectedSwarm.agentId] ?? "") : ""
+              }
+              liveReasoningText={
+                inspectedSwarm.agentId ? (swarmLiveReasoning[inspectedSwarm.agentId] ?? "") : ""
+              }
+              onSelectAgent={(rid, aid) => setInspectedSwarm({ runId: rid, agentId: aid })}
+              onCancelAgent={handleCancelSwarmAgent}
+              onClose={() => setInspectedSwarm(null)}
+            />
+          ) : workspaceInspect ? (
             <WorkspaceViewerPane
               target={workspaceInspect}
               onAttachPath={attachWorkspacePath}

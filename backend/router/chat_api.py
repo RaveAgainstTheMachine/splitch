@@ -32,12 +32,14 @@ from backend.router.chat_mcp import (
 from backend.router.chat_store import (
     APPROVAL_REQUIRED_TOOLS,
     MEDIA_TOOLS_SCHEMA,
+    SWARM_TOOLS_SCHEMA,
     WORKSPACE_TOOLS_SCHEMA,
     ChatStore,
 )
 from backend.router.mcp_api import annotate_mcp_egress
 from backend.router.media_api import MediaService
 from backend.router.policy import resolve_route
+from backend.router.swarm import SwarmManager
 from backend.router.telemetry import ClusterState
 from backend.router.web_search import WEB_TOOLS_SCHEMA, execute_web_fetch, execute_web_search
 from backend.shared.models import (
@@ -55,6 +57,8 @@ from backend.shared.models import (
     MediaGenerateRequest,
     ScopedExtensionsConfig,
     ScopeRule,
+    SwarmRunRecord,
+    SwarmWorkerMessage,
     TraceEntry,
     WorkspaceScopeUpdate,
 )
@@ -143,6 +147,14 @@ def build_chat_router(
     store = ChatStore(data_dir / "chats.db")
     scopes_file = data_dir / "workspace_scopes.json"
     pending_approvals: dict[str, asyncio.Future[bool]] = {}
+    swarm_mgr = SwarmManager(
+        cluster,
+        store,
+        pending_approvals,
+        _requires_tool_approval,
+        _adjust_reasoning_effort_on_error,
+        _call_mcp_tool,
+    )
 
     def _norm_ws_key(subpath: str) -> str:
         return subpath.strip().strip("/") or "."
@@ -267,7 +279,24 @@ def build_chat_router(
 
     @router.post("/conversations", response_model=ConversationSummary)
     async def create_conversation(req: ConversationCreate) -> ConversationSummary:
+        if req.swarm_enabled is None:
+            req = req.model_copy(update={"swarm_enabled": len(cluster.nodes) > 1})
         return await asyncio.to_thread(store.create_conversation, req)
+
+    @router.get("/conversations/{conv_id}/swarms", response_model=list[SwarmRunRecord])
+    async def list_conversation_swarms(conv_id: str) -> list[SwarmRunRecord]:
+        return await asyncio.to_thread(store.list_swarm_runs, conv_id)
+
+    @router.get("/swarms/agents/{agent_id}/messages", response_model=list[SwarmWorkerMessage])
+    async def list_swarm_agent_messages(agent_id: str) -> list[SwarmWorkerMessage]:
+        return await asyncio.to_thread(store.list_swarm_agent_messages, agent_id)
+
+    @router.post("/swarms/agents/{agent_id}/cancel")
+    async def cancel_swarm_agent(agent_id: str) -> dict:
+        rec = await swarm_mgr.cancel_agent(agent_id)
+        if not rec:
+            raise HTTPException(status_code=404, detail="Swarm agent not found")
+        return {"ok": True, "agent": rec.model_dump()}
 
     @router.post("/conversations/bulk-delete", response_model=ConversationBulkResponse)
     async def bulk_delete_conversations(
@@ -608,18 +637,26 @@ def build_chat_router(
 
             mcp_map = await asyncio.to_thread(_load_mcp_configs, eff_mcps)
             tools_payload: list[dict[str, Any]] = []
+            mcp_tools_only: list[dict[str, Any]] = []
             if active_conv.tools_enabled:
                 tools_payload.extend(WORKSPACE_TOOLS_SCHEMA)
                 for srv in mcp_map.values():
-                    tools_payload.extend(
-                        await _fetch_mcp_tools(
-                            srv, active_conv.workspace_subpath, vault=cluster.vault
-                        )
+                    srv_tools = await _fetch_mcp_tools(
+                        srv, active_conv.workspace_subpath, vault=cluster.vault
                     )
+                    mcp_tools_only.extend(srv_tools)
+                    tools_payload.extend(srv_tools)
             if active_conv.web_search_enabled:
                 tools_payload.extend(WEB_TOOLS_SCHEMA)
             if media_service is not None and media_service.has_healthy_backend():
                 tools_payload.extend(MEDIA_TOOLS_SCHEMA)
+            if active_conv.swarm_enabled:
+                tools_payload.extend(SWARM_TOOLS_SCHEMA)
+                sys_parts.append(
+                    "Swarm orchestration is enabled. For multi-part tasks that benefit from parallel "
+                    "research, review, or multi-node execution, call `spawn_agent` to launch focused "
+                    "workers (default `readonly=true`) and `wait_agents` to collect their results."
+                )
 
             history_records = [
                 m for m in all_history if m.created_at > active_conv.compacted_through_ts
@@ -651,292 +688,521 @@ def build_chat_router(
                         }
                     )
 
+            active_swarm_run: SwarmRunRecord | None = None
+
+            def _drain_swarm(run_id: str) -> list[bytes]:
+                q = swarm_mgr.get_queue(run_id)
+                out: list[bytes] = []
+                while not q.empty():
+                    ev, pl = q.get_nowait()
+                    out.append(_sse(ev, pl))
+                return out
+
             max_rounds = max(1, min(32, int(cluster.config.router.max_agent_steps)))
-            for _round in range(max_rounds):
-                req_body: dict[str, Any] = {
-                    "model": conv.model,
-                    "messages": openai_msgs,
-                    "stream": True,
-                    "stream_options": {"include_usage": True},
-                }
-                if req.temperature is not None:
-                    req_body["temperature"] = req.temperature
-                if req.top_p is not None:
-                    req_body["top_p"] = req.top_p
-                if req.top_k is not None:
-                    req_body["top_k"] = req.top_k
-                if req.min_p is not None:
-                    req_body["min_p"] = req.min_p
-                if req.repeat_penalty is not None:
-                    req_body["repeat_penalty"] = req.repeat_penalty
-                if req.max_tokens is not None:
-                    req_body["max_tokens"] = req.max_tokens
-                if req.seed is not None:
-                    req_body["seed"] = req.seed
-                if req.stop:
-                    req_body["stop"] = req.stop
-                if req.reasoning_effort is not None:
-                    req_body["reasoning_effort"] = (
-                        "none" if req.reasoning_effort == "off" else req.reasoning_effort
-                    )
-                if req.enable_thinking is not None:
-                    req_body["chat_template_kwargs"] = {"enable_thinking": req.enable_thinking}
-                if tools_payload:
-                    req_body["tools"] = tools_payload
+            try:
+                for _round in range(max_rounds):
+                    req_body: dict[str, Any] = {
+                        "model": conv.model,
+                        "messages": openai_msgs,
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                    }
+                    if req.temperature is not None:
+                        req_body["temperature"] = req.temperature
+                    if req.top_p is not None:
+                        req_body["top_p"] = req.top_p
+                    if req.top_k is not None:
+                        req_body["top_k"] = req.top_k
+                    if req.min_p is not None:
+                        req_body["min_p"] = req.min_p
+                    if req.repeat_penalty is not None:
+                        req_body["repeat_penalty"] = req.repeat_penalty
+                    if req.max_tokens is not None:
+                        req_body["max_tokens"] = req.max_tokens
+                    if req.seed is not None:
+                        req_body["seed"] = req.seed
+                    if req.stop:
+                        req_body["stop"] = req.stop
+                    if req.reasoning_effort is not None:
+                        req_body["reasoning_effort"] = (
+                            "none" if req.reasoning_effort == "off" else req.reasoning_effort
+                        )
+                    if req.enable_thinking is not None:
+                        req_body["chat_template_kwargs"] = {"enable_thinking": req.enable_thinking}
+                    if tools_payload:
+                        req_body["tools"] = tools_payload
 
-                decision, skip_reasons = resolve_route(
-                    endpoint="/v1/chat/completions",
-                    requested_model=conv.model,
-                    body=req_body,
-                    nodes=cluster.nodes,
-                    aliases=cluster.aliases,
-                    control=cluster.control,
-                    guards=cluster.config.guards,
-                    heavy_char_threshold=cluster.config.router.auto_heavy_char_threshold,
-                )
-                if decision is None:
+                    decision, skip_reasons = resolve_route(
+                        endpoint="/v1/chat/completions",
+                        requested_model=conv.model,
+                        body=req_body,
+                        nodes=cluster.nodes,
+                        aliases=cluster.aliases,
+                        control=cluster.control,
+                        guards=cluster.config.guards,
+                        heavy_char_threshold=cluster.config.router.auto_heavy_char_threshold,
+                    )
+                    if decision is None:
+                        yield _sse(
+                            "error",
+                            {"message": f"No eligible Splitch node available: {skip_reasons}"},
+                        )
+                        return
+
+                    req_body["model"] = decision.target_model
                     yield _sse(
-                        "error",
-                        {"message": f"No eligible Splitch node available: {skip_reasons}"},
+                        "meta",
+                        {
+                            "node": decision.node.node_id,
+                            "model": decision.target_model,
+                            "fallback_reason": decision.fallback_reason,
+                            "round": _round + 1,
+                            "max_rounds": max_rounds,
+                        },
                     )
-                    return
 
-                req_body["model"] = decision.target_model
-                yield _sse(
-                    "meta",
-                    {
+                    started = time.perf_counter()
+                    ttft_ms: float | None = None
+                    content_buf: list[str] = []
+                    reasoning_buf: list[str] = []
+                    tool_calls_acc: dict[int, dict[str, Any]] = {}
+                    approx_tokens = 0
+                    prompt_tokens_real: int | None = None
+                    completion_tokens_real: int | None = None
+                    total_tokens_real: int | None = None
+                    status_code = 200
+
+                    decision.node.in_flight += 1
+                    try:
+                        for attempt in range(2):
+                            async with cluster.proxy_client.stream(
+                                "POST",
+                                f"{decision.node.engine_url}/v1/chat/completions",
+                                json=req_body,
+                            ) as upstream:
+                                status_code = upstream.status_code
+                                if status_code >= 400:
+                                    err_body = (await upstream.aread()).decode(
+                                        "utf-8", errors="replace"
+                                    )[:400]
+                                    if attempt == 0:
+                                        retry_body = _adjust_reasoning_effort_on_error(
+                                            req_body, err_body
+                                        )
+                                        if retry_body is not None:
+                                            req_body = retry_body
+                                            continue
+                                    yield _sse(
+                                        "error", {"message": f"Upstream HTTP {status_code}: {err_body}"}
+                                    )
+                                    return
+
+                                async for line in upstream.aiter_lines():
+                                    if not line.startswith("data: "):
+                                        continue
+                                    raw_data = line[6:].strip()
+                                    if not raw_data or raw_data == "[DONE]":
+                                        continue
+                                    try:
+                                        chunk = json.loads(raw_data)
+                                    except ValueError:
+                                        continue
+
+                                    usage = chunk.get("usage")
+                                    if isinstance(usage, dict):
+                                        if isinstance(usage.get("prompt_tokens"), int):
+                                            prompt_tokens_real = usage["prompt_tokens"]
+                                        if isinstance(usage.get("completion_tokens"), int):
+                                            completion_tokens_real = usage["completion_tokens"]
+                                        if isinstance(usage.get("total_tokens"), int):
+                                            total_tokens_real = usage["total_tokens"]
+
+                                    choices = chunk.get("choices") or []
+                                    if not choices:
+                                        continue
+                                    delta = choices[0].get("delta") or {}
+
+                                    rc = delta.get("reasoning_content")
+                                    if rc:
+                                        if ttft_ms is None:
+                                            ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
+                                        approx_tokens += 1
+                                        reasoning_buf.append(rc)
+                                        yield _sse("reasoning", {"text": rc})
+
+                                    txt = delta.get("content")
+                                    if txt:
+                                        if ttft_ms is None:
+                                            ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
+                                        approx_tokens += 1
+                                        content_buf.append(txt)
+                                        yield _sse("token", {"text": txt})
+
+                                    for tc in delta.get("tool_calls") or []:
+                                        if not isinstance(tc, dict):
+                                            continue
+                                        idx = int(tc.get("index", 0))
+                                        slot = tool_calls_acc.setdefault(
+                                            idx,
+                                            {
+                                                "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
+                                                "type": "function",
+                                                "function": {"name": "", "arguments": ""},
+                                            },
+                                        )
+                                        if tc.get("id"):
+                                            slot["id"] = tc["id"]
+                                        fn = tc.get("function") or {}
+                                        if fn.get("name"):
+                                            slot["function"]["name"] += fn["name"]
+                                        if fn.get("arguments"):
+                                            slot["function"]["arguments"] += fn["arguments"]
+                                break
+                    except httpx.HTTPError as exc:
+                        yield _sse("error", {"message": f"Stream error: {exc}"})
+                        return
+                    finally:
+                        decision.node.in_flight = max(0, decision.node.in_flight - 1)
+
+                    elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
+                    final_comp_tokens = (
+                        completion_tokens_real if completion_tokens_real is not None else approx_tokens
+                    )
+                    est_prompt_tokens = max(1, len(json.dumps(openai_msgs)) // 4)
+                    final_prompt_tokens = (
+                        prompt_tokens_real if prompt_tokens_real is not None else est_prompt_tokens
+                    )
+                    final_total_tokens = (
+                        total_tokens_real
+                        if total_tokens_real is not None
+                        else (final_prompt_tokens + final_comp_tokens)
+                    )
+                    ctx_window = (
+                        decision.node.telemetry.context_length
+                        if decision.node.telemetry and decision.node.telemetry.context_length
+                        else 32768
+                    )
+                    gen_s = max(0.001, (elapsed_ms - (ttft_ms or 0.0)) / 1000.0)
+                    tps = round(final_comp_tokens / gen_s, 1) if final_comp_tokens > 0 else None
+
+                    asyncio.create_task(
+                        cluster.record_trace(
+                            TraceEntry(
+                                id=uuid.uuid4().hex[:10],
+                                timestamp=time.time(),
+                                endpoint="/api/chat/send",
+                                requested_model=conv.model,
+                                resolved_node=decision.node.node_id,
+                                resolved_model=decision.target_model,
+                                fallback_reason=decision.fallback_reason,
+                                status_code=status_code,
+                                stream=True,
+                                ttft_ms=ttft_ms,
+                                duration_ms=elapsed_ms,
+                                completion_tokens=final_comp_tokens,
+                                tokens_per_sec=tps,
+                            )
+                        )
+                    )
+
+                    assembled_tools = [tool_calls_acc[k] for k in sorted(tool_calls_acc.keys())]
+                    assistant_meta: dict[str, Any] = {
                         "node": decision.node.node_id,
                         "model": decision.target_model,
                         "fallback_reason": decision.fallback_reason,
-                        "round": _round + 1,
-                        "max_rounds": max_rounds,
-                    },
-                )
-
-                started = time.perf_counter()
-                ttft_ms: float | None = None
-                content_buf: list[str] = []
-                reasoning_buf: list[str] = []
-                tool_calls_acc: dict[int, dict[str, Any]] = {}
-                approx_tokens = 0
-                prompt_tokens_real: int | None = None
-                completion_tokens_real: int | None = None
-                total_tokens_real: int | None = None
-                status_code = 200
-
-                decision.node.in_flight += 1
-                try:
-                    for attempt in range(2):
-                        async with cluster.proxy_client.stream(
-                            "POST",
-                            f"{decision.node.engine_url}/v1/chat/completions",
-                            json=req_body,
-                        ) as upstream:
-                            status_code = upstream.status_code
-                            if status_code >= 400:
-                                err_body = (await upstream.aread()).decode(
-                                    "utf-8", errors="replace"
-                                )[:400]
-                                if attempt == 0:
-                                    retry_body = _adjust_reasoning_effort_on_error(
-                                        req_body, err_body
-                                    )
-                                    if retry_body is not None:
-                                        req_body = retry_body
-                                        continue
-                                yield _sse(
-                                    "error", {"message": f"Upstream HTTP {status_code}: {err_body}"}
-                                )
-                                return
-
-                            async for line in upstream.aiter_lines():
-                                if not line.startswith("data: "):
-                                    continue
-                                raw_data = line[6:].strip()
-                                if not raw_data or raw_data == "[DONE]":
-                                    continue
-                                try:
-                                    chunk = json.loads(raw_data)
-                                except ValueError:
-                                    continue
-
-                                usage = chunk.get("usage")
-                                if isinstance(usage, dict):
-                                    if isinstance(usage.get("prompt_tokens"), int):
-                                        prompt_tokens_real = usage["prompt_tokens"]
-                                    if isinstance(usage.get("completion_tokens"), int):
-                                        completion_tokens_real = usage["completion_tokens"]
-                                    if isinstance(usage.get("total_tokens"), int):
-                                        total_tokens_real = usage["total_tokens"]
-
-                                choices = chunk.get("choices") or []
-                                if not choices:
-                                    continue
-                                delta = choices[0].get("delta") or {}
-
-                                rc = delta.get("reasoning_content")
-                                if rc:
-                                    if ttft_ms is None:
-                                        ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
-                                    approx_tokens += 1
-                                    reasoning_buf.append(rc)
-                                    yield _sse("reasoning", {"text": rc})
-
-                                txt = delta.get("content")
-                                if txt:
-                                    if ttft_ms is None:
-                                        ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
-                                    approx_tokens += 1
-                                    content_buf.append(txt)
-                                    yield _sse("token", {"text": txt})
-
-                                for tc in delta.get("tool_calls") or []:
-                                    if not isinstance(tc, dict):
-                                        continue
-                                    idx = int(tc.get("index", 0))
-                                    slot = tool_calls_acc.setdefault(
-                                        idx,
-                                        {
-                                            "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
-                                            "type": "function",
-                                            "function": {"name": "", "arguments": ""},
-                                        },
-                                    )
-                                    if tc.get("id"):
-                                        slot["id"] = tc["id"]
-                                    fn = tc.get("function") or {}
-                                    if fn.get("name"):
-                                        slot["function"]["name"] += fn["name"]
-                                    if fn.get("arguments"):
-                                        slot["function"]["arguments"] += fn["arguments"]
-                            break
-                except httpx.HTTPError as exc:
-                    yield _sse("error", {"message": f"Stream error: {exc}"})
-                    return
-                finally:
-                    decision.node.in_flight = max(0, decision.node.in_flight - 1)
-
-                elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
-                final_comp_tokens = (
-                    completion_tokens_real if completion_tokens_real is not None else approx_tokens
-                )
-                est_prompt_tokens = max(1, len(json.dumps(openai_msgs)) // 4)
-                final_prompt_tokens = (
-                    prompt_tokens_real if prompt_tokens_real is not None else est_prompt_tokens
-                )
-                final_total_tokens = (
-                    total_tokens_real
-                    if total_tokens_real is not None
-                    else (final_prompt_tokens + final_comp_tokens)
-                )
-                ctx_window = (
-                    decision.node.telemetry.context_length
-                    if decision.node.telemetry and decision.node.telemetry.context_length
-                    else 32768
-                )
-                gen_s = max(0.001, (elapsed_ms - (ttft_ms or 0.0)) / 1000.0)
-                tps = round(final_comp_tokens / gen_s, 1) if final_comp_tokens > 0 else None
-
-                asyncio.create_task(
-                    cluster.record_trace(
-                        TraceEntry(
-                            id=uuid.uuid4().hex[:10],
-                            timestamp=time.time(),
-                            endpoint="/api/chat/send",
-                            requested_model=conv.model,
-                            resolved_node=decision.node.node_id,
-                            resolved_model=decision.target_model,
-                            fallback_reason=decision.fallback_reason,
-                            status_code=status_code,
-                            stream=True,
-                            ttft_ms=ttft_ms,
-                            duration_ms=elapsed_ms,
-                            completion_tokens=final_comp_tokens,
-                            tokens_per_sec=tps,
-                        )
-                    )
-                )
-
-                assembled_tools = [tool_calls_acc[k] for k in sorted(tool_calls_acc.keys())]
-                assistant_meta: dict[str, Any] = {
-                    "node": decision.node.node_id,
-                    "model": decision.target_model,
-                    "fallback_reason": decision.fallback_reason,
-                    "ttft_ms": ttft_ms,
-                    "duration_ms": elapsed_ms,
-                    "tokens_per_sec": tps,
-                    "prompt_tokens": final_prompt_tokens,
-                    "completion_tokens": final_comp_tokens,
-                    "total_tokens": final_total_tokens,
-                    "context_window": ctx_window,
-                }
-                if assembled_tools and _round == max_rounds - 1:
-                    assistant_meta["max_rounds_reached"] = True
-                    assistant_meta["steps_used"] = max_rounds
-                    assistant_meta["max_steps"] = max_rounds
-                asst_msg = ChatMessageRecord(
-                    id=uuid.uuid4().hex[:12],
-                    conversation_id=conv_id,
-                    role="assistant",
-                    content="".join(content_buf),
-                    reasoning="".join(reasoning_buf),
-                    tool_calls=assembled_tools,
-                    meta=assistant_meta,
-                    created_at=time.time(),
-                )
-                await asyncio.to_thread(store.add_message, asst_msg)
-
-                if not assembled_tools:
-                    yield _sse("done", {"message": asst_msg.model_dump()})
-                    return
-
-                # Execute native tool calls and loop back to model
-                openai_msgs.append(
-                    {
-                        "role": "assistant",
-                        "content": asst_msg.content or None,
-                        "tool_calls": assembled_tools,
+                        "ttft_ms": ttft_ms,
+                        "duration_ms": elapsed_ms,
+                        "tokens_per_sec": tps,
+                        "prompt_tokens": final_prompt_tokens,
+                        "completion_tokens": final_comp_tokens,
+                        "total_tokens": final_total_tokens,
+                        "context_window": ctx_window,
                     }
-                )
-
-                for tc in assembled_tools:
-                    t_id = tc["id"]
-                    t_name = tc["function"]["name"]
-                    raw_args = tc["function"]["arguments"]
-                    try:
-                        parsed_args = json.loads(raw_args) if raw_args else {}
-                    except ValueError:
-                        parsed_args = {}
-
-                    yield _sse("tool_call", {"id": t_id, "name": t_name, "arguments": parsed_args})
-
-                    is_external_mcp = False
-                    external_mcp_target: str | None = None
-                    if t_name.startswith("mcp__"):
-                        _m_parts = t_name.split("__", 2)
-                        _m_srv = mcp_map.get(_m_parts[1] if len(_m_parts) == 3 else "")
-                        if _m_srv and _m_srv.egress != "local":
-                            is_external_mcp = True
-                            external_mcp_target = _m_srv.egress_target or _m_srv.url or _m_srv.id
-
-                    needs_approval = _requires_tool_approval(
-                        t_name,
-                        parsed_args,
-                        is_external_mcp=is_external_mcp,
-                        conv_auto_approve=conv.auto_approve,
-                        router_cfg=cluster.config.router,
+                    if assembled_tools and _round == max_rounds - 1:
+                        assistant_meta["max_rounds_reached"] = True
+                        assistant_meta["steps_used"] = max_rounds
+                        assistant_meta["max_steps"] = max_rounds
+                    asst_msg = ChatMessageRecord(
+                        id=uuid.uuid4().hex[:12],
+                        conversation_id=conv_id,
+                        role="assistant",
+                        content="".join(content_buf),
+                        reasoning="".join(reasoning_buf),
+                        tool_calls=assembled_tools,
+                        meta=assistant_meta,
+                        created_at=time.time(),
                     )
-                    approved = True
-                    if needs_approval:
-                        approval_id = uuid.uuid4().hex[:10]
-                        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-                        pending_approvals[approval_id] = fut
-                        target_sandbox: str | None = None
-                        target_node_label = conv.exec_node
-                        if not is_external_mcp:
-                            preview_node = cluster.nodes.get(conv.exec_node) if conv.exec_node else None
-                            if preview_node is None or not preview_node.online:
-                                preview_node = next(
+                    await asyncio.to_thread(store.add_message, asst_msg)
+
+                    if not assembled_tools:
+                        if active_swarm_run is not None:
+                            await swarm_mgr.finish_run(active_swarm_run.id, "done")
+                            for pkt in _drain_swarm(active_swarm_run.id):
+                                yield pkt
+                            active_swarm_run = None
+                        yield _sse("done", {"message": asst_msg.model_dump()})
+                        return
+
+                    # Execute native tool calls and loop back to model
+                    openai_msgs.append(
+                        {
+                            "role": "assistant",
+                            "content": asst_msg.content or None,
+                            "tool_calls": assembled_tools,
+                        }
+                    )
+
+                    for tc in assembled_tools:
+                        t_id = tc["id"]
+                        t_name = tc["function"]["name"]
+                        raw_args = tc["function"]["arguments"]
+                        try:
+                            parsed_args = json.loads(raw_args) if raw_args else {}
+                        except ValueError:
+                            parsed_args = {}
+
+                        yield _sse("tool_call", {"id": t_id, "name": t_name, "arguments": parsed_args})
+
+                        is_external_mcp = False
+                        external_mcp_target: str | None = None
+                        if t_name.startswith("mcp__"):
+                            _m_parts = t_name.split("__", 2)
+                            _m_srv = mcp_map.get(_m_parts[1] if len(_m_parts) == 3 else "")
+                            if _m_srv and _m_srv.egress != "local":
+                                is_external_mcp = True
+                                external_mcp_target = _m_srv.egress_target or _m_srv.url or _m_srv.id
+
+                        needs_approval = _requires_tool_approval(
+                            t_name,
+                            parsed_args,
+                            is_external_mcp=is_external_mcp,
+                            conv_auto_approve=conv.auto_approve,
+                            router_cfg=cluster.config.router,
+                        )
+                        approved = True
+                        if needs_approval:
+                            approval_id = uuid.uuid4().hex[:10]
+                            fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+                            pending_approvals[approval_id] = fut
+                            target_sandbox: str | None = None
+                            target_node_label = conv.exec_node
+                            if not is_external_mcp:
+                                preview_node = cluster.nodes.get(conv.exec_node) if conv.exec_node else None
+                                if preview_node is None or not preview_node.online:
+                                    preview_node = next(
+                                        (
+                                            n
+                                            for n in cluster.nodes.values()
+                                            if n.online and n.telemetry and n.telemetry.tools_enabled
+                                        ),
+                                        next((n for n in cluster.nodes.values() if n.online), None),
+                                    )
+                                if preview_node is not None:
+                                    target_node_label = preview_node.node_id
+                                    if t_name == "run_command":
+                                        target_sandbox = (
+                                            (preview_node.telemetry.cmd_sandbox or "unknown")
+                                            if preview_node.telemetry
+                                            else "unknown"
+                                        )
+                            yield _sse(
+                                "approval_required",
+                                {
+                                    "approval_id": approval_id,
+                                    "tool_call_id": t_id,
+                                    "name": t_name,
+                                    "arguments": parsed_args,
+                                    "exec_node": (
+                                        f"EXTERNAL MCP ({external_mcp_target})"
+                                        if is_external_mcp
+                                        else target_node_label
+                                    ),
+                                    "sandbox": target_sandbox,
+                                },
+                            )
+                            try:
+                                approved = await asyncio.wait_for(fut, timeout=300.0)
+                            except TimeoutError:
+                                approved = False
+                            finally:
+                                pending_approvals.pop(approval_id, None)
+
+                        tool_diff: str | None = None
+                        tool_verification: dict | None = None
+                        tool_sandbox: str | None = None
+                        tool_media_url: str | None = None
+                        tool_media_kind: str | None = None
+                        if not approved:
+                            tool_output = "Tool execution denied by user."
+                            tool_ok = False
+                        elif t_name == "web_search":
+                            tool_ok, tool_output = await execute_web_search(
+                                str(parsed_args.get("query", "")),
+                                int(parsed_args.get("max_results") or 6),
+                            )
+                        elif t_name == "web_fetch":
+                            tool_ok, tool_output = await execute_web_fetch(
+                                str(parsed_args.get("url", ""))
+                            )
+                        elif t_name == "spawn_agent":
+                            if not active_conv.swarm_enabled:
+                                tool_ok = False
+                                tool_output = "Swarm orchestration is disabled for this conversation."
+                            else:
+                                if active_swarm_run is None:
+                                    active_swarm_run = await swarm_mgr.start_run(active_conv)
+                                    for pkt in _drain_swarm(active_swarm_run.id):
+                                        yield pkt
+                                w_agent = await swarm_mgr.spawn_worker(
+                                    run_id=active_swarm_run.id,
+                                    conv=active_conv,
+                                    role=str(parsed_args.get("role") or "Worker"),
+                                    task=str(parsed_args.get("task") or ""),
+                                    model=str(parsed_args.get("model") or "auto"),
+                                    node_id=str(parsed_args.get("node_id") or ""),
+                                    readonly=bool(parsed_args.get("readonly", True)),
+                                    mcp_map=mcp_map,
+                                    mcp_tools=mcp_tools_only,
+                                )
+                                for pkt in _drain_swarm(active_swarm_run.id):
+                                    yield pkt
+                                tool_ok = True
+                                tool_output = json.dumps(
+                                    {
+                                        "ok": True,
+                                        "run_id": active_swarm_run.id,
+                                        "agent_id": w_agent.id,
+                                        "role": w_agent.role,
+                                        "status": w_agent.status,
+                                    }
+                                )
+                        elif t_name == "wait_agents":
+                            if active_swarm_run is None:
+                                tool_ok = False
+                                tool_output = "No active swarm run in this turn."
+                            else:
+                                raw_ids = parsed_args.get("agent_ids")
+                                id_list = [str(x) for x in raw_ids] if isinstance(raw_ids, list) else None
+                                timeout_s = float(parsed_args.get("timeout_s") or 180.0)
+                                wait_task = asyncio.create_task(
+                                    swarm_mgr.wait_agents(
+                                        active_swarm_run.id, agent_ids=id_list, timeout_s=timeout_s
+                                    )
+                                )
+                                q_swarm = swarm_mgr.get_queue(active_swarm_run.id)
+                                while not wait_task.done():
+                                    try:
+                                        ev, pl = await asyncio.wait_for(q_swarm.get(), timeout=0.15)
+                                        yield _sse(ev, pl)
+                                    except TimeoutError:
+                                        continue
+                                for pkt in _drain_swarm(active_swarm_run.id):
+                                    yield pkt
+                                finished_agents = await wait_task
+                                tool_ok = True
+                                tool_output = json.dumps(
+                                    [
+                                        {
+                                            "agent_id": a.id,
+                                            "role": a.role,
+                                            "status": a.status,
+                                            "node_id": a.node_id,
+                                            "model": a.model,
+                                            "result": a.result,
+                                            "error": a.error,
+                                        }
+                                        for a in finished_agents
+                                    ]
+                                )
+                        elif t_name == "list_agents":
+                            if active_swarm_run is None:
+                                tool_ok = True
+                                tool_output = "[]"
+                            else:
+                                cur_agents = await asyncio.to_thread(
+                                    store.list_swarm_agents, active_swarm_run.id
+                                )
+                                tool_ok = True
+                                tool_output = json.dumps([a.model_dump() for a in cur_agents])
+                        elif t_name == "cancel_agent":
+                            aid = str(parsed_args.get("agent_id") or "")
+                            c_agent = await swarm_mgr.cancel_agent(aid)
+                            if active_swarm_run is not None:
+                                for pkt in _drain_swarm(active_swarm_run.id):
+                                    yield pkt
+                            tool_ok = c_agent is not None
+                            tool_output = (
+                                json.dumps({"ok": True, "agent_id": aid, "status": c_agent.status})
+                                if c_agent
+                                else f"Swarm agent '{aid}' not found."
+                            )
+                        elif t_name in ("generate_image", "generate_video"):
+                            if media_service is None:
+                                tool_ok = False
+                                tool_output = "Media generation service is not configured."
+                            else:
+                                is_vid = t_name == "generate_video"
+                                try:
+                                    m_job = await media_service.generate_sync(
+                                        MediaGenerateRequest(
+                                            kind="video" if is_vid else "image",
+                                            prompt=str(parsed_args.get("prompt", "")),
+                                            negative_prompt=str(parsed_args.get("negative_prompt", "")),
+                                            model=str(parsed_args.get("model", "")),
+                                            width=int(parsed_args.get("width") or (768 if is_vid else 1024)),
+                                            height=int(parsed_args.get("height") or (512 if is_vid else 1024)),
+                                            steps=int(parsed_args.get("steps") or 20),
+                                            frames=int(parsed_args.get("frames") or 16),
+                                            fps=int(parsed_args.get("fps") or 8),
+                                        )
+                                    )
+                                    if m_job.status == "completed" and m_job.file_url:
+                                        tool_ok = True
+                                        tool_media_url = m_job.file_url
+                                        tool_media_kind = m_job.kind
+                                        tool_output = json.dumps(
+                                            {
+                                                "ok": True,
+                                                "kind": m_job.kind,
+                                                "url": m_job.file_url,
+                                                "node": m_job.node_id,
+                                                "engine": m_job.media_engine,
+                                                "model": m_job.model,
+                                                "seed": m_job.seed,
+                                                "size": f"{m_job.width}x{m_job.height}",
+                                                "duration_ms": m_job.duration_ms,
+                                            }
+                                        )
+                                    else:
+                                        tool_ok = False
+                                        tool_output = f"Media generation failed: {m_job.error or 'unknown error'}"
+                                except HTTPException as exc:
+                                    tool_ok = False
+                                    tool_output = f"Media generation unavailable: {exc.detail}"
+                                except (httpx.HTTPError, OSError, RuntimeError, ValueError, TypeError) as exc:
+                                    tool_ok = False
+                                    tool_output = f"Media generation error: {exc}"
+                        elif t_name.startswith("mcp__"):
+                            parts = t_name.split("__", 2)
+                            srv_id = parts[1] if len(parts) == 3 else ""
+                            real_tool = parts[2] if len(parts) == 3 else t_name
+                            srv_cfg = mcp_map.get(srv_id)
+                            if not srv_cfg:
+                                tool_output = f"MCP server '{srv_id}' not enabled for this chat."
+                                tool_ok = False
+                            else:
+                                tool_output = await _call_mcp_tool(
+                                    srv_cfg,
+                                    real_tool,
+                                    parsed_args,
+                                    active_conv.workspace_subpath,
+                                    vault=cluster.vault,
+                                )
+                                tool_ok = not tool_output.startswith("MCP error:")
+                        else:
+                            exec_node = cluster.nodes.get(conv.exec_node) if conv.exec_node else None
+                            if exec_node is None or not exec_node.online:
+                                exec_node = next(
                                     (
                                         n
                                         for n in cluster.nodes.values()
@@ -944,229 +1210,116 @@ def build_chat_router(
                                     ),
                                     next((n for n in cluster.nodes.values() if n.online), None),
                                 )
-                            if preview_node is not None:
-                                target_node_label = preview_node.node_id
-                                if t_name == "run_command":
-                                    target_sandbox = (
-                                        (preview_node.telemetry.cmd_sandbox or "unknown")
-                                        if preview_node.telemetry
-                                        else "unknown"
-                                    )
-                        yield _sse(
-                            "approval_required",
+                            if not exec_node or not exec_node.online:
+                                tool_output = f"Execution node '{conv.exec_node or 'auto'}' is offline."
+                                tool_ok = False
+                            else:
+                                try:
+                                    tool_headers: dict[str, str] = {
+                                        **cluster.agent_headers("POST", "/tools/execute"),
+                                        "X-Splitch-Router-Approved": "1",
+                                    }
+                                    if cluster.router_private_key is not None:
+                                        ts_hdr, sig_hdr = sign_tool_approval_ed25519(
+                                            cluster.router_private_key,
+                                            t_name,
+                                            parsed_args,
+                                            conv.workspace_subpath,
+                                        )
+                                        tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
+                                        tool_headers["X-Splitch-Approval-Sig"] = sig_hdr
+                                    elif cluster.agent_token:
+                                        ts_hdr, sig_hdr = sign_tool_approval(
+                                            cluster.agent_token,
+                                            t_name,
+                                            parsed_args,
+                                            conv.workspace_subpath,
+                                        )
+                                        tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
+                                        tool_headers["X-Splitch-Approval-Sig"] = sig_hdr
+                                    async with httpx.AsyncClient(
+                                        timeout=25.0,
+                                        headers=tool_headers,
+                                    ) as http:
+                                        r = await http.post(
+                                            f"{exec_node.agent_url}/tools/execute",
+                                            json={
+                                                "tool": t_name,
+                                                "arguments": parsed_args,
+                                                "workspace_subpath": conv.workspace_subpath,
+                                            },
+                                        )
+                                        if r.status_code == 200:
+                                            body = r.json()
+                                            tool_ok = bool(body.get("ok", False))
+                                            tool_output = str(body.get("output", ""))
+                                            tool_diff = body.get("diff")
+                                            tool_verification = body.get("verification")
+                                            tool_sandbox = body.get("sandbox")
+                                        else:
+                                            tool_ok = False
+                                            tool_output = f"HTTP {r.status_code}: {r.text[:300]}"
+                                except httpx.HTTPError as exc:
+                                    tool_ok = False
+                                    tool_output = f"Agent tool call failed: {exc}"
+
+                        tool_msg = ChatMessageRecord(
+                            id=uuid.uuid4().hex[:12],
+                            conversation_id=conv_id,
+                            role="tool",
+                            content=tool_output,
+                            tool_call_id=t_id,
+                            tool_name=t_name,
+                            meta={
+                                "ok": tool_ok,
+                                "diff": tool_diff,
+                                "verification": tool_verification,
+                                "sandbox": tool_sandbox,
+                                "media_url": tool_media_url,
+                                "media_kind": tool_media_kind,
+                            },
+                            created_at=time.time(),
+                        )
+                        await asyncio.to_thread(store.add_message, tool_msg)
+                        openai_msgs.append(
                             {
-                                "approval_id": approval_id,
+                                "role": "tool",
                                 "tool_call_id": t_id,
                                 "name": t_name,
-                                "arguments": parsed_args,
-                                "exec_node": (
-                                    f"EXTERNAL MCP ({external_mcp_target})"
-                                    if is_external_mcp
-                                    else target_node_label
-                                ),
-                                "sandbox": target_sandbox,
+                                "content": tool_output,
+                            }
+                        )
+                        yield _sse(
+                            "tool_result",
+                            {
+                                "id": t_id,
+                                "name": t_name,
+                                "ok": tool_ok,
+                                "output": tool_output,
+                                "diff": tool_diff,
+                                "verification": tool_verification,
+                                "sandbox": tool_sandbox,
+                                "media_url": tool_media_url,
+                                "media_kind": tool_media_kind,
                             },
                         )
-                        try:
-                            approved = await asyncio.wait_for(fut, timeout=300.0)
-                        except TimeoutError:
-                            approved = False
-                        finally:
-                            pending_approvals.pop(approval_id, None)
 
-                    tool_diff: str | None = None
-                    tool_verification: dict | None = None
-                    tool_sandbox: str | None = None
-                    tool_media_url: str | None = None
-                    tool_media_kind: str | None = None
-                    if not approved:
-                        tool_output = "Tool execution denied by user."
-                        tool_ok = False
-                    elif t_name == "web_search":
-                        tool_ok, tool_output = await execute_web_search(
-                            str(parsed_args.get("query", "")),
-                            int(parsed_args.get("max_results") or 6),
-                        )
-                    elif t_name == "web_fetch":
-                        tool_ok, tool_output = await execute_web_fetch(
-                            str(parsed_args.get("url", ""))
-                        )
-                    elif t_name in ("generate_image", "generate_video"):
-                        if media_service is None:
-                            tool_ok = False
-                            tool_output = "Media generation service is not configured."
-                        else:
-                            is_vid = t_name == "generate_video"
-                            try:
-                                m_job = await media_service.generate_sync(
-                                    MediaGenerateRequest(
-                                        kind="video" if is_vid else "image",
-                                        prompt=str(parsed_args.get("prompt", "")),
-                                        negative_prompt=str(parsed_args.get("negative_prompt", "")),
-                                        model=str(parsed_args.get("model", "")),
-                                        width=int(parsed_args.get("width") or (768 if is_vid else 1024)),
-                                        height=int(parsed_args.get("height") or (512 if is_vid else 1024)),
-                                        steps=int(parsed_args.get("steps") or 20),
-                                        frames=int(parsed_args.get("frames") or 16),
-                                        fps=int(parsed_args.get("fps") or 8),
-                                    )
-                                )
-                                if m_job.status == "completed" and m_job.file_url:
-                                    tool_ok = True
-                                    tool_media_url = m_job.file_url
-                                    tool_media_kind = m_job.kind
-                                    tool_output = json.dumps(
-                                        {
-                                            "ok": True,
-                                            "kind": m_job.kind,
-                                            "url": m_job.file_url,
-                                            "node": m_job.node_id,
-                                            "engine": m_job.media_engine,
-                                            "model": m_job.model,
-                                            "seed": m_job.seed,
-                                            "size": f"{m_job.width}x{m_job.height}",
-                                            "duration_ms": m_job.duration_ms,
-                                        }
-                                    )
-                                else:
-                                    tool_ok = False
-                                    tool_output = f"Media generation failed: {m_job.error or 'unknown error'}"
-                            except HTTPException as exc:
-                                tool_ok = False
-                                tool_output = f"Media generation unavailable: {exc.detail}"
-                            except (httpx.HTTPError, OSError, RuntimeError, ValueError, TypeError) as exc:
-                                tool_ok = False
-                                tool_output = f"Media generation error: {exc}"
-                    elif t_name.startswith("mcp__"):
-                        parts = t_name.split("__", 2)
-                        srv_id = parts[1] if len(parts) == 3 else ""
-                        real_tool = parts[2] if len(parts) == 3 else t_name
-                        srv_cfg = mcp_map.get(srv_id)
-                        if not srv_cfg:
-                            tool_output = f"MCP server '{srv_id}' not enabled for this chat."
-                            tool_ok = False
-                        else:
-                            tool_output = await _call_mcp_tool(
-                                srv_cfg,
-                                real_tool,
-                                parsed_args,
-                                active_conv.workspace_subpath,
-                                vault=cluster.vault,
-                            )
-                            tool_ok = not tool_output.startswith("MCP error:")
-                    else:
-                        exec_node = cluster.nodes.get(conv.exec_node) if conv.exec_node else None
-                        if exec_node is None or not exec_node.online:
-                            exec_node = next(
-                                (
-                                    n
-                                    for n in cluster.nodes.values()
-                                    if n.online and n.telemetry and n.telemetry.tools_enabled
-                                ),
-                                next((n for n in cluster.nodes.values() if n.online), None),
-                            )
-                        if not exec_node or not exec_node.online:
-                            tool_output = f"Execution node '{conv.exec_node or 'auto'}' is offline."
-                            tool_ok = False
-                        else:
-                            try:
-                                tool_headers: dict[str, str] = {
-                                    **cluster.agent_headers("POST", "/tools/execute"),
-                                    "X-Splitch-Router-Approved": "1",
-                                }
-                                if cluster.router_private_key is not None:
-                                    ts_hdr, sig_hdr = sign_tool_approval_ed25519(
-                                        cluster.router_private_key,
-                                        t_name,
-                                        parsed_args,
-                                        conv.workspace_subpath,
-                                    )
-                                    tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
-                                    tool_headers["X-Splitch-Approval-Sig"] = sig_hdr
-                                elif cluster.agent_token:
-                                    ts_hdr, sig_hdr = sign_tool_approval(
-                                        cluster.agent_token,
-                                        t_name,
-                                        parsed_args,
-                                        conv.workspace_subpath,
-                                    )
-                                    tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
-                                    tool_headers["X-Splitch-Approval-Sig"] = sig_hdr
-                                async with httpx.AsyncClient(
-                                    timeout=25.0,
-                                    headers=tool_headers,
-                                ) as http:
-                                    r = await http.post(
-                                        f"{exec_node.agent_url}/tools/execute",
-                                        json={
-                                            "tool": t_name,
-                                            "arguments": parsed_args,
-                                            "workspace_subpath": conv.workspace_subpath,
-                                        },
-                                    )
-                                    if r.status_code == 200:
-                                        body = r.json()
-                                        tool_ok = bool(body.get("ok", False))
-                                        tool_output = str(body.get("output", ""))
-                                        tool_diff = body.get("diff")
-                                        tool_verification = body.get("verification")
-                                        tool_sandbox = body.get("sandbox")
-                                    else:
-                                        tool_ok = False
-                                        tool_output = f"HTTP {r.status_code}: {r.text[:300]}"
-                            except httpx.HTTPError as exc:
-                                tool_ok = False
-                                tool_output = f"Agent tool call failed: {exc}"
-
-                    tool_msg = ChatMessageRecord(
-                        id=uuid.uuid4().hex[:12],
-                        conversation_id=conv_id,
-                        role="tool",
-                        content=tool_output,
-                        tool_call_id=t_id,
-                        tool_name=t_name,
-                        meta={
-                            "ok": tool_ok,
-                            "diff": tool_diff,
-                            "verification": tool_verification,
-                            "sandbox": tool_sandbox,
-                            "media_url": tool_media_url,
-                            "media_kind": tool_media_kind,
-                        },
-                        created_at=time.time(),
-                    )
-                    await asyncio.to_thread(store.add_message, tool_msg)
-                    openai_msgs.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": t_id,
-                            "name": t_name,
-                            "content": tool_output,
-                        }
-                    )
-                    yield _sse(
-                        "tool_result",
-                        {
-                            "id": t_id,
-                            "name": t_name,
-                            "ok": tool_ok,
-                            "output": tool_output,
-                            "diff": tool_diff,
-                            "verification": tool_verification,
-                            "sandbox": tool_sandbox,
-                            "media_url": tool_media_url,
-                            "media_kind": tool_media_kind,
-                        },
-                    )
-
-            yield _sse(
-                "done",
-                {
-                    "message": asst_msg.model_dump(),
-                    "max_rounds_reached": True,
-                    "max_rounds": max_rounds,
-                },
-            )
+                if active_swarm_run is not None:
+                    await swarm_mgr.finish_run(active_swarm_run.id, "done")
+                    for pkt in _drain_swarm(active_swarm_run.id):
+                        yield pkt
+                    active_swarm_run = None
+                yield _sse(
+                    "done",
+                    {
+                        "message": asst_msg.model_dump(),
+                        "max_rounds_reached": True,
+                        "max_rounds": max_rounds,
+                    },
+                )
+            finally:
+                if active_swarm_run is not None:
+                    await swarm_mgr.cancel_run(active_swarm_run.id)
 
         return StreamingResponse(
             _event_stream(),
