@@ -393,6 +393,9 @@ export interface ChatMessageRecord {
     completion_tokens?: number;
     total_tokens?: number;
     context_window?: number;
+    max_rounds_reached?: boolean;
+    steps_used?: number;
+    max_steps?: number;
     ok?: boolean;
     diff?: string | null;
     verification?: {
@@ -407,6 +410,15 @@ export interface ChatMessageRecord {
     media_kind?: MediaKind | null;
   };
   created_at: number;
+}
+
+export interface AgentStatusState {
+  round: number;
+  maxRounds: number;
+  phase: "routing" | "thinking" | "generating" | "tool" | "approval";
+  node?: string;
+  model?: string;
+  toolName?: string;
 }
 
 export interface MediaJob {

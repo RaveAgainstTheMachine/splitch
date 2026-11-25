@@ -55,6 +55,7 @@ export interface ChatMessageListProps {
   copyMessage: (msg: ChatMessageRecord) => Promise<void>;
   regenerateFromAssistant: (idx: number) => Promise<void>;
   clearCompaction: () => Promise<void>;
+  onContinueTurn?: () => void;
 }
 
 function renderApprovalSandboxBadge(approval: PendingApproval) {
@@ -123,7 +124,8 @@ export function ChatMessageList({
   editAndBranch,
   copyMessage,
   regenerateFromAssistant,
-  clearCompaction
+  clearCompaction,
+  onContinueTurn
 }: ChatMessageListProps) {
   return (
     <div
@@ -419,6 +421,26 @@ export function ChatMessageList({
                     )}
                     {isAssistant && msg.meta.stopped && (
                       <span className="pill pill--warn">STOPPED</span>
+                    )}
+                    {isAssistant && msg.meta.max_rounds_reached && (
+                      <span className="chat-max-rounds-notice">
+                        <span
+                          className="pill pill--warn"
+                          title="Increase Max Agent Tool Steps / Turn in Settings -> Agent & Chat"
+                        >
+                          Max steps reached ({msg.meta.steps_used ?? msg.meta.max_steps ?? "?"}/
+                          {msg.meta.max_steps ?? "?"})
+                        </span>
+                        {isLatest && !streaming && onContinueTurn && (
+                          <button
+                            type="button"
+                            className="btn btn--sm btn--accent"
+                            onClick={onContinueTurn}
+                          >
+                            Continue
+                          </button>
+                        )}
+                      </span>
                     )}
 
                     <div className="chat-msg__actions">

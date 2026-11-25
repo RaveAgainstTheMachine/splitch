@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.19.0] - 2026-11-25
+
+### Live Agent Status Bar & Max-Steps Notice
+- **Live Agent Status Bar (`dashboard/src/components/chat/ChatComposer.tsx`, `ChatTab.tsx`, `index.css`):** Added a live status bar above the composer while streaming showing current step (`Step N/M`), active phase (`Routing…`, `Thinking…`, `Generating response…`, `Running <tool>…`, `Waiting for approval: <tool>`), and active node/model.
+- **Max Agent Steps Notice & Continue Action (`backend/router/chat_api.py`, `dashboard/src/components/chat/ChatMessageList.tsx`):** Emits `round`/`max_rounds` in SSE `meta`, persists `max_rounds_reached`, `steps_used`, and `max_steps` on the final assistant message when `max_agent_steps` is reached, and renders a warning badge + one-click **Continue** button on the message.
+
 ## [0.18.4] - 2026-11-25
 
 ### Reasoning Effort Compatibility & Fallback

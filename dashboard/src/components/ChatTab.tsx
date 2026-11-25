@@ -26,6 +26,7 @@ import {
   readFileAsDataUrl
 } from "./chat/chatHelpers";
 import type {
+  AgentStatusState,
   ChatMessageRecord,
   ConversationSummary,
   DashboardSnapshot,
@@ -73,6 +74,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
   const [dragActive, setDragActive] = useState(false);
 
   const [streaming, setStreaming] = useState(false);
+  const [agentStatus, setAgentStatus] = useState<AgentStatusState | null>(null);
   const [streamingDraft, setStreamingDraft] = useState<ChatMessageRecord | null>(null);
   const [streamingTools, setStreamingTools] = useState<ChatMessageRecord[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<Record<string, PendingApproval>>({});
@@ -975,6 +977,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
 
     onError(null);
     setStreaming(true);
+    setAgentStatus({ round: 1, maxRounds: 0, phase: "routing" });
     setPendingApprovals({});
     setStreamingTools([]);
 
@@ -1118,12 +1121,21 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
               created_at: Date.now() / 1000
             };
             setStreamingDraft({ ...activeDraft });
+            setAgentStatus({
+              round: Number(data.round ?? roundIdx),
+              maxRounds: Number(data.max_rounds ?? 0),
+              phase: "thinking",
+              node: String(data.node ?? ""),
+              model: String(data.model ?? "")
+            });
           } else if (event === "reasoning" && activeDraft) {
             activeDraft.reasoning += String(data.text ?? "");
             setStreamingDraft({ ...activeDraft });
+            setAgentStatus((prev) => (prev ? { ...prev, phase: "thinking" } : prev));
           } else if (event === "token" && activeDraft) {
             activeDraft.content += String(data.text ?? "");
             setStreamingDraft({ ...activeDraft });
+            setAgentStatus((prev) => (prev ? { ...prev, phase: "generating" } : prev));
           } else if (event === "tool_call" && activeDraft) {
             const tc: ToolCallRecord = {
               id: String(data.id ?? ""),
@@ -1135,6 +1147,9 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
             };
             activeDraft.tool_calls = [...activeDraft.tool_calls, tc];
             setStreamingDraft({ ...activeDraft });
+            setAgentStatus((prev) =>
+              prev ? { ...prev, phase: "tool", toolName: tc.function.name } : prev
+            );
           } else if (event === "approval_required") {
             const appr: PendingApproval = {
               approval_id: String(data.approval_id ?? ""),
@@ -1145,6 +1160,9 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
               sandbox: (data.sandbox as string | null) ?? null
             };
             setPendingApprovals((prev) => ({ ...prev, [appr.tool_call_id]: appr }));
+            setAgentStatus((prev) =>
+              prev ? { ...prev, phase: "approval", toolName: appr.name } : prev
+            );
           } else if (event === "tool_result") {
             const tcId = String(data.id ?? "");
             setPendingApprovals((prev) => {
@@ -1152,6 +1170,9 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
               delete copy[tcId];
               return copy;
             });
+            setAgentStatus((prev) =>
+              prev ? { ...prev, phase: "routing", toolName: undefined } : prev
+            );
             const toolRec: ChatMessageRecord = {
               id: `stream-tool-${tcId}-${Date.now()}`,
               conversation_id: targetId,
@@ -1212,6 +1233,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
     } finally {
       abortRef.current = null;
       setStreaming(false);
+      setAgentStatus(null);
       setStreamingDraft(null);
       setStreamingTools([]);
       setPendingApprovals({});
@@ -1689,6 +1711,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           copyMessage={copyMessage}
           regenerateFromAssistant={regenerateFromAssistant}
           clearCompaction={clearCompaction}
+          onContinueTurn={() => void sendPrompt("Continue", [])}
         />
 
         <ChatComposer
@@ -1703,6 +1726,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           composerText={composerText}
           setComposerText={setComposerText}
           streaming={streaming}
+          agentStatus={agentStatus}
           effectiveConfig={effectiveConfig}
           updateConfig={updateConfig}
           effectiveSkillCount={effectiveSkillIds.length}

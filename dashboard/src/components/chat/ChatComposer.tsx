@@ -10,7 +10,7 @@ import {
   Thermometer,
   X
 } from "lucide-react";
-import type { McpServerConfig } from "../../types";
+import type { AgentStatusState, McpServerConfig } from "../../types";
 import { type DraftChatConfig, fmtTokenCompact } from "./chatHelpers";
 
 export interface SamplingConfig {
@@ -51,6 +51,7 @@ export interface ChatComposerProps {
   composerText: string;
   setComposerText: (val: string) => void;
   streaming: boolean;
+  agentStatus?: AgentStatusState | null;
   effectiveConfig: DraftChatConfig;
   updateConfig: (patch: Partial<DraftChatConfig>) => void;
   effectiveSkillCount: number;
@@ -81,6 +82,7 @@ export function ChatComposer({
   composerText,
   setComposerText,
   streaming,
+  agentStatus,
   effectiveConfig,
   updateConfig,
   effectiveSkillCount,
@@ -119,8 +121,35 @@ export function ChatComposer({
   ]
     .filter(Boolean)
     .join(" · ");
+  const agentPhaseLabel = agentStatus
+    ? agentStatus.phase === "routing"
+      ? "Routing…"
+      : agentStatus.phase === "thinking"
+        ? "Thinking…"
+        : agentStatus.phase === "generating"
+          ? "Generating response…"
+          : agentStatus.phase === "tool"
+            ? `Running ${agentStatus.toolName || "tool"}…`
+            : `Waiting for approval: ${agentStatus.toolName || "tool"}`
+    : "";
   return (
     <div className="chat-composer-shell">
+      {streaming && agentStatus && (
+        <div className="agent-status-bar" role="status" aria-live="polite">
+          <span className="agent-status-dot" aria-hidden="true" />
+          {agentStatus.maxRounds > 0 && (
+            <span className="agent-status-step">
+              Step {agentStatus.round}/{agentStatus.maxRounds}
+            </span>
+          )}
+          <span className="agent-status-phase">{agentPhaseLabel}</span>
+          {(agentStatus.node || agentStatus.model) && (
+            <span className="agent-status-target muted">
+              {[agentStatus.node, agentStatus.model].filter(Boolean).join(" · ")}
+            </span>
+          )}
+        </div>
+      )}
       <form
         ref={formRef}
         className={`chat-composer ${dragActive ? "chat-composer--drag" : ""}`}

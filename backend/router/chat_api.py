@@ -706,6 +706,8 @@ def build_chat_router(
                         "node": decision.node.node_id,
                         "model": decision.target_model,
                         "fallback_reason": decision.fallback_reason,
+                        "round": _round + 1,
+                        "max_rounds": max_rounds,
                     },
                 )
 
@@ -854,7 +856,7 @@ def build_chat_router(
                 )
 
                 assembled_tools = [tool_calls_acc[k] for k in sorted(tool_calls_acc.keys())]
-                assistant_meta = {
+                assistant_meta: dict[str, Any] = {
                     "node": decision.node.node_id,
                     "model": decision.target_model,
                     "fallback_reason": decision.fallback_reason,
@@ -866,6 +868,10 @@ def build_chat_router(
                     "total_tokens": final_total_tokens,
                     "context_window": ctx_window,
                 }
+                if assembled_tools and _round == max_rounds - 1:
+                    assistant_meta["max_rounds_reached"] = True
+                    assistant_meta["steps_used"] = max_rounds
+                    assistant_meta["max_steps"] = max_rounds
                 asst_msg = ChatMessageRecord(
                     id=uuid.uuid4().hex[:12],
                     conversation_id=conv_id,
@@ -1151,7 +1157,14 @@ def build_chat_router(
                         },
                     )
 
-            yield _sse("done", {"message": asst_msg.model_dump(), "max_rounds_reached": True})
+            yield _sse(
+                "done",
+                {
+                    "message": asst_msg.model_dump(),
+                    "max_rounds_reached": True,
+                    "max_rounds": max_rounds,
+                },
+            )
 
         return StreamingResponse(
             _event_stream(),

@@ -2979,6 +2979,66 @@ dialog h2 {
   background: var(--bg);
 }
 
+.agent-status-bar {
+  max-inline-size: 760px;
+  width: 100%;
+  margin: 0 auto 0.45rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+
+.agent-status-dot {
+  inline-size: 7px;
+  block-size: 7px;
+  border-radius: 2px;
+  background: var(--accent);
+  flex-shrink: 0;
+  animation: agent-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes agent-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.agent-status-step {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.agent-status-phase {
+  color: var(--text);
+}
+
+.agent-status-target {
+  margin-inline-start: auto;
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-inline-size: 320px;
+}
+
+.chat-max-rounds-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 .chat-composer {
   max-inline-size: 760px;
   width: 100%;

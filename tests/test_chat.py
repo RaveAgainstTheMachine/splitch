@@ -461,3 +461,202 @@ def test_chat_reasoning_effort_retries_at_most_once(tmp_path: Path) -> None:
     assert len(bodies) == 2
     assert ("error", {"message": "Upstream HTTP 500: Still failing"}) in events
 
+
+def _run_agent_loop_against_loopback(
+    tmp_path: Path,
+    *,
+    max_agent_steps: int,
+    round_deltas: list[dict[str, Any]],
+) -> tuple[list[tuple[str, dict[str, Any]]], list[dict[str, Any]]]:
+    """Run a multi-round chat turn against a loopback HTTP server and return SSE events + stored messages."""
+    deltas = list(round_deltas)
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or "0")
+            if length > 0:
+                self.rfile.read(length)
+            delta = deltas.pop(0) if deltas else {"content": "fallback"}
+            sse_chunk = (
+                f"data: {json.dumps({'choices': [{'delta': delta}]})}\n\n"
+                "data: [DONE]\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(sse_chunk)))
+            self.end_headers()
+            self.wfile.write(sse_chunk)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        host, port = srv.server_address
+        engine_url = f"http://{host}:{port}"
+
+        cfg = SplitchConfig()
+        cfg.router.max_agent_steps = max_agent_steps
+        cluster = ClusterState(cfg, data_dir=tmp_path)
+        cluster.nodes["gpu-1"] = NodeStatus(
+            node_id="gpu-1",
+            display_name="GPU 1",
+            role="gpu",
+            agent_url=engine_url,
+            engine_url=engine_url,
+            online=True,
+            telemetry=NodeTelemetry(
+                node_id="gpu-1",
+                role="gpu",
+                platform="linux",
+                timestamp=1.0,
+                online=True,
+                engine="llama-server",
+                engine_healthy=True,
+                context_length=32768,
+                models=[LoadedModel(id="qwen-32b", status="loaded")],
+            ),
+        )
+
+        @asynccontextmanager
+        async def _lifespan(_app: FastAPI):
+            cluster._proxy_client = httpx.AsyncClient()
+            try:
+                yield
+            finally:
+                await cluster._proxy_client.aclose()
+
+        app = FastAPI(lifespan=_lifespan)
+        app.include_router(build_chat_router(cluster, tmp_path, tmp_path / "skills"))
+        with TestClient(app) as tc:
+            conv = tc.post(
+                "/api/chat/conversations",
+                json={
+                    "title": "Max Rounds Test",
+                    "model": "qwen-32b",
+                    "tools_enabled": False,
+                    "web_search_enabled": True,
+                    "auto_approve": True,
+                },
+            ).json()
+            resp = tc.post(
+                f"/api/chat/conversations/{conv['id']}/send",
+                json={"content": "test max rounds"},
+            )
+            assert resp.status_code == 200
+            events = _parse_sse_events(resp.text)
+            msgs_resp = tc.get(f"/api/chat/conversations/{conv['id']}/messages")
+            assert msgs_resp.status_code == 200
+            return events, msgs_resp.json()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=2.0)
+
+
+def test_chat_max_rounds_reached_emits_round_meta_and_persists_notice(tmp_path: Path) -> None:
+    tool_delta_1 = {
+        "tool_calls": [
+            {
+                "index": 0,
+                "id": "call_r1",
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "arguments": '{"url": "http://127.0.0.1/blocked"}',
+                },
+            }
+        ]
+    }
+    tool_delta_2 = {
+        "tool_calls": [
+            {
+                "index": 0,
+                "id": "call_r2",
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "arguments": '{"url": "http://127.0.0.1/blocked"}',
+                },
+            }
+        ]
+    }
+    events, msgs = _run_agent_loop_against_loopback(
+        tmp_path,
+        max_agent_steps=2,
+        round_deltas=[tool_delta_1, tool_delta_2],
+    )
+
+    meta_events = [data for ev, data in events if ev == "meta"]
+    assert [(m["round"], m["max_rounds"]) for m in meta_events] == [(1, 2), (2, 2)]
+
+    done_events = [data for ev, data in events if ev == "done"]
+    assert len(done_events) == 1
+    assert done_events[0]["max_rounds_reached"] is True
+    assert done_events[0]["max_rounds"] == 2
+
+    asst_msgs = [m for m in msgs if m["role"] == "assistant"]
+    assert len(asst_msgs) == 2
+    assert "max_rounds_reached" not in asst_msgs[0]["meta"]
+    assert asst_msgs[1]["meta"]["max_rounds_reached"] is True
+    assert asst_msgs[1]["meta"]["steps_used"] == 2
+    assert asst_msgs[1]["meta"]["max_steps"] == 2
+
+
+def test_chat_normal_turn_does_not_set_max_rounds_reached(tmp_path: Path) -> None:
+    events, msgs = _run_agent_loop_against_loopback(
+        tmp_path,
+        max_agent_steps=2,
+        round_deltas=[{"content": "hello world"}],
+    )
+
+    meta_events = [data for ev, data in events if ev == "meta"]
+    assert [(m["round"], m["max_rounds"]) for m in meta_events] == [(1, 2)]
+
+    done_events = [data for ev, data in events if ev == "done"]
+    assert len(done_events) == 1
+    assert "max_rounds_reached" not in done_events[0]
+
+    asst_msgs = [m for m in msgs if m["role"] == "assistant"]
+    assert len(asst_msgs) == 1
+    assert "max_rounds_reached" not in asst_msgs[0]["meta"]
+    assert "steps_used" not in asst_msgs[0]["meta"]
+    assert "max_steps" not in asst_msgs[0]["meta"]
+
+
+def test_chat_final_round_without_tool_calls_does_not_set_max_rounds_reached(
+    tmp_path: Path,
+) -> None:
+    tool_delta_1 = {
+        "tool_calls": [
+            {
+                "index": 0,
+                "id": "call_r1",
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "arguments": '{"url": "http://127.0.0.1/blocked"}',
+                },
+            }
+        ]
+    }
+    events, msgs = _run_agent_loop_against_loopback(
+        tmp_path,
+        max_agent_steps=2,
+        round_deltas=[tool_delta_1, {"content": "done after tool"}],
+    )
+
+    meta_events = [data for ev, data in events if ev == "meta"]
+    assert [(m["round"], m["max_rounds"]) for m in meta_events] == [(1, 2), (2, 2)]
+
+    done_events = [data for ev, data in events if ev == "done"]
+    assert len(done_events) == 1
+    assert "max_rounds_reached" not in done_events[0]
+
+    asst_msgs = [m for m in msgs if m["role"] == "assistant"]
+    assert len(asst_msgs) == 2
+    assert all("max_rounds_reached" not in m["meta"] for m in asst_msgs)
+
+
