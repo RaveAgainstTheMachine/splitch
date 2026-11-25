@@ -83,10 +83,15 @@ async def run_linux_sni_tray(ctrl: "TrayController") -> bool:
         if item.is_separator:
             return {"type": Variant("s", "separator")}
         props: dict[str, Variant] = {
+            "type": Variant("s", "standard"),
             "label": Variant("s", item.label),
             "enabled": Variant("b", item.enabled),
             "visible": Variant("b", True),
         }
+        if item.icon_name:
+            props["icon-name"] = Variant("s", item.icon_name)
+        if item.icon_png:
+            props["icon-data"] = Variant("ay", item.icon_png)
         if item.toggle_type:
             props["toggle-type"] = Variant("s", item.toggle_type)
             props["toggle-state"] = Variant("i", item.toggle_state)
@@ -286,7 +291,7 @@ async def run_linux_sni_tray(ctrl: "TrayController") -> bool:
 
         @method()
         def Activate(self, x: "i", y: "i") -> None:  # type: ignore[valid-type]
-            ctrl.action_open_ui()
+            ctrl.action_open_app()
 
         @method()
         def SecondaryActivate(self, x: "i", y: "i") -> None:  # type: ignore[valid-type]

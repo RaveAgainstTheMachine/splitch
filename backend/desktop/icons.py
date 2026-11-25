@@ -618,3 +618,183 @@ def ensure_tray_icon_theme(
     if prune:
         prune_stale_icons(icons_dir, keep_tag=tag)
     return icons_dir
+
+
+def _draw_aa_pixel(
+    buf: bytearray,
+    size: int,
+    x: int,
+    y: int,
+    color: tuple[int, int, int, int],
+    cov: float,
+) -> None:
+    if cov <= 0.0 or x < 0 or y < 0 or x >= size or y >= size:
+        return
+    a = _clamp_byte(color[3] * min(1.0, cov))
+    if a <= 0:
+        return
+    idx = (y * size + x) * 4
+    dst = (buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3])
+    out = _blend(dst, (color[0], color[1], color[2], a))
+    buf[idx : idx + 4] = bytes(out)
+
+
+def _dist_seg(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    dx, dy = x2 - x1, y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 <= 1e-9:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / l2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _dist_rounded_rect(
+    px: float, py: float, cx: float, cy: float, hw: float, hh: float, r: float
+) -> float:
+    qx = abs(px - cx) - (hw - r)
+    qy = abs(py - cy) - (hh - r)
+    return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - r
+
+
+@functools.lru_cache(maxsize=128)
+def _render_menu_icon_cached(
+    icon_key: str,
+    size: int,
+    is_light: bool,
+    accent_hex: str,
+    surface: str,
+) -> bytes:
+    theme_dict = {
+        "scheme": "light" if is_light else "dark",
+        "accent": accent_hex,
+        "surface": surface,
+        "resolved_light": is_light,
+    }
+    if icon_key == "web-app":
+        return render_png_bytes(size, "plain", theme=theme_dict)
+
+    pal = resolve_icon_palette(theme_dict)
+    fg: tuple[int, int, int, int] = (24, 28, 42, 255) if is_light else (232, 236, 246, 255)
+    acc: tuple[int, int, int, int] = (*_hex_to_rgb(pal.accent_hex), 255)
+    danger: tuple[int, int, int, int] = (248, 113, 113, 255)
+    ok_col: tuple[int, int, int, int] = (52, 211, 153, 255)
+
+    buf = bytearray(size * size * 4)
+    scale = 24.0 / float(size)
+
+    def stroke(dist: float, half_w: float = 0.95) -> float:
+        return max(0.0, min(1.0, half_w + 0.65 - dist))
+
+    def fill(dist: float) -> float:
+        return max(0.0, min(1.0, 0.65 - dist))
+
+    for py in range(size):
+        y = (py + 0.5) * scale
+        for px in range(size):
+            x = (px + 0.5) * scale
+            if icon_key == "web-browser":
+                r_outer = abs(math.hypot(x - 12.0, y - 12.0) - 8.2)
+                r_vert = abs(math.hypot((x - 12.0) * 1.9, y - 12.0) - 8.2)
+                h_line = _dist_seg(x, y, 4.0, 12.0, 20.0, 12.0)
+                v_line = _dist_seg(x, y, 12.0, 4.0, 12.0, 20.0)
+                d = min(r_outer, r_vert, h_line, v_line)
+                _draw_aa_pixel(buf, size, px, py, acc if r_outer < 1.1 else fg, stroke(d, 0.85))
+            elif icon_key == "copy":
+                back = abs(_dist_rounded_rect(x, y, 9.5, 9.5, 5.2, 5.8, 1.4))
+                front = abs(_dist_rounded_rect(x, y, 14.5, 14.5, 5.2, 5.8, 1.4))
+                if x > 9.0 and y > 8.5:
+                    back = 9.0
+                _draw_aa_pixel(buf, size, px, py, fg, stroke(back, 0.85))
+                _draw_aa_pixel(buf, size, px, py, acc, stroke(front, 0.85))
+            elif icon_key == "gaming":
+                body = abs(_dist_rounded_rect(x, y, 12.0, 12.5, 8.5, 5.2, 4.2))
+                dpad_h = _dist_seg(x, y, 6.6, 12.5, 10.0, 12.5)
+                dpad_v = _dist_seg(x, y, 8.3, 10.8, 8.3, 14.2)
+                btn_a = math.hypot(x - 15.8, y - 11.4) - 1.1
+                btn_b = math.hypot(x - 17.5, y - 13.4) - 1.1
+                _draw_aa_pixel(buf, size, px, py, fg, stroke(body, 0.9))
+                _draw_aa_pixel(buf, size, px, py, acc, max(stroke(min(dpad_h, dpad_v), 0.75), fill(min(btn_a, btn_b))))
+            elif icon_key == "routing":
+                c1 = math.hypot(x - 6.0, y - 12.0) - 2.3
+                c2 = math.hypot(x - 18.0, y - 6.8) - 2.1
+                c3 = math.hypot(x - 18.0, y - 17.2) - 2.1
+                l1 = _dist_seg(x, y, 8.0, 11.2, 16.0, 7.5)
+                l2 = _dist_seg(x, y, 8.0, 12.8, 16.0, 16.5)
+                _draw_aa_pixel(buf, size, px, py, fg, stroke(min(l1, l2), 0.85))
+                _draw_aa_pixel(buf, size, px, py, acc, fill(min(c1, c2, c3)))
+            elif icon_key == "update":
+                dx, dy = x - 12.0, y - 12.0
+                ang = math.atan2(dy, dx)
+                ring = abs(math.hypot(dx, dy) - 7.3)
+                gap = (-0.55 < ang < 0.25) or (2.55 < ang or ang < -2.85)
+                if not gap:
+                    _draw_aa_pixel(buf, size, px, py, acc, stroke(ring, 0.95))
+                a1 = min(_dist_seg(x, y, 16.2, 5.2, 19.5, 8.5), _dist_seg(x, y, 19.5, 8.5, 15.2, 9.2))
+                a2 = min(_dist_seg(x, y, 7.8, 18.8, 4.5, 15.5), _dist_seg(x, y, 4.5, 15.5, 8.8, 14.8))
+                _draw_aa_pixel(buf, size, px, py, acc, stroke(min(a1, a2), 0.85))
+            elif icon_key == "folder":
+                body = abs(_dist_rounded_rect(x, y, 12.0, 13.5, 8.2, 5.5, 1.5))
+                tab = _dist_seg(x, y, 4.5, 8.0, 9.5, 8.0)
+                _draw_aa_pixel(buf, size, px, py, fg, stroke(body, 0.85))
+                _draw_aa_pixel(buf, size, px, py, acc, stroke(tab, 1.0))
+            elif icon_key == "autostart":
+                tri = min(
+                    _dist_seg(x, y, 7.5, 5.8, 17.5, 12.0),
+                    _dist_seg(x, y, 17.5, 12.0, 7.5, 18.2),
+                    _dist_seg(x, y, 7.5, 18.2, 7.5, 5.8),
+                )
+                _draw_aa_pixel(buf, size, px, py, ok_col, stroke(tri, 0.95))
+            elif icon_key == "restart":
+                dx, dy = x - 12.0, y - 12.0
+                ang = math.atan2(dy, dx)
+                ring = abs(math.hypot(dx, dy) - 7.0)
+                if not (-1.1 < ang < -0.2):
+                    _draw_aa_pixel(buf, size, px, py, fg, stroke(ring, 0.9))
+                arr = min(_dist_seg(x, y, 15.5, 4.8, 18.5, 7.8), _dist_seg(x, y, 18.5, 7.8, 14.6, 8.8))
+                _draw_aa_pixel(buf, size, px, py, acc, stroke(arr, 0.85))
+            elif icon_key == "stop":
+                dx, dy = x - 12.0, y - 12.5
+                ang = math.atan2(dy, dx)
+                ring = abs(math.hypot(dx, dy) - 6.8)
+                if not (-2.1 < ang < -1.04):
+                    _draw_aa_pixel(buf, size, px, py, danger, stroke(ring, 0.95))
+                bar = _dist_seg(x, y, 12.0, 4.5, 12.0, 11.5)
+                _draw_aa_pixel(buf, size, px, py, danger, stroke(bar, 0.95))
+            elif icon_key == "quit":
+                frame = min(
+                    _dist_seg(x, y, 12.0, 5.0, 5.5, 5.0),
+                    _dist_seg(x, y, 5.5, 5.0, 5.5, 19.0),
+                    _dist_seg(x, y, 5.5, 19.0, 12.0, 19.0),
+                )
+                arrow = min(
+                    _dist_seg(x, y, 10.0, 12.0, 18.5, 12.0),
+                    _dist_seg(x, y, 15.0, 8.5, 18.5, 12.0),
+                    _dist_seg(x, y, 15.0, 15.5, 18.5, 12.0),
+                )
+                _draw_aa_pixel(buf, size, px, py, fg, stroke(frame, 0.9))
+                _draw_aa_pixel(buf, size, px, py, danger, stroke(arrow, 0.9))
+
+    stride = size * 4
+    raw_rows = bytearray()
+    for y in range(size):
+        raw_rows.append(0)
+        raw_rows.extend(buf[y * stride : (y + 1) * stride])
+    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+    idat = zlib.compress(bytes(raw_rows), level=6)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", idat)
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def render_menu_icon_png(
+    icon_key: str,
+    *,
+    theme: Any = None,
+    size: int = 24,
+) -> bytes:
+    """Render a crisp 24×24 RGBA PNG icon for tray menu items (pure stdlib, cached)."""
+    pal = resolve_icon_palette(theme)
+    return _render_menu_icon_cached(icon_key, size, pal.is_light, pal.accent_hex, pal.surface)

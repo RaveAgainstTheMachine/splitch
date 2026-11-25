@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import logging
 import os
+import ssl
 import sys
 import threading
 import time
@@ -39,6 +41,7 @@ from backend.desktop.icons import (
     StatusBadge,
     ensure_tray_icon_theme,
     render_argb32_pixmap,
+    render_menu_icon_png,
     render_png_bytes,
     theme_tag,
     tray_icon_stem,
@@ -53,6 +56,7 @@ from backend.desktop.shortcuts import (
     read_live_pid,
     resolve_desktop_api_key,
     restart_splitch_service,
+    save_desktop_config,
     send_desktop_notification,
     set_tray_autostart,
     stop_splitch_graceful,
@@ -75,8 +79,16 @@ class TrayMenuItem:
     is_separator: bool = False
     toggle_type: str = ""  # "" | "checkmark" | "radio"
     toggle_state: int = -1  # -1 unset | 0 off | 1 on
+    icon_name: str = ""
+    icon_png: bytes = b""
     children: list[TrayMenuItem] = field(default_factory=list)
     on_click: Callable[[], None] | None = None
+
+
+def _stable_menu_id(key: str) -> int:
+    """Return a deterministic positive 31-bit integer ID for dbusmenu item caching."""
+    val = int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:4], "big") & 0x7FFFFFFF
+    return max(10, val)
 
 
 class TrayController:
@@ -93,6 +105,7 @@ class TrayController:
         self.api_key: str = self._explicit_api_key or resolve_desktop_api_key()
         self.online: bool = False
         self.auth_error: bool = False
+        self.tls_error: bool = False
         self.snapshot: dict[str, Any] = {}
         self.theme: dict[str, Any] = self.cfg.theme.model_dump()
         self._theme_tag: str = theme_tag(self.theme)
@@ -157,6 +170,7 @@ class TrayController:
         self.snapshot = data
         self.online = True
         self.auth_error = False
+        self.tls_error = False
         raw_theme = data.get("theme")
         if isinstance(raw_theme, dict):
             new_tag = theme_tag(raw_theme)
@@ -210,6 +224,23 @@ class TrayController:
     def auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
+    @staticmethod
+    def _ca_bundle_path() -> str | None:
+        env_ca = os.getenv("SPLITCH_CA_BUNDLE", "").strip()
+        if env_ca:
+            return env_ca
+        local_ca = default_data_root() / "certs" / "ca.crt"
+        return str(local_ca) if local_ca.is_file() else None
+
+    def _httpx_verify(self) -> bool | str:
+        return self._ca_bundle_path() or True
+
+    def _ws_ssl_context(self, ws_url: str) -> ssl.SSLContext | None:
+        if not ws_url.startswith("wss://"):
+            return None
+        ca = self._ca_bundle_path()
+        return ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+
     def status_badge(self) -> StatusBadge:
         if not self.online:
             return "offline"
@@ -250,6 +281,11 @@ class TrayController:
                     f"Splitch v{ver} — Auth Required",
                     f"Router requires API key ({self.router_url}) — run: splitch desktop set-api-key",
                 )
+            if self.tls_error:
+                return (
+                    f"Splitch v{ver} — TLS Cert Untrusted",
+                    f"Set SPLITCH_CA_BUNDLE or trust ca.crt for {self.router_url}",
+                )
             return f"Splitch v{ver} — Offline", f"Router unreachable ({self.router_url})"
 
         control = self.snapshot.get("control") or {}
@@ -271,15 +307,34 @@ class TrayController:
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
-    def action_open_ui(self) -> None:
+    def action_open_app(self) -> None:
         from backend.desktop.shortcuts import launch_splitch_gui
 
         threading.Thread(
             target=lambda: launch_splitch_gui(
-                router_url=self.router_url, start_tray=False, open_browser=True
+                router_url=self.router_url,
+                start_tray=False,
+                open_browser=True,
+                launch_mode="app",
             ),
             daemon=True,
         ).start()
+
+    def action_open_browser(self) -> None:
+        from backend.desktop.shortcuts import launch_splitch_gui
+
+        threading.Thread(
+            target=lambda: launch_splitch_gui(
+                router_url=self.router_url,
+                start_tray=False,
+                open_browser=True,
+                launch_mode="browser",
+            ),
+            daemon=True,
+        ).start()
+
+    def action_open_ui(self) -> None:
+        self.action_open_app()
 
     def action_copy_endpoint(self) -> None:
         endpoint = f"{self.router_url}/v1"
@@ -297,6 +352,7 @@ class TrayController:
                     json=payload,
                     headers=self.auth_headers(),
                     timeout=5.0,
+                    verify=self._httpx_verify(),
                 )
                 if r.status_code == 200:
                     self.poll_once_sync()
@@ -373,24 +429,29 @@ class TrayController:
     # ── Declarative Menu Builder ─────────────────────────────────────────────
 
     def build_menu(self) -> list[TrayMenuItem]:
-        """Build fresh live menu items and index click callbacks by deterministic ID."""
+        """Build fresh live menu items with deterministic semantic IDs (prevents dbusmenu caching/shift bugs)."""
         items: list[TrayMenuItem] = []
         actions: dict[int, Callable[[], None]] = {}
-        next_id = 10
+        used_ids: set[int] = set()
 
         def add(
+            key: str,
             label: str = "",
             *,
             enabled: bool = True,
             is_separator: bool = False,
             toggle_type: str = "",
             toggle_state: int = -1,
+            icon_key: str = "",
+            icon_name: str = "",
             children: list[TrayMenuItem] | None = None,
             on_click: Callable[[], None] | None = None,
         ) -> TrayMenuItem:
-            nonlocal next_id
-            mid = next_id
-            next_id += 1
+            mid = _stable_menu_id(key)
+            while mid in used_ids:
+                mid += 1
+            used_ids.add(mid)
+            icon_png = render_menu_icon_png(icon_key, theme=self.theme) if icon_key else b""
             item = TrayMenuItem(
                 id=mid,
                 label=label,
@@ -398,6 +459,8 @@ class TrayController:
                 is_separator=is_separator,
                 toggle_type=toggle_type,
                 toggle_state=toggle_state,
+                icon_name=icon_name,
+                icon_png=icon_png,
                 children=children or [],
                 on_click=on_click,
             )
@@ -406,14 +469,16 @@ class TrayController:
             return item
 
         title, _ = self.tooltip_summary()
-        items.append(add(title, enabled=False))
-        items.append(add(f"Endpoint: {self.router_url}/v1", enabled=False))
+        items.append(add("hdr:title", title, enabled=False, icon_key="web-app", icon_name="splitch"))
+        items.append(add("hdr:endpoint", f"Endpoint: {self.router_url}/v1", enabled=False))
         if self.auth_error:
-            items.append(add("  Auth needed: run `splitch desktop set-api-key`", enabled=False))
+            items.append(add("hdr:auth", "  Auth needed: run `splitch desktop set-api-key`", enabled=False))
+        if self.tls_error:
+            items.append(add("hdr:tls", "  TLS cert untrusted: set SPLITCH_CA_BUNDLE", enabled=False))
 
         nodes = self.snapshot.get("nodes") or []
         loaded_models: list[str] = []
-        for n in nodes:
+        for idx, n in enumerate(nodes):
             t = n.get("telemetry") or {}
             vram_tot = float(t.get("vram_total_mb") or 0.0)
             vram_used = float(t.get("vram_used_mb") or 0.0)
@@ -421,11 +486,12 @@ class TrayController:
             gpu_tag = f"{g_cnt} GPUs · " if g_cnt > 1 else ""
             mem_s = f"{vram_used / 1024:.1f}/{vram_tot / 1024:.1f} GB" if vram_tot > 0 else "CPU"
             dot = "●" if (n.get("online") and not n.get("busy_reason")) else ("◐" if n.get("online") else "○")
-            name = n.get("display_name") or n.get("node_id") or "node"
+            nid = str(n.get("node_id") or idx)
+            name = n.get("display_name") or nid or "node"
             st = "READY" if (n.get("online") and not n.get("busy_reason")) else (
                 "OFFLINE" if not n.get("online") else str(n.get("busy_reason")).upper()
             )
-            items.append(add(f"  {dot} {name} — {gpu_tag}{mem_s} ({st})", enabled=False))
+            items.append(add(f"node:{nid}", f"  {dot} {name} — {gpu_tag}{mem_s} ({st})", enabled=False))
             for m in t.get("models") or []:
                 if isinstance(m, dict) and m.get("status") == "loaded" and m.get("id"):
                     loaded_models.append(str(m["id"]))
@@ -434,14 +500,39 @@ class TrayController:
             preview = ", ".join(dict.fromkeys(loaded_models))
             if len(preview) > 52:
                 preview = preview[:49] + "…"
-            items.append(add(f"  Loaded: {preview}", enabled=False))
+            items.append(add("hdr:loaded", f"  Loaded: {preview}", enabled=False))
 
         if self.update_note:
-            items.append(add(f"  {self.update_note}", enabled=False))
+            items.append(add("hdr:update", f"  {self.update_note}", enabled=False))
 
-        items.append(add(is_separator=True))
-        items.append(add("Open Web UI", on_click=self.action_open_ui))
-        items.append(add("Copy API Endpoint (/v1)", on_click=self.action_copy_endpoint))
+        items.append(add("sep:1", is_separator=True))
+        items.append(
+            add(
+                "act:open_app",
+                "Open Web App",
+                icon_key="web-app",
+                icon_name="splitch",
+                on_click=self.action_open_app,
+            )
+        )
+        items.append(
+            add(
+                "act:open_browser",
+                "Open in Browser",
+                icon_key="web-browser",
+                icon_name="applications-internet",
+                on_click=self.action_open_browser,
+            )
+        )
+        items.append(
+            add(
+                "act:copy_endpoint",
+                "Copy API Endpoint (/v1)",
+                icon_key="copy",
+                icon_name="edit-copy",
+                on_click=self.action_copy_endpoint,
+            )
+        )
 
         control = self.snapshot.get("control") or {}
         gaming = bool(control.get("gaming_mode"))
@@ -449,10 +540,13 @@ class TrayController:
 
         items.append(
             add(
+                "act:gaming_mode",
                 "Gaming Mode (Yield GPUs)",
                 enabled=self.online,
                 toggle_type="checkmark",
                 toggle_state=1 if gaming else 0,
+                icon_key="gaming",
+                icon_name="input-gaming",
                 on_click=self.action_toggle_gaming,
             )
         )
@@ -460,6 +554,7 @@ class TrayController:
         # Routing Target submenu
         route_children: list[TrayMenuItem] = [
             add(
+                "route:auto",
                 "Auto Split",
                 enabled=self.online,
                 toggle_type="radio",
@@ -473,6 +568,7 @@ class TrayController:
             if nid:
                 route_children.append(
                     add(
+                        f"route:{nid}",
                         dname,
                         enabled=self.online,
                         toggle_type="radio",
@@ -480,34 +576,86 @@ class TrayController:
                         on_click=lambda _nid=nid: self.action_set_force_node(_nid),
                     )
                 )
-        items.append(add("Routing Target", enabled=self.online, children=route_children))
-
-        items.append(add(is_separator=True))
-        items.append(add("Check for Updates…", on_click=self.action_check_updates))
-        items.append(add("Open Data & Logs Folder", on_click=self.action_open_data_dir))
         items.append(
             add(
+                "sub:routing",
+                "Routing Target",
+                enabled=self.online,
+                icon_key="routing",
+                icon_name="network-workgroup",
+                children=route_children,
+            )
+        )
+
+        items.append(add("sep:2", is_separator=True))
+        items.append(
+            add(
+                "act:check_updates",
+                "Check for Updates…",
+                icon_key="update",
+                icon_name="view-refresh",
+                on_click=self.action_check_updates,
+            )
+        )
+        items.append(
+            add(
+                "act:open_data_dir",
+                "Open Data & Logs Folder",
+                icon_key="folder",
+                icon_name="folder-open",
+                on_click=self.action_open_data_dir,
+            )
+        )
+        items.append(
+            add(
+                "act:autostart",
                 "Start Tray on Login",
                 toggle_type="checkmark",
                 toggle_state=1 if self.cfg.autostart else 0,
+                icon_key="autostart",
+                icon_name="system-run",
                 on_click=self.action_toggle_autostart,
             )
         )
 
-        items.append(add(is_separator=True))
+        items.append(add("sep:3", is_separator=True))
         restart_label = (
             f"Restart Local Agent ({self.cfg.local_service})"
             if (self.cfg.mode == "remote" and self.cfg.local_service)
             else "Start / Restart Splitch"
         )
-        items.append(add(restart_label, on_click=self.action_restart))
+        items.append(
+            add(
+                "act:restart",
+                restart_label,
+                icon_key="restart",
+                icon_name="system-reboot",
+                on_click=self.action_restart,
+            )
+        )
         stop_label = (
             "Stop Local Agent & Quit"
             if self.cfg.mode == "remote"
             else "Graceful Shutdown & Quit"
         )
-        items.append(add(stop_label, on_click=self.action_stop_and_quit))
-        items.append(add("Quit Tray Only", on_click=self.action_quit_tray_only))
+        items.append(
+            add(
+                "act:stop_quit",
+                stop_label,
+                icon_key="stop",
+                icon_name="system-shutdown",
+                on_click=self.action_stop_and_quit,
+            )
+        )
+        items.append(
+            add(
+                "act:quit_tray",
+                "Quit Tray Only",
+                icon_key="quit",
+                icon_name="application-exit",
+                on_click=self.action_quit_tray_only,
+            )
+        )
 
         self._action_map = actions
         return items
@@ -519,29 +667,61 @@ class TrayController:
 
     # ── Live State Subscription (WebSocket with HTTP fallback) ───────────────
 
+    def _upgrade_http_to_https(self) -> None:
+        if not self.router_url.startswith("http://"):
+            return
+        https_url = "https://" + self.router_url.removeprefix("http://")
+        old_url = self.router_url
+        self.router_url = https_url
+        if self.cfg.router_url.rstrip("/") == old_url:
+            self.cfg.router_url = https_url
+            with contextlib.suppress(OSError):
+                save_desktop_config(self.cfg)
+
     def poll_once_sync(self) -> None:
         self.refresh_api_key()
-        try:
-            r = httpx.get(
-                f"{self.router_url}/api/status",
-                headers=self.auth_headers(),
-                timeout=3.0,
-            )
-            if r.status_code == 200:
-                self.apply_snapshot(r.json())
-                return
-            if r.status_code in (401, 403):
-                changed = self.online or not self.auth_error
-                self.online = False
-                self.auth_error = True
-                if changed:
-                    self._notify_changed()
-                return
-        except (httpx.HTTPError, ValueError):
-            pass
-        changed = self.online or self.auth_error
+        verify = self._httpx_verify()
+        urls = [self.router_url]
+        if self.router_url.startswith("http://"):
+            urls.append("https://" + self.router_url.removeprefix("http://"))
+
+        saw_tls_error = False
+        for idx, candidate in enumerate(urls):
+            try:
+                req_kwargs: dict[str, Any] = {
+                    "headers": self.auth_headers(),
+                    "timeout": 3.0,
+                }
+                if candidate.startswith("https://") or verify is not True:
+                    req_kwargs["verify"] = verify
+                r = httpx.get(f"{candidate}/api/status", **req_kwargs)
+                if r.status_code == 200:
+                    if idx > 0:
+                        self._upgrade_http_to_https()
+                    self.apply_snapshot(r.json())
+                    return
+                if r.status_code in (401, 403):
+                    if idx > 0:
+                        self._upgrade_http_to_https()
+                    changed = self.online or not self.auth_error or self.tls_error
+                    self.online = False
+                    self.auth_error = True
+                    self.tls_error = False
+                    if changed:
+                        self._notify_changed()
+                    return
+            except httpx.HTTPError as exc:
+                if "CERTIFICATE_VERIFY_FAILED" in str(exc) or isinstance(
+                    getattr(exc, "__cause__", None), ssl.SSLCertVerificationError
+                ):
+                    saw_tls_error = True
+            except ValueError:
+                pass
+
+        changed = self.online or self.auth_error or (self.tls_error != saw_tls_error)
         self.online = False
         self.auth_error = False
+        self.tls_error = saw_tls_error
         if changed:
             self._notify_changed()
 
@@ -552,11 +732,10 @@ class TrayController:
         import websockets
         import websockets.exceptions
 
-        ws_base = self.router_url.replace("https://", "wss://").replace("http://", "ws://")
-
         backoff = 1.5
         while not self._stop_event.is_set():
             key = self.refresh_api_key()
+            ws_base = self.router_url.replace("https://", "wss://").replace("http://", "ws://")
             ws_url = f"{ws_base}/ws/status"
             if key:
                 ws_url = f"{ws_url}?token={quote(key, safe='')}"
@@ -566,6 +745,7 @@ class TrayController:
                     open_timeout=4.0,
                     ping_interval=20.0,
                     ping_timeout=10.0,
+                    ssl=self._ws_ssl_context(ws_url),
                 ) as ws:
                     backoff = 1.5
                     async for raw in ws:
@@ -654,7 +834,7 @@ def _run_pystray_tray(ctrl: TrayController) -> None:
                     enabled=it.enabled,
                     checked=checked,
                     radio=(it.toggle_type == "radio"),
-                    default=(it.label == "Open Web UI"),
+                    default=(it.label == "Open Web App"),
                 )
             )
         return out

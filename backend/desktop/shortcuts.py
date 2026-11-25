@@ -1285,8 +1285,11 @@ def open_path_in_file_manager(path: Path) -> None:
 
 
 def _check_router_healthy(url: str, timeout: float = 1.5) -> bool:
+    env_ca = os.getenv("SPLITCH_CA_BUNDLE", "").strip()
+    local_ca = default_data_root() / "certs" / "ca.crt"
+    verify: bool | str = env_ca if env_ca else (str(local_ca) if local_ca.is_file() else True)
     try:
-        r = httpx.get(f"{url.rstrip('/')}/health", timeout=timeout)
+        r = httpx.get(f"{url.rstrip('/')}/health", timeout=timeout, verify=verify)
         return r.status_code == 200
     except httpx.HTTPError:
         return False

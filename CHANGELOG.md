@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.23.2] - 2026-11-25
+
+### System Tray Menu Icons, Deterministic IDs & HTTPS Auto-Upgrade
+- **Distinct Web Launchers & Menu Icons (`backend/desktop/tray.py`, `backend/desktop/icons.py`, `backend/desktop/_sni_dbus.py`):** Split **Open Web App** (app mode) and **Open in Browser** (default browser) with distinct icons (`web-app` Splitch badge vs `web-browser` globe) and added pure-Python 24×24 PNG `icon-data` + freedesktop `icon-name` across all actionable tray menu items.
+- **Deterministic Menu IDs:** Replaced sequential `next_id` numbering with `_stable_menu_id(key)` so dynamic status rows never shift IDs, duplicate rows, or leak checkboxes onto unrelated items in `com.canonical.dbusmenu`.
+- **TLS CA Bundle & HTTP→HTTPS Auto-Upgrade (`backend/desktop/tray.py`, `backend/desktop/shortcuts.py`):** Wired `SPLITCH_CA_BUNDLE` / `<data_root>/certs/ca.crt` into tray `httpx` and `wss://` WebSocket connections, auto-upgraded `http://` endpoints to `https://` when routers enforce TLS, and surfaced `TLS Cert Untrusted` diagnostics instead of reporting `Offline`.
+
 ## [0.23.1] - 2026-11-25
 
 ### Open Web GitHub Repository Search

@@ -198,7 +198,8 @@ def test_tray_controller_state_badges_and_menu_tree(tmp_path: Path, monkeypatch)
     labels = [m.label for m in menu if not m.is_separator]
     assert any("2 GPUs" in lbl and "14.0/24.0 GB" in lbl for lbl in labels)
     assert any("Loaded: qwen3-coder-30b-a3b" in lbl for lbl in labels)
-    assert "Open Web UI" in labels
+    assert "Open Web App" in labels
+    assert "Open in Browser" in labels
     assert "Check for Updates…" in labels
     assert "Graceful Shutdown & Quit" in labels
 
@@ -750,3 +751,397 @@ def test_launch_splitch_gui_and_cli_launch_flags(tmp_path: Path, monkeypatch) ->
         cli_mod.main()
     assert exc_app.value.code == 0
     assert spawned[-1] == ["/usr/bin/google-chrome", "--app=http://127.0.0.1:8080", "--class=splitch"]
+
+
+def test_tray_menu_dual_web_launch_and_icon_coverage(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+    import subprocess
+    import threading
+
+    import httpx
+
+    from backend.desktop.icons import render_menu_icon_png
+
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path))
+    monkeypatch.setenv("SPLITCH_NO_DESKTOP", "1")
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    ctrl = TrayController(router_url="http://127.0.0.1:8080")
+    ctrl.cfg = DesktopConfig(mode="local", router_url="http://127.0.0.1:8080")
+    ctrl.apply_snapshot(
+        {
+            "version": VERSION,
+            "control": {"gaming_mode": False, "force_node": "auto"},
+            "theme": {"scheme": "dark", "accent": "#a78bfa", "surface": "default"},
+            "nodes": [
+                {
+                    "node_id": "node-1",
+                    "display_name": "Node One",
+                    "online": True,
+                    "telemetry": {"vram_total_mb": 16384.0, "vram_used_mb": 4096.0},
+                }
+            ],
+        },
+        sync_desktop=False,
+    )
+
+    menu = ctrl.build_menu()
+    by_label = {m.label: m for m in menu if not m.is_separator}
+
+    assert "Open Web App" in by_label
+    assert "Open in Browser" in by_label
+    app_item = by_label["Open Web App"]
+    browser_item = by_label["Open in Browser"]
+
+    assert app_item.id != browser_item.id
+    assert app_item.icon_name and browser_item.icon_name
+    assert app_item.icon_name != browser_item.icon_name
+    assert app_item.icon_png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert browser_item.icon_png.startswith(b"\x89PNG\r\n\x1a\n")
+    assert app_item.icon_png != browser_item.icon_png
+
+    # Every top-level actionable item (or submenu parent) must have non-empty icon_name & valid PNG icon_png
+    actionable = [m for m in menu if not m.is_separator and (m.on_click is not None or bool(m.children))]
+    assert len(actionable) >= 10
+    for item in actionable:
+        assert item.icon_name, f"Missing icon_name on {item.label!r}"
+        assert item.icon_png.startswith(b"\x89PNG\r\n\x1a\n"), f"Invalid PNG on {item.label!r}"
+
+    # All menu icon keys render valid PNGs and respond to light/dark themes
+    dark_theme = {"scheme": "dark", "accent": "#a78bfa", "surface": "default"}
+    light_theme = {"scheme": "light", "accent": "#22d3ee", "surface": "default"}
+    dark_rendered: set[bytes] = set()
+    for key in (
+        "web-app",
+        "web-browser",
+        "copy",
+        "gaming",
+        "routing",
+        "update",
+        "folder",
+        "autostart",
+        "restart",
+        "stop",
+        "quit",
+    ):
+        d_png = render_menu_icon_png(key, theme=dark_theme)
+        l_png = render_menu_icon_png(key, theme=light_theme)
+        assert d_png.startswith(b"\x89PNG\r\n\x1a\n")
+        assert l_png.startswith(b"\x89PNG\r\n\x1a\n")
+        dark_rendered.add(d_png)
+        if key not in ("autostart", "stop"):
+            assert d_png != l_png, f"theme invariant for {key}"
+    assert len(dark_rendered) == 11
+
+    # Verify triggering Open Web App vs Open in Browser dispatches app-mode vs browser-mode
+    spawned: list[list[str]] = []
+    done_ev = threading.Event()
+
+    def _fake_popen(cmd, **_kwargs):
+        spawned.append(list(cmd))
+        done_ev.set()
+
+        class _Proc:
+            pid = 6161
+
+        return _Proc()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *_args, **_kwargs: httpx.Response(200, json={"status": "ok"}),
+    )
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in ("google-chrome", "xdg-open") else None,
+    )
+
+    ctrl.trigger_item(app_item.id)
+    assert done_ev.wait(timeout=3.0)
+    assert spawned[-1] == ["/usr/bin/google-chrome", "--app=http://127.0.0.1:8080", "--class=splitch"]
+
+    done_ev.clear()
+    ctrl.trigger_item(browser_item.id)
+    assert done_ev.wait(timeout=3.0)
+    assert spawned[-1] == ["xdg-open", "http://127.0.0.1:8080"]
+
+
+def test_tray_menu_stable_ids_and_toggle_types(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path))
+    ctrl = TrayController(router_url="http://127.0.0.1:8080")
+    ctrl.cfg = DesktopConfig(mode="local", router_url="http://127.0.0.1:8080", autostart=False)
+
+    tracked_labels = (
+        "Open Web App",
+        "Open in Browser",
+        "Copy API Endpoint (/v1)",
+        "Gaming Mode (Yield GPUs)",
+        "Open Data & Logs Folder",
+        "Start Tray on Login",
+    )
+    non_toggle_labels = (
+        "Open Web App",
+        "Open in Browser",
+        "Copy API Endpoint (/v1)",
+        "Open Data & Logs Folder",
+    )
+
+    menu_before = {m.label: m for m in ctrl.build_menu() if not m.is_separator}
+    ids_before = {lbl: menu_before[lbl].id for lbl in tracked_labels}
+
+    # Inject dynamic items: auth_error, tls_error, update_note, multiple nodes & loaded models
+    ctrl.auth_error = True
+    ctrl.tls_error = True
+    ctrl.update_note = "Update available (4 commits)"
+    ctrl.apply_snapshot(
+        {
+            "version": VERSION,
+            "control": {"gaming_mode": True, "force_node": "gpu-2"},
+            "nodes": [
+                {
+                    "node_id": "gpu-1",
+                    "display_name": "GPU 1",
+                    "online": True,
+                    "telemetry": {
+                        "vram_total_mb": 24576.0,
+                        "vram_used_mb": 8192.0,
+                        "models": [{"id": "model-a", "status": "loaded"}],
+                    },
+                },
+                {
+                    "node_id": "gpu-2",
+                    "display_name": "GPU 2",
+                    "online": True,
+                    "telemetry": {
+                        "vram_total_mb": 24576.0,
+                        "vram_used_mb": 12288.0,
+                        "models": [{"id": "model-b", "status": "loaded"}],
+                    },
+                },
+            ],
+        },
+        sync_desktop=False,
+    )
+    ctrl.auth_error = True
+    ctrl.tls_error = True
+    ctrl.update_note = "Update available (4 commits)"
+
+    menu_after_list = ctrl.build_menu()
+    menu_after = {m.label: m for m in menu_after_list if not m.is_separator}
+
+    for lbl in tracked_labels:
+        assert menu_after[lbl].id == ids_before[lbl], f"ID shifted for {lbl!r}"
+
+    for lbl in non_toggle_labels:
+        assert menu_after[lbl].toggle_type == ""
+        assert menu_after[lbl].toggle_state == -1
+
+    assert menu_after["Gaming Mode (Yield GPUs)"].toggle_type == "checkmark"
+    assert menu_after["Gaming Mode (Yield GPUs)"].toggle_state == 1
+    assert menu_after["Start Tray on Login"].toggle_type == "checkmark"
+    assert menu_after["Start Tray on Login"].toggle_state == 0
+
+    all_ids: list[int] = []
+    for item in menu_after_list:
+        all_ids.append(item.id)
+        for child in item.children:
+            all_ids.append(child.id)
+    assert all(mid >= 10 for mid in all_ids)
+    assert len(all_ids) == len(set(all_ids))
+
+
+def test_sni_dbus_exports_standard_type_icon_name_and_icon_data(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import types
+
+    from backend.desktop._sni_dbus import run_linux_sni_tray
+
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path))
+
+    class _Variant:
+        def __init__(self, sig: str, val):
+            self.signature = sig
+            self.value = val
+
+        def __eq__(self, other: object) -> bool:
+            return (
+                isinstance(other, _Variant)
+                and self.signature == other.signature
+                and self.value == other.value
+            )
+
+    class _BusType:
+        SESSION = "session"
+
+    class _DBusError(Exception):
+        pass
+
+    class _PropertyAccess:
+        READ = "read"
+
+    class _Message:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _ServiceInterface:
+        def __init__(self, name: str):
+            self.name = name
+
+        def emit_properties_changed(self, _changed):
+            pass
+
+    exported: dict[str, object] = {}
+
+    class _FakeBus:
+        async def connect(self):
+            return self
+
+        async def call(self, msg):
+            if msg.kwargs.get("member") == "ListNames":
+                return types.SimpleNamespace(body=[["org.kde.StatusNotifierWatcher"]])
+            return types.SimpleNamespace(body=[])
+
+        def export(self, path: str, iface: object) -> None:
+            exported[path] = iface
+
+        async def request_name(self, _name: str) -> None:
+            pass
+
+        async def introspect(self, _dest: str, _path: str):
+            return None
+
+        def get_proxy_object(self, _dest: str, _path: str, _intro):
+            return types.SimpleNamespace(
+                get_interface=lambda _n: types.SimpleNamespace(on_name_owner_changed=lambda _cb: None)
+            )
+
+        def disconnect(self) -> None:
+            pass
+
+    dbus_next_mod = types.ModuleType("dbus_next")
+    dbus_next_mod.BusType = _BusType  # type: ignore[attr-defined]
+    dbus_next_mod.DBusError = _DBusError  # type: ignore[attr-defined]
+    dbus_next_mod.Message = _Message  # type: ignore[attr-defined]
+    dbus_next_mod.Variant = _Variant  # type: ignore[attr-defined]
+
+    dbus_next_aio = types.ModuleType("dbus_next.aio")
+    dbus_next_aio.MessageBus = lambda **_kw: _FakeBus()  # type: ignore[attr-defined]
+
+    dbus_next_const = types.ModuleType("dbus_next.constants")
+    dbus_next_const.PropertyAccess = _PropertyAccess  # type: ignore[attr-defined]
+
+    dbus_next_svc = types.ModuleType("dbus_next.service")
+    dbus_next_svc.ServiceInterface = _ServiceInterface  # type: ignore[attr-defined]
+    dbus_next_svc.dbus_property = lambda **_kw: (lambda fn: fn)  # type: ignore[attr-defined]
+    dbus_next_svc.method = lambda **_kw: (lambda fn: fn)  # type: ignore[attr-defined]
+    dbus_next_svc.signal = lambda **_kw: (lambda fn: fn)  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "dbus_next", dbus_next_mod)
+    monkeypatch.setitem(sys.modules, "dbus_next.aio", dbus_next_aio)
+    monkeypatch.setitem(sys.modules, "dbus_next.constants", dbus_next_const)
+    monkeypatch.setitem(sys.modules, "dbus_next.service", dbus_next_svc)
+
+    ctrl = TrayController(router_url="http://127.0.0.1:8080")
+    ctrl.cfg = DesktopConfig(mode="local", router_url="http://127.0.0.1:8080")
+
+    async def _run() -> None:
+        task = asyncio.create_task(run_linux_sni_tray(ctrl))
+        while "/MenuBar" not in exported:
+            await asyncio.sleep(0.01)
+        menu_iface = exported["/MenuBar"]
+        _rev, root = menu_iface.GetLayout(0, -1, [])  # type: ignore[attr-defined]
+        children_variants = root[2]
+        props_by_label: dict[str, dict[str, _Variant]] = {}
+        for var in children_variants:
+            assert var.signature == "(ia{sv}av)"
+            _mid, props, _sub = var.value
+            lbl_v = props.get("label")
+            if lbl_v is not None:
+                props_by_label[lbl_v.value] = props
+
+        for lbl in ("Open Web App", "Open in Browser"):
+            p = props_by_label[lbl]
+            assert p["type"] == _Variant("s", "standard")
+            assert p["icon-name"].signature == "s" and p["icon-name"].value
+            assert p["icon-data"].signature == "ay"
+            assert bytes(p["icon-data"].value).startswith(b"\x89PNG\r\n\x1a\n")
+
+        ctrl.request_quit()
+        assert await task is True
+
+    asyncio.run(_run())
+
+
+def test_tray_poll_once_sync_tls_ca_bundle_upgrade_and_error(tmp_path: Path, monkeypatch) -> None:
+    import ssl
+
+    import httpx
+
+    monkeypatch.setenv("SPLITCH_DATA_ROOT", str(tmp_path))
+    monkeypatch.delenv("SPLITCH_CA_BUNDLE", raising=False)
+
+    # 1. Local <data_root>/certs/ca.crt is passed as verify= for https://
+    certs_dir = tmp_path / "certs"
+    certs_dir.mkdir(parents=True)
+    local_ca = certs_dir / "ca.crt"
+    local_ca.write_text("dummy-ca", encoding="utf-8")
+
+    seen_calls: list[tuple[str, object]] = []
+
+    def _ok_get(url: str, **kwargs):
+        seen_calls.append((url, kwargs.get("verify")))
+        return httpx.Response(200, json={"version": VERSION, "nodes": [], "control": {}})
+
+    monkeypatch.setattr(httpx, "get", _ok_get)
+    ctrl = TrayController(router_url="https://127.0.0.1:8443")
+    ctrl.poll_once_sync()
+    assert ctrl.online is True
+    assert ctrl.tls_error is False
+    assert seen_calls[-1] == ("https://127.0.0.1:8443/api/status", str(local_ca))
+
+    # 2. SPLITCH_CA_BUNDLE overrides <data_root>/certs/ca.crt
+    custom_ca = tmp_path / "custom-ca.pem"
+    custom_ca.write_text("custom-ca", encoding="utf-8")
+    monkeypatch.setenv("SPLITCH_CA_BUNDLE", str(custom_ca))
+    ctrl.poll_once_sync()
+    assert seen_calls[-1] == ("https://127.0.0.1:8443/api/status", str(custom_ca))
+
+    # 3. Auto-upgrade http:// -> https:// when http:// fails with RemoteProtocolError and https:// returns 200
+    save_desktop_config(DesktopConfig(mode="local", router_url="http://127.0.0.1:8443"))
+    ctrl_http = TrayController(router_url="http://127.0.0.1:8443")
+
+    def _upgrade_get(url: str, **kwargs):
+        seen_calls.append((url, kwargs.get("verify")))
+        if url.startswith("http://"):
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return httpx.Response(200, json={"version": VERSION, "nodes": [], "control": {}})
+
+    monkeypatch.setattr(httpx, "get", _upgrade_get)
+    ctrl_http.poll_once_sync()
+    assert ctrl_http.online is True
+    assert ctrl_http.tls_error is False
+    assert ctrl_http.router_url == "https://127.0.0.1:8443"
+    assert ctrl_http.cfg.router_url == "https://127.0.0.1:8443"
+    assert load_desktop_config().router_url == "https://127.0.0.1:8443"
+
+    # 4. ssl.SSLCertVerificationError sets tls_error=True, online=False, auth_error=False
+    def _tls_fail_cause(_url: str, **_kwargs):
+        err = httpx.ConnectError("TLS handshake failed")
+        err.__cause__ = ssl.SSLCertVerificationError(1, "certificate verify failed")
+        raise err
+
+    monkeypatch.setattr(httpx, "get", _tls_fail_cause)
+    ctrl_http.poll_once_sync()
+    assert ctrl_http.online is False
+    assert ctrl_http.auth_error is False
+    assert ctrl_http.tls_error is True
+    assert "TLS Cert Untrusted" in ctrl_http.tooltip_summary()[0]
+    assert any("TLS cert untrusted" in m.label for m in ctrl_http.build_menu())
+
+    # 5. Subsequent 200 clears tls_error
+    monkeypatch.setattr(httpx, "get", _ok_get)
+    ctrl_http.poll_once_sync()
+    assert ctrl_http.online is True
+    assert ctrl_http.tls_error is False
