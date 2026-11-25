@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.23.3] - 2026-11-25
+
+### Tray & Launcher Cluster CA Auto-Discovery + HTTPS Upgrade
+- **Cluster CA Bundle Lookup (`backend/desktop/tray.py`, `backend/desktop/shortcuts.py`):** Added `cluster-ca.pem`, `ca.crt`, and `splitch-selfsigned.crt` fallback lookup under `<data_root>/certs/` when `SPLITCH_CA_BUNDLE` is unset, plus `http://` → `https://` auto-upgrade in `ensure_splitch_running()` so app launcher, desktop icon, and tray all connect seamlessly to HTTPS routers.
+
 ## [0.23.2] - 2026-11-25
 
 ### System Tray Menu Icons, Deterministic IDs & HTTPS Auto-Upgrade

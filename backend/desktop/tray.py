@@ -229,8 +229,12 @@ class TrayController:
         env_ca = os.getenv("SPLITCH_CA_BUNDLE", "").strip()
         if env_ca:
             return env_ca
-        local_ca = default_data_root() / "certs" / "ca.crt"
-        return str(local_ca) if local_ca.is_file() else None
+        certs_dir = default_data_root() / "certs"
+        for name in ("cluster-ca.pem", "ca.crt", "splitch-selfsigned.crt"):
+            candidate = certs_dir / name
+            if candidate.is_file():
+                return str(candidate)
+        return None
 
     def _httpx_verify(self) -> bool | str:
         return self._ca_bundle_path() or True

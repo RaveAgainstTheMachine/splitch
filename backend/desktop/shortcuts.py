@@ -1284,12 +1284,25 @@ def open_path_in_file_manager(path: Path) -> None:
             os.startfile(str(path))  # type: ignore[attr-defined]
 
 
-def _check_router_healthy(url: str, timeout: float = 1.5) -> bool:
+def _resolve_ca_bundle() -> bool | str:
     env_ca = os.getenv("SPLITCH_CA_BUNDLE", "").strip()
-    local_ca = default_data_root() / "certs" / "ca.crt"
-    verify: bool | str = env_ca if env_ca else (str(local_ca) if local_ca.is_file() else True)
+    if env_ca:
+        return env_ca
+    certs_dir = default_data_root() / "certs"
+    for name in ("cluster-ca.pem", "ca.crt", "splitch-selfsigned.crt"):
+        candidate = certs_dir / name
+        if candidate.is_file():
+            return str(candidate)
+    return True
+
+
+def _check_router_healthy(url: str, timeout: float = 1.5) -> bool:
+    verify = _resolve_ca_bundle()
+    req_kwargs: dict = {"timeout": timeout}
+    if url.startswith("https://") or verify is not True:
+        req_kwargs["verify"] = verify
     try:
-        r = httpx.get(f"{url.rstrip('/')}/health", timeout=timeout, verify=verify)
+        r = httpx.get(f"{url.rstrip('/')}/health", **req_kwargs)
         return r.status_code == 200
     except httpx.HTTPError:
         return False
@@ -1348,6 +1361,13 @@ def ensure_splitch_running(cfg: DesktopConfig) -> tuple[bool, str]:
                     )
         if _check_router_healthy(url, timeout=2.0):
             return True, f"Connected to remote Splitch router at {url}"
+        if url.startswith("http://"):
+            https_url = "https://" + url.removeprefix("http://")
+            if _check_router_healthy(https_url, timeout=2.0):
+                cfg.router_url = https_url
+                with contextlib.suppress(OSError):
+                    save_desktop_config(cfg)
+                return True, f"Connected to remote Splitch router at {https_url}"
         return False, f"Remote Splitch router unreachable at {url}"
 
     if _check_router_healthy(url):
