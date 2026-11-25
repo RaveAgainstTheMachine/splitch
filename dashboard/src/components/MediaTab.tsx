@@ -1003,6 +1003,7 @@ export function MediaTab({ onError, onConfirm }: Props) {
                           ((d.speed_bytes_per_sec ?? 0) >= 1024 * 1024
                             ? ` · ${((d.speed_bytes_per_sec ?? 0) / (1024 * 1024)).toFixed(1)} MB/s`
                             : ` · ${Math.round((d.speed_bytes_per_sec ?? 0) / 1024)} KB/s`)}
+                        {d.protocol ? ` · ${d.protocol.toUpperCase()}` : ""}
                       </strong>
                     </div>
                     <progress

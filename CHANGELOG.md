@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.25.0] - 2026-11-25
+
+### Hugging Face `hf_xet` Download Protocol + Automatic HTTP Fallback
+- **`huggingface-hub[hf_xet]` Integration (`pyproject.toml`, `backend/agent/main.py`):** Added `hf_xet` parallel chunk-deduplicating downloads for GGUF, Media, and MLX (`snapshot_download`), with live byte/speed progress via `_make_job_tqdm` and automatic fallback to async `httpx` streaming (`SPLITCH_HF_PROTOCOL=auto|xet|http`).
+- **Protocol Badge (`backend/shared/models.py`, `dashboard/src/types.ts`, `ModelsTab.tsx`, `MediaTab.tsx`):** Added `protocol` (`XET` / `HTTP`) to `DownloadJob` and displayed it alongside live `MB/s` in the Downloads dock and Media Studio.
+
 ## [0.24.0] - 2026-11-25
 
 ### Live Model Download Speeds (`MB/s` / `KB/s`)

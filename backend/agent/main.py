@@ -20,12 +20,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 import psutil
@@ -859,18 +860,154 @@ class _DownloadSpeedTracker:
             job.speed_bytes_per_sec = round(job.downloaded_bytes / elapsed, 1)
 
 
+def _resolve_hf_protocol() -> str:
+    raw = os.getenv("SPLITCH_HF_PROTOCOL", "").strip().lower()
+    if raw in ("auto", "xet", "http"):
+        return raw
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return "http"
+    return "auto"
+
+
+def _make_job_tqdm(job: DownloadJob, tracker: _DownloadSpeedTracker, *, cap_99: bool = False):
+    from tqdm import tqdm as _BaseTqdm
+
+    lock = threading.Lock()
+
+    class _JobTqdm(_BaseTqdm):  # type: ignore[misc]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs.setdefault("disable", True)
+            super().__init__(*args, **kwargs)
+            tot = int(getattr(self, "total", 0) or 0)
+            if tot > 0:
+                with lock:
+                    if cap_99:
+                        if tot > job.total_bytes and job.total_bytes == 0:
+                            job.total_bytes = tot
+                    else:
+                        job.total_bytes = max(job.total_bytes, tot)
+
+        def update(self, n: float = 1) -> bool | None:
+            inc = int(n or 0)
+            if inc > 0:
+                with lock:
+                    job.downloaded_bytes += inc
+                    tracker.record(job, inc)
+                    if job.total_bytes > 0:
+                        pct = round((job.downloaded_bytes / job.total_bytes) * 100.0, 1)
+                        job.percent = min(99.9, pct) if cap_99 else min(100.0, pct)
+            return super().update(n)
+
+    return _JobTqdm
+
+
+def _download_xet_single(
+    job: DownloadJob,
+    dest: Path,
+    staging_dir: Path,
+    hf_token: str,
+    tracker: _DownloadSpeedTracker,
+) -> None:
+    from huggingface_hub import hf_hub_download
+
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    tqdm_cls = _make_job_tqdm(job, tracker, cap_99=False)
+    try:
+        downloaded = hf_hub_download(
+            repo_id=job.repo_id,
+            filename=job.filename,
+            local_dir=str(staging_dir),
+            token=hf_token or None,
+            tqdm_class=tqdm_cls,
+        )
+        src = Path(downloaded)
+        if not src.is_file():
+            raise FileNotFoundError(f"hf_hub_download missing output: {src}")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.replace(dest)
+    finally:
+        with contextlib.suppress(OSError):
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+
+
+def _download_xet_mlx(
+    job: DownloadJob,
+    dest_dir: Path,
+    tmp_dir: Path,
+    hf_token: str,
+    tracker: _DownloadSpeedTracker,
+) -> None:
+    from huggingface_hub import snapshot_download
+
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    tqdm_cls = _make_job_tqdm(job, tracker, cap_99=True)
+    try:
+        snapshot_download(
+            repo_id=job.repo_id,
+            local_dir=str(tmp_dir),
+            allow_patterns=["*.safetensors", "*.json", "*.model", "*.tiktoken", "*.txt"],
+            token=hf_token or None,
+            tqdm_class=tqdm_cls,
+        )
+        if not any(tmp_dir.rglob("*.safetensors")):
+            raise ValueError("Repository does not contain MLX .safetensors weights")
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir)
+        tmp_dir.replace(dest_dir)
+    except Exception:
+        with contextlib.suppress(OSError):
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+        raise
+
+
 async def _run_hf_download(job: DownloadJob, *, hf_token_override: str = "") -> None:
     root = Path(STORAGE_PATH)
     root.mkdir(parents=True, exist_ok=True)
     safe_name = Path(job.filename).name
     dest = root / safe_name
     part = root / f"{safe_name}.part"
+    staging_dir = root / f".{safe_name}.xet"
     url = f"https://huggingface.co/{job.repo_id}/resolve/main/{job.filename}"
     headers = {}
     hf_token = hf_token_override.strip() or os.getenv("HF_TOKEN", "").strip()
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
 
+    proto = _resolve_hf_protocol()
+    if proto in ("auto", "xet"):
+        xet_tracker = _DownloadSpeedTracker()
+        job.protocol = "xet"
+        try:
+            await asyncio.to_thread(
+                _download_xet_single, job, dest, staging_dir, hf_token, xet_tracker
+            )
+            job.percent = 100.0
+            job.speed_bytes_per_sec = 0.0
+            job.status = "completed"
+            if safe_name.lower().endswith(".gguf"):
+                asyncio.create_task(_refresh_engine_model_index(expected_stem=dest.stem))
+            else:
+                asyncio.create_task(state.poll_once())
+            return
+        except Exception as exc:  # noqa: BLE001 — fall back to async httpx stream when xet fails
+            if proto == "xet":
+                job.speed_bytes_per_sec = 0.0
+                job.status = "failed"
+                job.error = str(exc)
+                return
+            logger.debug("hf_xet single download failed (%s); falling back to HTTP", exc)
+            job.downloaded_bytes = 0
+            job.total_bytes = 0
+            job.percent = 0.0
+            job.speed_bytes_per_sec = 0.0
+
+    job.protocol = "http"
     tracker = _DownloadSpeedTracker()
     try:
         async with (
@@ -919,6 +1056,32 @@ async def _run_hf_mlx_download(job: DownloadJob, *, hf_token_override: str = "")
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
 
+    proto = _resolve_hf_protocol()
+    if proto in ("auto", "xet"):
+        xet_tracker = _DownloadSpeedTracker()
+        job.protocol = "xet"
+        try:
+            await asyncio.to_thread(
+                _download_xet_mlx, job, dest_dir, tmp_dir, hf_token, xet_tracker
+            )
+            job.percent = 100.0
+            job.speed_bytes_per_sec = 0.0
+            job.status = "completed"
+            asyncio.create_task(state.poll_once())
+            return
+        except Exception as exc:  # noqa: BLE001 — fall back to async httpx stream when xet fails
+            if proto == "xet":
+                job.speed_bytes_per_sec = 0.0
+                job.status = "failed"
+                job.error = str(exc)
+                return
+            logger.debug("hf_xet MLX snapshot download failed (%s); falling back to HTTP", exc)
+            job.downloaded_bytes = 0
+            job.total_bytes = 0
+            job.percent = 0.0
+            job.speed_bytes_per_sec = 0.0
+
+    job.protocol = "http"
     tracker = _DownloadSpeedTracker()
     try:
         async with httpx.AsyncClient(

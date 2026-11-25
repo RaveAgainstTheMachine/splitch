@@ -1,6 +1,6 @@
 [project]
 name = "splitch"
-version = "0.24.0"
+version = "0.25.0"
 description = "Hardware-aware multi-node local AI router, Gaming-Mode GPU yielder, and unified Model/MCP/Skills/Agent control plane"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -9,6 +9,7 @@ dependencies = [
     "cryptography>=43.0.0",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
+    "huggingface-hub[hf-xet]>=0.32.0",
     "psutil>=6.1.0",
     "pydantic>=2.10.0",
     "uvicorn[standard]>=0.34.0",

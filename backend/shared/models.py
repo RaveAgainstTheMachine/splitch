@@ -229,6 +229,7 @@ class DownloadJob(BaseModel):
     total_bytes: int = 0
     percent: float = 0.0
     speed_bytes_per_sec: float = 0.0
+    protocol: str = ""
     error: str | None = None
 
 
