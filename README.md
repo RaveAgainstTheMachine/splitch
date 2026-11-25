@@ -43,10 +43,10 @@
 
 <p align="center">
   <a href="docs/assets/screenshots/chat-preview.png">
-    <img src="docs/assets/screenshots/chat-preview.png" alt="Splitch Agent Chat IDE" width="100%" />
+    <img src="docs/assets/screenshots/chat-preview.png" alt="Splitch Agent Chat IDE with Swarm Inspector" width="100%" />
   </a>
   <br />
-  <strong>Agent Chat IDE</strong> — <sub>Sandboxed workspace tools, HITL approvals, scoped MCP/Skills &amp; split artifact preview · <em>click any image for full resolution</em></sub>
+  <strong>Agent Chat IDE &amp; Swarm Inspector</strong> — <sub>Sandboxed workspace tools, parallel multi-node agent swarms, scoped MCP/Skills &amp; live inspector · <em>click any image for full resolution</em></sub>
 </p>
 
 <table>
@@ -56,7 +56,7 @@
         <img src="docs/assets/screenshots/overview.png" alt="Cluster Overview" width="100%" />
       </a>
       <br />
-      <strong>Cluster Overview</strong> — <sub>Multi-GPU telemetry, Gaming Auto-Yield &amp; live traces</sub>
+      <strong>Cluster Overview</strong> — <sub>Multi-GPU &amp; Apple Silicon MLX telemetry, Gaming Auto-Yield &amp; live traces</sub>
     </td>
     <td width="50%" valign="top">
       <a href="docs/assets/screenshots/media-studio.png">
@@ -72,17 +72,94 @@
         <img src="docs/assets/screenshots/models.png" alt="Models & Aliases" width="100%" />
       </a>
       <br />
-      <strong>Models &amp; Aliases</strong> — <sub>Hugging Face GGUF pulls, hardware-fit checks &amp; aliases</sub>
+      <strong>Models &amp; Aliases</strong> — <sub>Hugging Face GGUF &amp; MLX pulls, hardware-fit checks &amp; aliases</sub>
     </td>
     <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/settings.png">
+        <img src="docs/assets/screenshots/settings.png" alt="Settings & Client Setup" width="100%" />
+      </a>
+      <br />
+      <strong>Settings &amp; Client Setup</strong> — <sub>One-click configs for Hermes, Claude Code, Codex CLI, OpenCode &amp; live protocol probes</sub>
+    </td>
+  </tr>
+</table>
+
+<details>
+<summary><strong>More Screenshots Gallery</strong> — MCP Servers, Skills Library &amp; Appearance Settings</summary>
+
+<br />
+
+<table>
+  <tr>
+    <td width="33.3%" valign="top">
       <a href="docs/assets/screenshots/mcp-servers.png">
         <img src="docs/assets/screenshots/mcp-servers.png" alt="MCP Servers" width="100%" />
       </a>
       <br />
-      <strong>MCP &amp; Skills</strong> — <sub>Local-first MCP servers, encrypted env vault &amp; node sync</sub>
+      <strong>MCP Servers</strong> — <sub>Local-first MCP servers, encrypted env vault &amp; node sync</sub>
+    </td>
+    <td width="33.3%" valign="top">
+      <a href="docs/assets/screenshots/skills.png">
+        <img src="docs/assets/screenshots/skills.png" alt="Skills Library" width="100%" />
+      </a>
+      <br />
+      <strong>Skills Library</strong> — <sub><code>skills.sh</code> discovery, GitHub <code>SKILL.md</code> import &amp; per-chat toggles</sub>
+    </td>
+    <td width="33.3%" valign="top">
+      <a href="docs/assets/screenshots/appearance.png">
+        <img src="docs/assets/screenshots/appearance.png" alt="Appearance & Theme Settings" width="100%" />
+      </a>
+      <br />
+      <strong>Appearance &amp; Theme</strong> — <sub>System/Dark/Light scheme, 4 surface presets &amp; live accent sync</sub>
     </td>
   </tr>
 </table>
+
+</details>
+
+<details>
+<summary><strong>Themes &amp; Default Accent Colors</strong> — Midnight, OLED Black, Nordic Slate, Warm Graphite &amp; Light Mode</summary>
+
+<br />
+
+Built-in surfaces (`Midnight`, `OLED Black`, `Nordic Slate`, `Warm Graphite`) pair with `System` / `Dark` / `Light` schemes and 6 curated default accents (**Violet** `#a78bfa`, **Cyan** `#22d3ee`, **Emerald** `#34d399`, **Amber** `#f59e0b`, **Rose** `#fb7185`, **Cobalt** `#60a5fa`) plus custom hex colors — automatically syncing the browser favicon, PWA titlebar, and tray icon.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/theme-light-cobalt.png">
+        <img src="docs/assets/screenshots/theme-light-cobalt.png" alt="Light Mode with Cobalt Accent" width="100%" />
+      </a>
+      <br />
+      <strong>Light Mode + Cobalt</strong> (<code>#60a5fa</code>)
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/theme-oled-emerald.png">
+        <img src="docs/assets/screenshots/theme-oled-emerald.png" alt="OLED Black with Emerald Accent" width="100%" />
+      </a>
+      <br />
+      <strong>OLED Black + Emerald</strong> (<code>#34d399</code>)
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/theme-slate-amber.png">
+        <img src="docs/assets/screenshots/theme-slate-amber.png" alt="Nordic Slate with Amber Accent" width="100%" />
+      </a>
+      <br />
+      <strong>Nordic Slate + Amber</strong> (<code>#f59e0b</code>)
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/assets/screenshots/theme-charcoal-rose.png">
+        <img src="docs/assets/screenshots/theme-charcoal-rose.png" alt="Warm Graphite with Rose Accent" width="100%" />
+      </a>
+      <br />
+      <strong>Warm Graphite + Rose</strong> (<code>#fb7185</code>)
+    </td>
+  </tr>
+</table>
+
+</details>
 
 ---
 
