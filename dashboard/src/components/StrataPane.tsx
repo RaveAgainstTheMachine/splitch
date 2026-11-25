@@ -268,30 +268,32 @@ export function StrataPane({
               >
                 <button
                   type="button"
-                  className="repo-slice__row"
+                  className="repo-slice__row strata-pack__row"
                   onClick={() => {
                     setSelectedFamily(spec.family);
                     setSelectedModel(spec.model);
                     setPlanPreview(null);
                   }}
                 >
-                  <div className="repo-slice__main">
-                    <div className="repo-slice__title">
-                      <strong>{spec.label}</strong>
-                      <span className={`pill ${pill.cls}`} title={fit?.reason || ""}>
-                        {pill.label}
+                  <div className="repo-slice__identity">
+                    <div className="strata-pack__title">
+                      <strong className="repo-slice__name">{spec.label}</strong>
+                      <span className="repo-slice__badges">
+                        <span className={`pill ${pill.cls}`} title={fit?.reason || ""}>
+                          {pill.label}
+                        </span>
+                        {spec.supports_vision && <span className="pill">Vision</span>}
+                        {spec.supports_dflash2 && <span className="pill">DFlash2</span>}
                       </span>
-                      {spec.supports_vision && <span className="pill">Vision</span>}
-                      {spec.supports_dflash2 && <span className="pill">DFlash2</span>}
                     </div>
-                    <div className="muted" style={{ fontSize: "0.76rem", marginTop: "0.2rem" }}>
-                      {spec.notes} {fit?.reason ? `— ${fit.reason}` : ""}
+                    <div className="strata-pack__notes muted">
+                      {spec.notes}
                     </div>
                   </div>
-                  <div className="repo-slice__stats muted" style={{ fontSize: "0.75rem" }}>
+                  <div className="strata-pack__stats muted">
                     <span>{spec.download_gb} GB dl</span>
                     <span>{spec.experts_ram_gb} GB RAM</span>
-                    {spec.ssd_shard_gb > 0 && <span>+{spec.ssd_shard_gb} GB SSD</span>}
+                    <span>{spec.ssd_shard_gb > 0 ? `+${spec.ssd_shard_gb} GB SSD` : ""}</span>
                   </div>
                 </button>
               </article>

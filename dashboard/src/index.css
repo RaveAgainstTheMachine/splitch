@@ -1264,6 +1264,36 @@ input[type="checkbox"][switch]:focus-visible {
   color: var(--muted);
 }
 
+.strata-pack__row {
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.strata-pack__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  min-inline-size: 0;
+}
+
+.strata-pack__notes {
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.strata-pack__stats {
+  display: grid;
+  grid-template-columns: 4.8rem 5.4rem 5.4rem;
+  align-items: center;
+  justify-items: end;
+  gap: 0.65rem;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .repo-slice__drawer {
   display: grid;
   gap: 0.75rem;
@@ -1617,6 +1647,14 @@ input[type="checkbox"][switch]:focus-visible {
   .repo-slice__stats {
     width: 100%;
     padding-inline-start: 1.7rem;
+  }
+
+  .strata-pack__stats {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 0.75rem;
   }
 
   .gguf-slice {

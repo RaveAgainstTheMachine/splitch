@@ -789,20 +789,22 @@ export function ModelsTab({
               </label>
             )}
 
-            <label className="fit-switch" htmlFor={fitSwitchId}>
-              <input
-                id={fitSwitchId}
-                type="checkbox"
-                {...({ switch: "" } as Record<string, string>)}
-                checked={onlyFitting}
-                disabled={selectedBudgetGb <= 0}
-                onChange={(e) => handleOnlyFittingToggle(e.target.checked)}
-              />
-              <span>
-                Only show models that fit
-                {selectedBudgetGb > 0 ? ` (≤ ${selectedBudgetGb.toFixed(1)} GB)` : ""}
-              </span>
-            </label>
+            {searchFormat !== "strata" && (
+              <label className="fit-switch" htmlFor={fitSwitchId}>
+                <input
+                  id={fitSwitchId}
+                  type="checkbox"
+                  {...({ switch: "" } as Record<string, string>)}
+                  checked={onlyFitting}
+                  disabled={selectedBudgetGb <= 0}
+                  onChange={(e) => handleOnlyFittingToggle(e.target.checked)}
+                />
+                <span>
+                  Only show models that fit
+                  {selectedBudgetGb > 0 ? ` (≤ ${selectedBudgetGb.toFixed(1)} GB)` : ""}
+                </span>
+              </label>
+            )}
           </div>
         </div>
 
