@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.25.2] - 2026-11-25
+
+### Security Hardening (DNS Rebinding, Nonce Replay & Body Binding)
+- **Host-Header DNS Rebinding Guard (`backend/shared/security.py`, `backend/router/app.py`, `backend/agent/main.py`):** Added `is_allowed_host_header()` middleware returning `421 Misdirected Request` on untrusted `Host` headers while allowing loopback, raw IPv4/IPv6 literals, and `SPLITCH_ALLOWED_HOSTS` / `public_url` / `allowed_origins`.
+- **Single-Use Nonce Replay Cache & Ed25519 Body Binding (`backend/shared/security.py`, `backend/shared/secrets.py`, `chat_api.py`, `swarm.py`, `telemetry.py`):** Added bounded TTL `NonceReplayCache` for HMAC/Ed25519 tool approvals (`X-Splitch-Approval-Nonce`) and Ed25519 agent requests (`X-Splitch-Auth-Nonce` + `X-Splitch-Auth-Body-Sha256`), with rolling-upgrade legacy fallback.
+- **Test Shim Isolation (`backend/shared/security.py`):** Gated `"testclient"` in `is_loopback_host()` behind `PYTEST_CURRENT_TEST`.
+
 ## [0.25.1] - 2026-11-25
 
 ### Models Tab Layout & Engine Badges

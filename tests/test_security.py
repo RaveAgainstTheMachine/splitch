@@ -557,7 +557,7 @@ def test_hmac_tool_approval_and_non_loopback_rejection(tmp_path: Path, monkeypat
 
     async def _remote_call() -> int:
         transport = httpx.ASGITransport(app=agent_mod.app, client=("192.168.1.55", 50000))
-        async with httpx.AsyncClient(transport=transport, base_url="http://agent.local") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://192.168.1.55:8090") as client:
             resp = await client.post(
                 "/tools/execute",
                 headers={"X-Splitch-Router-Approved": "1"},
@@ -1185,3 +1185,344 @@ def test_web_fetch_prefers_https_with_http_fallback(monkeypatch: pytest.MonkeyPa
     assert "Fetched http://93.184.216.34/docs:" in body_fb
     assert "Hello Splitch" in body_fb
     assert requested == ["https://93.184.216.34/docs", "http://93.184.216.34/docs"]
+
+
+def test_host_header_dns_rebinding_guard_and_loopback_pytest_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.shared.security import is_allowed_host_header, is_loopback_host
+
+    # 1. "testclient" and "testserver" are only trusted when PYTEST_CURRENT_TEST is set
+    assert is_loopback_host("testclient") is True
+    assert is_allowed_host_header("testclient") is True
+    assert is_allowed_host_header("testserver") is True
+
+    with monkeypatch.context() as mp:
+        mp.delenv("PYTEST_CURRENT_TEST", raising=False)
+        assert is_loopback_host("testclient") is False
+        assert is_loopback_host("localhost") is True
+        assert is_loopback_host("127.0.0.1") is True
+        assert is_loopback_host("::1") is True
+        assert is_allowed_host_header("testclient") is False
+        assert is_allowed_host_header("testserver") is False
+
+    # 2. Direct unit checks for allowed, malformed, and DNS-rebinding Host headers
+    for good_host in (
+        "localhost:8080",
+        "LOCALHOST:8080",
+        "127.0.0.1:8080",
+        "[::1]:8080",
+        "192.0.2.10:8080",
+        "[fd00::1]:8080",
+        "splitch.internal:8080",
+    ):
+        assert is_allowed_host_header(good_host) is True, f"Expected allowed host {good_host}"
+
+    for bad_host in (
+        "",
+        None,
+        "evil-rebind.example:8080",
+        "127.0.0.1.evil.com:8080",
+        "evil.com:notaport",
+        "localhost/evil",
+        "user@127.0.0.1",
+        "bad host:8080",
+        "[::1",
+        "[::1]evil:8080",
+    ):
+        assert is_allowed_host_header(bad_host) is False, f"Expected rejected host {bad_host!r}"
+
+    assert is_allowed_host_header("router.example.internal:8443", extra_hosts=["router.example.internal"]) is True
+
+    # 3. End-to-end HTTP middleware checks on both Router and Agent
+    monkeypatch.setenv("SPLITCH_ALLOWED_HOSTS", "allowed-node.example, gw.corp.internal")
+    monkeypatch.setattr(router_mod, "API_KEY", "")
+    monkeypatch.setattr(router_mod, "API_KEY_HASH", "")
+
+    router_tc = TestClient(router_mod.app)
+    agent_tc = TestClient(agent_mod.app)
+
+    for untrusted in ("evil-rebind.example:8080", "127.0.0.1.evil.com:8080"):
+        r_router = router_tc.get("/api/auth/status", headers={"Host": untrusted})
+        assert r_router.status_code == 421
+        assert r_router.json()["detail"] == "Invalid Host header"
+
+        r_agent = agent_tc.get("/health", headers={"Host": untrusted})
+        assert r_agent.status_code == 421
+        assert r_agent.json()["detail"] == "Invalid Host header"
+
+    for trusted in (
+        "localhost:8080",
+        "127.0.0.1:8080",
+        "[::1]:8080",
+        "192.0.2.10:8080",
+        "[fd00::1]:8080",
+        "allowed-node.example:8080",
+        "GW.CORP.INTERNAL:8443",
+    ):
+        assert router_tc.get("/api/auth/status", headers={"Host": trusted}).status_code == 200, trusted
+        assert agent_tc.get("/health", headers={"Host": trusted}).status_code == 200, trusted
+
+
+def test_nonce_replay_and_ed25519_body_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import time
+
+    from backend.shared.secrets import (
+        generate_ed25519_keypair,
+        load_ed25519_private_key,
+        load_ed25519_public_key,
+        sign_agent_request_ed25519,
+        sign_tool_approval_ed25519,
+        verify_agent_request_ed25519,
+        verify_tool_approval_ed25519,
+    )
+    from backend.shared.security import NonceReplayCache, sign_tool_approval, verify_tool_approval
+
+    priv_path, pub_compact = generate_ed25519_keypair(
+        tmp_path / "router_ed25519.pem",
+        tmp_path / "router_ed25519.pub",
+    )
+    priv = load_ed25519_private_key(str(priv_path))
+    pub = load_ed25519_public_key(pub_compact)
+
+    # 1. HMAC verify_tool_approval rejects replay of (ts, nonce, sig)
+    hmac_cache = NonceReplayCache()
+    args = {"path": "replay.txt", "content": "ok\n"}
+    ts_h, sig_h = sign_tool_approval("hmac-secret", "write_file", args, "", nonce="hmac-nonce-1")
+    assert (
+        verify_tool_approval(
+            "hmac-secret",
+            ts_h,
+            sig_h,
+            "write_file",
+            args,
+            "",
+            nonce="hmac-nonce-1",
+            replay_cache=hmac_cache,
+        )
+        is True
+    )
+    assert (
+        verify_tool_approval(
+            "hmac-secret",
+            ts_h,
+            sig_h,
+            "write_file",
+            args,
+            "",
+            nonce="hmac-nonce-1",
+            replay_cache=hmac_cache,
+        )
+        is False
+    )
+
+    # 2. Ed25519 verify_tool_approval_ed25519 rejects replay of (ts, nonce, sig)
+    ed_tool_cache = NonceReplayCache()
+    ts_e, sig_e = sign_tool_approval_ed25519(priv, "write_file", args, "", nonce="ed-tool-nonce-1")
+    assert (
+        verify_tool_approval_ed25519(
+            pub,
+            ts_e,
+            sig_e,
+            "write_file",
+            args,
+            "",
+            nonce="ed-tool-nonce-1",
+            replay_cache=ed_tool_cache,
+        )
+        is True
+    )
+    assert (
+        verify_tool_approval_ed25519(
+            pub,
+            ts_e,
+            sig_e,
+            "write_file",
+            args,
+            "",
+            nonce="ed-tool-nonce-1",
+            replay_cache=ed_tool_cache,
+        )
+        is False
+    )
+
+    # 3. Ed25519 verify_agent_request_ed25519 binds body SHA-256 and nonce & rejects replay
+    req_cache = NonceReplayCache()
+    raw_body = json.dumps({"tool": "list_dir", "arguments": {"path": "."}}).encode("utf-8")
+    hdrs = sign_agent_request_ed25519(
+        priv,
+        "POST",
+        "/tools/execute",
+        nonce="req-nonce-1",
+        body=raw_body,
+    )
+    assert "X-Splitch-Auth-Body-Sha256" in hdrs
+    assert hdrs["X-Splitch-Auth-Nonce"] == "req-nonce-1"
+
+    # Tampered body bytes must fail even before recording nonce
+    assert (
+        verify_agent_request_ed25519(
+            pub,
+            hdrs["X-Splitch-Auth-Ts"],
+            hdrs["X-Splitch-Auth-Sig"],
+            "POST",
+            "/tools/execute",
+            nonce_header=hdrs["X-Splitch-Auth-Nonce"],
+            body=raw_body + b" ",
+            body_sha256_header=hdrs["X-Splitch-Auth-Body-Sha256"],
+            replay_cache=req_cache,
+        )
+        is False
+    )
+    # Tampered body hash header must fail
+    assert (
+        verify_agent_request_ed25519(
+            pub,
+            hdrs["X-Splitch-Auth-Ts"],
+            hdrs["X-Splitch-Auth-Sig"],
+            "POST",
+            "/tools/execute",
+            nonce_header=hdrs["X-Splitch-Auth-Nonce"],
+            body=raw_body,
+            body_sha256_header="0" * 64,
+            replay_cache=req_cache,
+        )
+        is False
+    )
+    # Valid first use succeeds; exact replay of (ts, nonce) fails
+    assert (
+        verify_agent_request_ed25519(
+            pub,
+            hdrs["X-Splitch-Auth-Ts"],
+            hdrs["X-Splitch-Auth-Sig"],
+            "POST",
+            "/tools/execute",
+            nonce_header=hdrs["X-Splitch-Auth-Nonce"],
+            body=raw_body,
+            body_sha256_header=hdrs["X-Splitch-Auth-Body-Sha256"],
+            replay_cache=req_cache,
+        )
+        is True
+    )
+    assert (
+        verify_agent_request_ed25519(
+            pub,
+            hdrs["X-Splitch-Auth-Ts"],
+            hdrs["X-Splitch-Auth-Sig"],
+            "POST",
+            "/tools/execute",
+            nonce_header=hdrs["X-Splitch-Auth-Nonce"],
+            body=raw_body,
+            body_sha256_header=hdrs["X-Splitch-Auth-Body-Sha256"],
+            replay_cache=req_cache,
+        )
+        is False
+    )
+
+    # 4. End-to-end TestClient(agent_mod.app) enforcement for request replay, body tampering, & tool approval replay
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setattr(agent_mod, "WORKSPACE_ROOT", str(ws))
+    monkeypatch.setattr(agent_mod, "ENABLE_TOOLS", True)
+    monkeypatch.setattr(agent_mod, "AGENT_TOKEN", "")
+    monkeypatch.setattr(agent_mod, "ROUTER_PUBLIC_KEY", pub)
+    monkeypatch.setattr(agent_mod, "ALLOW_UNAUTH_TOOLS", False)
+
+    tc = TestClient(agent_mod.app)
+    uniq = str(time.time_ns())
+
+    # 4a. Agent request body binding & replay via TestClient
+    list_body = json.dumps({"tool": "list_dir", "arguments": {"path": "."}}).encode("utf-8")
+    req_hdrs = sign_agent_request_ed25519(
+        priv,
+        "POST",
+        "/tools/execute",
+        nonce=f"e2e-req-{uniq}",
+        body=list_body,
+    )
+    # Tampered body with valid signed headers -> 401
+    r_tamper = tc.post(
+        "/tools/execute",
+        headers={**req_hdrs, "Content-Type": "application/json"},
+        content=json.dumps({"tool": "list_dir", "arguments": {"path": "./"}}).encode("utf-8"),
+    )
+    assert r_tamper.status_code == 401
+
+    # Original untampered request succeeds first time -> 200
+    r_first = tc.post(
+        "/tools/execute",
+        headers={**req_hdrs, "Content-Type": "application/json"},
+        content=list_body,
+    )
+    assert r_first.status_code == 200
+
+    # Exact replay of (ts, nonce, sig) -> 401
+    r_replay = tc.post(
+        "/tools/execute",
+        headers={**req_hdrs, "Content-Type": "application/json"},
+        content=list_body,
+    )
+    assert r_replay.status_code == 401
+
+    # 4b. Ed25519 tool approval replay via TestClient (fresh request auth each time)
+    write_payload = {
+        "tool": "write_file",
+        "arguments": {"path": "nonce_ed.txt", "content": "once\n"},
+        "workspace_subpath": "",
+    }
+    write_body = json.dumps(write_payload).encode("utf-8")
+    tool_nonce = f"e2e-ed-tool-{uniq}"
+    ts_tool, sig_tool = sign_tool_approval_ed25519(
+        priv,
+        write_payload["tool"],
+        write_payload["arguments"],
+        write_payload["workspace_subpath"],
+        nonce=tool_nonce,
+    )
+    approval_hdrs = {
+        "X-Splitch-Approval-Ts": ts_tool,
+        "X-Splitch-Approval-Sig": sig_tool,
+        "X-Splitch-Approval-Nonce": tool_nonce,
+    }
+    req_hdrs_1 = sign_agent_request_ed25519(
+        priv, "POST", "/tools/execute", nonce=f"e2e-req-t1-{uniq}", body=write_body
+    )
+    r_tool_ok = tc.post(
+        "/tools/execute",
+        headers={**req_hdrs_1, **approval_hdrs, "Content-Type": "application/json"},
+        content=write_body,
+    )
+    assert r_tool_ok.status_code == 200
+
+    req_hdrs_2 = sign_agent_request_ed25519(
+        priv, "POST", "/tools/execute", nonce=f"e2e-req-t2-{uniq}", body=write_body
+    )
+    r_tool_replay = tc.post(
+        "/tools/execute",
+        headers={**req_hdrs_2, **approval_hdrs, "Content-Type": "application/json"},
+        content=write_body,
+    )
+    assert r_tool_replay.status_code == 403
+
+    # 4c. HMAC tool approval replay via TestClient
+    monkeypatch.setattr(agent_mod, "ROUTER_PUBLIC_KEY", None)
+    monkeypatch.setattr(agent_mod, "AGENT_TOKEN", "e2e-hmac-secret")
+    hmac_nonce = f"e2e-hmac-tool-{uniq}"
+    ts_hm, sig_hm = sign_tool_approval(
+        "e2e-hmac-secret",
+        write_payload["tool"],
+        write_payload["arguments"],
+        write_payload["workspace_subpath"],
+        nonce=hmac_nonce,
+    )
+    hmac_hdrs = {
+        "Authorization": "Bearer e2e-hmac-secret",
+        "X-Splitch-Approval-Ts": ts_hm,
+        "X-Splitch-Approval-Sig": sig_hm,
+        "X-Splitch-Approval-Nonce": hmac_nonce,
+    }
+    assert tc.post("/tools/execute", headers=hmac_hdrs, json=write_payload).status_code == 200
+    assert tc.post("/tools/execute", headers=hmac_hdrs, json=write_payload).status_code == 403

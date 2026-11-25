@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import secrets
 import time
 from collections import deque
 from pathlib import Path
@@ -104,12 +105,22 @@ class ClusterState:
         self.update_summary: UpdateSummary | None = None
         self._update_check_task: asyncio.Task | None = None
 
-    def agent_headers(self, method: str = "ANY", path: str = "*") -> dict[str, str]:
+    def agent_headers(
+        self, method: str = "ANY", path: str = "*", *, body: bytes = b""
+    ) -> dict[str, str]:
         headers: dict[str, str] = {}
         if self.agent_token:
             headers["Authorization"] = f"Bearer {self.agent_token}"
         if self.router_private_key is not None:
-            headers.update(sign_agent_request_ed25519(self.router_private_key, method, path))
+            headers.update(
+                sign_agent_request_ed25519(
+                    self.router_private_key,
+                    method,
+                    path,
+                    nonce=secrets.token_hex(8),
+                    body=body,
+                )
+            )
         return headers
 
     def _dynamic_nodes_path(self) -> Path | None:

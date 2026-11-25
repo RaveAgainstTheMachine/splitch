@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import secrets
 import time
 import uuid
 from collections.abc import Callable
@@ -228,9 +229,11 @@ class SwarmManager:
             return False, f"Execution node '{pref_id or 'auto'}' is offline.", {}
 
         try:
+            approval_nonce = secrets.token_hex(8)
             tool_headers: dict[str, str] = {
                 **self.cluster.agent_headers("POST", "/tools/execute"),
                 "X-Splitch-Router-Approved": "1",
+                "X-Splitch-Approval-Nonce": approval_nonce,
             }
             if self.cluster.router_private_key is not None:
                 ts_hdr, sig_hdr = sign_tool_approval_ed25519(
@@ -238,6 +241,7 @@ class SwarmManager:
                     t_name,
                     parsed_args,
                     conv.workspace_subpath,
+                    nonce=approval_nonce,
                 )
                 tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
                 tool_headers["X-Splitch-Approval-Sig"] = sig_hdr

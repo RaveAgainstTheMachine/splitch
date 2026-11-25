@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import re
+import secrets
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -1365,9 +1366,11 @@ def build_chat_router(
                                 tool_ok = False
                             else:
                                 try:
+                                    approval_nonce = secrets.token_hex(8)
                                     tool_headers: dict[str, str] = {
                                         **cluster.agent_headers("POST", "/tools/execute"),
                                         "X-Splitch-Router-Approved": "1",
+                                        "X-Splitch-Approval-Nonce": approval_nonce,
                                     }
                                     if cluster.router_private_key is not None:
                                         ts_hdr, sig_hdr = sign_tool_approval_ed25519(
@@ -1375,6 +1378,7 @@ def build_chat_router(
                                             t_name,
                                             parsed_args,
                                             conv.workspace_subpath,
+                                            nonce=approval_nonce,
                                         )
                                         tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
                                         tool_headers["X-Splitch-Approval-Sig"] = sig_hdr
@@ -1384,6 +1388,7 @@ def build_chat_router(
                                             t_name,
                                             parsed_args,
                                             conv.workspace_subpath,
+                                            nonce=approval_nonce,
                                         )
                                         tool_headers["X-Splitch-Approval-Ts"] = ts_hdr
                                         tool_headers["X-Splitch-Approval-Sig"] = sig_hdr

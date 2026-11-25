@@ -603,9 +603,23 @@ def sign_agent_request_ed25519(
     path: str,
     *,
     timestamp: int | None = None,
+    nonce: str = "",
+    body: bytes = b"",
 ) -> dict[str, str]:
     """Produce short-lived Ed25519 request-authentication headers for router -> agent calls."""
     ts_str = str(int(time.time()) if timestamp is None else int(timestamp))
+    if nonce or body:
+        body_hash = hashlib.sha256(body).hexdigest()
+        msg = f"req2:{ts_str}:{nonce}:{method.upper()}:{path}:{body_hash}".encode()
+        sig_b64 = base64.urlsafe_b64encode(priv.sign(msg)).decode("ascii").rstrip("=")
+        out = {
+            "X-Splitch-Auth-Ts": ts_str,
+            "X-Splitch-Auth-Sig": f"ed25519:{sig_b64}",
+            "X-Splitch-Auth-Body-Sha256": body_hash,
+        }
+        if nonce:
+            out["X-Splitch-Auth-Nonce"] = nonce
+        return out
     msg = f"req:{ts_str}:{method.upper()}:{path}".encode()
     sig_b64 = base64.urlsafe_b64encode(priv.sign(msg)).decode("ascii").rstrip("=")
     return {
@@ -621,8 +635,12 @@ def verify_agent_request_ed25519(
     method: str,
     path: str,
     *,
+    nonce_header: str = "",
+    body: bytes = b"",
+    body_sha256_header: str = "",
     max_age_s: int = 60,
     now_ts: float | None = None,
+    replay_cache: Any = None,
 ) -> bool:
     if not ts_header or not sig_header:
         return False
@@ -638,7 +656,28 @@ def verify_agent_request_ed25519(
     if abs(now - ts_val) > max_age_s:
         return False
 
-    # Accept exact `(METHOD, path)` match, or wildcard `("ANY", "*")` for multi-request proxy clients
+    nonce_clean = nonce_header.strip()
+    body_hdr = body_sha256_header.strip().lower()
+    if nonce_clean or body_hdr:
+        actual_hash = hashlib.sha256(body).hexdigest()
+        if body_hdr and not hmac.compare_digest(body_hdr, actual_hash):
+            return False
+        for cand_m, cand_p in ((method.upper(), path), ("ANY", "*")):
+            msg = f"req2:{ts_val}:{nonce_clean}:{cand_m}:{cand_p}:{actual_hash}".encode()
+            try:
+                pub.verify(sig_bytes, msg)
+                return not (
+                    replay_cache is not None
+                    and nonce_clean
+                    and replay_cache.seen_or_record(
+                        f"ed25519-req:{ts_val}:{nonce_clean}", ttl_s=float(max_age_s * 2)
+                    )
+                )
+            except InvalidSignature:
+                continue
+        return False
+
+    # Legacy `req:` verification for rolling node upgrades (when no nonce/body-hash header sent)
     for cand_m, cand_p in ((method.upper(), path), ("ANY", "*")):
         msg = f"req:{ts_val}:{cand_m}:{cand_p}".encode()
         try:
@@ -656,10 +695,16 @@ def sign_tool_approval_ed25519(
     workspace_subpath: str = "",
     *,
     timestamp: int | None = None,
+    nonce: str = "",
 ) -> tuple[str, str]:
     """Sign a router HITL tool-approval assertion with Ed25519 (agents verify with public key only)."""
     ts_str = str(int(time.time()) if timestamp is None else int(timestamp))
-    msg = f"tool:{ts_str}:{_canonical_tool_payload(tool, arguments, workspace_subpath)}".encode()
+    payload = _canonical_tool_payload(tool, arguments, workspace_subpath)
+    msg = (
+        f"tool:{ts_str}:{nonce}:{payload}".encode()
+        if nonce
+        else f"tool:{ts_str}:{payload}".encode()
+    )
     sig_b64 = base64.urlsafe_b64encode(priv.sign(msg)).decode("ascii").rstrip("=")
     return ts_str, f"ed25519:{sig_b64}"
 
@@ -672,8 +717,10 @@ def verify_tool_approval_ed25519(
     arguments: dict[str, Any],
     workspace_subpath: str = "",
     *,
+    nonce: str = "",
     max_age_s: int = 60,
     now_ts: float | None = None,
+    replay_cache: Any = None,
 ) -> bool:
     if not ts_header or not sig_header:
         return False
@@ -688,9 +735,21 @@ def verify_tool_approval_ed25519(
     now = time.time() if now_ts is None else now_ts
     if abs(now - ts_val) > max_age_s:
         return False
-    msg = f"tool:{ts_val}:{_canonical_tool_payload(tool, arguments, workspace_subpath)}".encode()
+    payload = _canonical_tool_payload(tool, arguments, workspace_subpath)
+    nonce_clean = nonce.strip()
+    msg = (
+        f"tool:{ts_val}:{nonce_clean}:{payload}".encode()
+        if nonce_clean
+        else f"tool:{ts_val}:{payload}".encode()
+    )
     try:
         pub.verify(sig_bytes, msg)
-        return True
     except InvalidSignature:
         return False
+    return not (
+        replay_cache is not None
+        and nonce_clean
+        and replay_cache.seen_or_record(
+            f"ed25519-tool:{ts_val}:{nonce_clean}", ttl_s=float(max_age_s * 2)
+        )
+    )

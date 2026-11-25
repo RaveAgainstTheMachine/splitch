@@ -80,7 +80,7 @@ from backend.shared.secrets import (
     resolve_secret_value,
     verify_secret_hash,
 )
-from backend.shared.security import is_loopback_host, is_trusted_proxy
+from backend.shared.security import is_allowed_host_header, is_loopback_host, is_trusted_proxy
 from backend.shared.updater import (
     DoctorReport,
     UpdateStatus,
@@ -339,6 +339,18 @@ def _is_origin_allowed(request: Request, origin: str) -> bool:
 
 @app.middleware("http")
 async def _security_and_auth_middleware(request: Request, call_next):
+    extra_hosts: list[str] = []
+    if config.router.public_url:
+        pu_host = urlparse(config.router.public_url).hostname
+        if pu_host:
+            extra_hosts.append(pu_host)
+    for orig in _EXTRA_ORIGINS:
+        oh = urlparse(orig).hostname
+        if oh:
+            extra_hosts.append(oh)
+    if not is_allowed_host_header(request.headers.get("host"), extra_hosts=extra_hosts):
+        return JSONResponse(status_code=421, content={"detail": "Invalid Host header"})
+
     path = request.url.path
     auth_kind = _auth_method(request)
     has_join_token = (

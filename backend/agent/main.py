@@ -122,7 +122,13 @@ from backend.shared.secrets import (
     verify_agent_request_ed25519,
     verify_tool_approval_ed25519,
 )
-from backend.shared.security import is_loopback_host, verify_tool_approval
+from backend.shared.security import (
+    DEFAULT_AGENT_NONCE_CACHE,
+    DEFAULT_TOOL_NONCE_CACHE,
+    is_allowed_host_header,
+    is_loopback_host,
+    verify_tool_approval,
+)
 from backend.shared.strata_manager import (
     build_strata_calibrate_cmd,
     build_strata_launch_cmd,
@@ -642,20 +648,27 @@ app = FastAPI(title="Splitch Node Agent", version=VERSION, lifespan=lifespan)
 
 @app.middleware("http")
 async def _agent_auth_middleware(request: Request, call_next):
+    if not is_allowed_host_header(request.headers.get("host")):
+        return JSONResponse(status_code=421, content={"detail": "Invalid Host header"})
     if (AGENT_TOKEN or ROUTER_PUBLIC_KEY is not None) and request.url.path != "/health":
         auth = request.headers.get("authorization", "")
         token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
         ok_bearer = bool(AGENT_TOKEN and token and hmac.compare_digest(token, AGENT_TOKEN))
-        ok_ed25519 = bool(
-            ROUTER_PUBLIC_KEY is not None
-            and verify_agent_request_ed25519(
+        ok_ed25519 = False
+        if ROUTER_PUBLIC_KEY is not None and request.headers.get("x-splitch-auth-sig"):
+            body_sha_hdr = request.headers.get("x-splitch-auth-body-sha256", "")
+            req_body = await request.body() if body_sha_hdr else b""
+            ok_ed25519 = verify_agent_request_ed25519(
                 ROUTER_PUBLIC_KEY,
                 request.headers.get("x-splitch-auth-ts", ""),
                 request.headers.get("x-splitch-auth-sig", ""),
                 request.method,
                 request.url.path,
+                nonce_header=request.headers.get("x-splitch-auth-nonce", ""),
+                body=req_body,
+                body_sha256_header=body_sha_hdr,
+                replay_cache=DEFAULT_AGENT_NONCE_CACHE,
             )
-        )
         if not (ok_bearer or ok_ed25519):
             response = JSONResponse(
                 status_code=401, content={"detail": "Invalid agent bearer token or Ed25519 signature"}
@@ -2505,6 +2518,7 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
         if AGENT_TOKEN or ROUTER_PUBLIC_KEY is not None:
             ts_hdr = request.headers.get("x-splitch-approval-ts", "")
             sig_hdr = request.headers.get("x-splitch-approval-sig", "")
+            nonce_hdr = request.headers.get("x-splitch-approval-nonce", "")
             ok_ed25519 = bool(
                 ROUTER_PUBLIC_KEY is not None
                 and verify_tool_approval_ed25519(
@@ -2514,6 +2528,8 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
                     req.tool,
                     req.arguments,
                     req.workspace_subpath,
+                    nonce=nonce_hdr,
+                    replay_cache=DEFAULT_TOOL_NONCE_CACHE,
                 )
             )
             ok_hmac = bool(
@@ -2525,6 +2541,8 @@ async def execute_workspace_tool(req: ToolExecRequest, request: Request) -> Tool
                     req.tool,
                     req.arguments,
                     req.workspace_subpath,
+                    nonce=nonce_hdr,
+                    replay_cache=DEFAULT_TOOL_NONCE_CACHE,
                 )
             )
             if not (ok_ed25519 or ok_hmac):

@@ -354,7 +354,7 @@ async def test_harness_2_and_3_live_router_anthropic_and_bench() -> None:
 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=router_app),
-            base_url="http://splitch.test",
+            base_url="http://127.0.0.1:8080",
         ) as b_client:
             # 1. Anthropic /v1/messages/count_tokens
             ct_res = await b_client.post(
@@ -415,7 +415,7 @@ async def test_harness_2_and_3_live_router_anthropic_and_bench() -> None:
             # 4. Benchmark harness suite (`run_benchmark_suite` + `format_bench_table`)
             report = await run_benchmark_suite(
                 BenchRunRequest(models=["heavy"], max_tokens=64, concurrency=2),
-                router_url="http://splitch.test",
+                router_url="http://127.0.0.1:8080",
                 client=b_client,
             )
             assert len(report.results) == 1
