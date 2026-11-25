@@ -561,6 +561,26 @@ def build_chat_router(
                 }
                 if req.temperature is not None:
                     req_body["temperature"] = req.temperature
+                if req.top_p is not None:
+                    req_body["top_p"] = req.top_p
+                if req.top_k is not None:
+                    req_body["top_k"] = req.top_k
+                if req.min_p is not None:
+                    req_body["min_p"] = req.min_p
+                if req.repeat_penalty is not None:
+                    req_body["repeat_penalty"] = req.repeat_penalty
+                if req.max_tokens is not None:
+                    req_body["max_tokens"] = req.max_tokens
+                if req.seed is not None:
+                    req_body["seed"] = req.seed
+                if req.stop:
+                    req_body["stop"] = req.stop
+                if req.reasoning_effort is not None:
+                    req_body["reasoning_effort"] = (
+                        "none" if req.reasoning_effort == "off" else req.reasoning_effort
+                    )
+                if req.enable_thinking is not None:
+                    req_body["chat_template_kwargs"] = {"enable_thinking": req.enable_thinking}
                 if tools_payload:
                     req_body["tools"] = tools_payload
 

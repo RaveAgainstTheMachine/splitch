@@ -62,10 +62,14 @@ from backend.shared.models import (
     ControlState,
     ControlUpdate,
     DashboardSnapshot,
+    EngineRuntimeConfig,
     ModelActionRequest,
     NodeRegisterRequest,
     NodeStatus,
+    NodeUpdateRequest,
     NodeUpdateRunResult,
+    StorageCleanResponse,
+    StorageUsageResponse,
     UiThemeConfig,
     UiThemeUpdate,
     UpdateSummary,
@@ -942,6 +946,101 @@ async def register_node(req: NodeRegisterRequest, request: Request) -> NodeStatu
     req.engine_url = await _validate_node_url(req.engine_url, "engine_url")
     req.media_url = await _validate_node_url(req.media_url, "media_url", allow_empty=True)
     return await cluster.register_node(req)
+
+
+@app.patch("/api/nodes/{node_id}", response_model=NodeStatus)
+async def update_node_config(node_id: str, patch: NodeUpdateRequest) -> NodeStatus:
+    if patch.agent_url is not None:
+        patch.agent_url = await _validate_node_url(patch.agent_url, "agent_url")
+    if patch.engine_url is not None:
+        patch.engine_url = await _validate_node_url(patch.engine_url, "engine_url")
+    if patch.media_url is not None:
+        patch.media_url = await _validate_node_url(patch.media_url, "media_url", allow_empty=True)
+    updated = await cluster.update_node(node_id, patch)
+    if updated is None:
+        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found")
+    return updated
+
+
+@app.get("/api/nodes/{node_id}/engine-config", response_model=EngineRuntimeConfig)
+async def get_node_engine_config(node_id: str) -> EngineRuntimeConfig:
+    node = cluster.nodes.get(node_id)
+    if not node or not node.online:
+        raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0, headers=cluster.agent_headers("GET", "/engine/runtime-config")
+        ) as client:
+            r = await client.get(f"{node.agent_url}/engine/runtime-config")
+            if r.status_code >= 400:
+                raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+            return EngineRuntimeConfig.model_validate(r.json())
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/nodes/{node_id}/engine-config", response_model=EngineRuntimeConfig)
+async def set_node_engine_config(
+    node_id: str, cfg: EngineRuntimeConfig
+) -> EngineRuntimeConfig:
+    node = cluster.nodes.get(node_id)
+    if not node or not node.online:
+        raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
+    try:
+        async with httpx.AsyncClient(
+            timeout=25.0, headers=cluster.agent_headers("POST", "/engine/runtime-config")
+        ) as client:
+            r = await client.post(
+                f"{node.agent_url}/engine/runtime-config",
+                json=cfg.model_dump(),
+            )
+            if r.status_code >= 400:
+                raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+            return EngineRuntimeConfig.model_validate(r.json())
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/nodes/{node_id}/storage/usage", response_model=StorageUsageResponse)
+async def get_node_storage_usage(node_id: str) -> StorageUsageResponse:
+    node = cluster.nodes.get(node_id)
+    if not node or not node.online:
+        raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0, headers=cluster.agent_headers("GET", "/files/storage/usage")
+        ) as client:
+            r = await client.get(f"{node.agent_url}/files/storage/usage")
+            if r.status_code >= 400:
+                raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+            return StorageUsageResponse.model_validate(r.json())
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/nodes/{node_id}/storage/clean-cache", response_model=StorageCleanResponse)
+async def clean_node_storage_cache(node_id: str) -> StorageCleanResponse:
+    node = cluster.nodes.get(node_id)
+    if not node or not node.online:
+        raise HTTPException(status_code=503, detail=f"Node '{node_id}' is offline")
+    try:
+        async with httpx.AsyncClient(
+            timeout=25.0, headers=cluster.agent_headers("POST", "/files/storage/clean-cache")
+        ) as client:
+            r = await client.post(f"{node.agent_url}/files/storage/clean-cache", json={})
+            if r.status_code >= 400:
+                raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+            return StorageCleanResponse.model_validate(r.json())
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.delete("/api/nodes/{node_id}")

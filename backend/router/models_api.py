@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from backend.shared.models import (
     NodeStatus,
     PullModelRequest,
 )
+from backend.shared.secrets import resolve_secret_value
 
 QUANT_RE = re.compile(
     r"(IQ\d_[A-Z0-9]+|Q\d_[A-Z0-9_]+|F16|BF16|F32|MXFP4|UD-Q\d_[A-Z0-9_]+)", re.IGNORECASE
@@ -639,10 +641,17 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         node = cluster.nodes.get(req.node_id)
         if not node or not node.online:
             raise HTTPException(status_code=503, detail=f"Node '{req.node_id}' is offline")
+        headers = cluster.agent_headers("POST", "/files/models/pull")
         try:
-            async with httpx.AsyncClient(
-                timeout=15.0, headers=cluster.agent_headers("POST", "/files/models/pull")
-            ) as client:
+            hf_tok = resolve_secret_value(os.getenv("HF_TOKEN", ""), vault=cluster.vault) or (
+                cluster.vault.get("hf_token") or ""
+            )
+        except (OSError, PermissionError, ValueError):
+            hf_tok = ""
+        if hf_tok.strip():
+            headers["x-splitch-hf-token"] = hf_tok.strip()
+        try:
+            async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
                 r = await client.post(
                     f"{node.agent_url}/files/models/pull",
                     json=req.model_dump(),

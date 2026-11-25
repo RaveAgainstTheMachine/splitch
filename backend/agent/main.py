@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import platform
+import plistlib
 import re
 import shlex
 import shutil
@@ -77,6 +78,7 @@ from backend.shared.models import (
     ClientConfigSyncRequest,
     DownloadJob,
     EngineKind,
+    EngineRuntimeConfig,
     GitActionResponse,
     GitCommitRequest,
     GitDiffResponse,
@@ -97,6 +99,8 @@ from backend.shared.models import (
     SdCliVideoRequest,
     SkillSyncPayload,
     StartMediaEngineRequest,
+    StorageCleanResponse,
+    StorageUsageResponse,
     StrataCalibrateRequest,
     StrataImportPlanRequest,
     StrataInstallRequest,
@@ -825,7 +829,7 @@ async def _refresh_engine_model_index(expected_stem: str | None = None) -> None:
             break
 
 
-async def _run_hf_download(job: DownloadJob) -> None:
+async def _run_hf_download(job: DownloadJob, *, hf_token_override: str = "") -> None:
     root = Path(STORAGE_PATH)
     root.mkdir(parents=True, exist_ok=True)
     safe_name = Path(job.filename).name
@@ -833,7 +837,7 @@ async def _run_hf_download(job: DownloadJob) -> None:
     part = root / f"{safe_name}.part"
     url = f"https://huggingface.co/{job.repo_id}/resolve/main/{job.filename}"
     headers = {}
-    hf_token = os.getenv("HF_TOKEN")
+    hf_token = hf_token_override.strip() or os.getenv("HF_TOKEN", "").strip()
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
 
@@ -870,14 +874,14 @@ async def _run_hf_download(job: DownloadJob) -> None:
                 part.unlink()
 
 
-async def _run_hf_mlx_download(job: DownloadJob) -> None:
+async def _run_hf_mlx_download(job: DownloadJob, *, hf_token_override: str = "") -> None:
     mlx_root = Path(STORAGE_PATH) / "mlx"
     mlx_root.mkdir(parents=True, exist_ok=True)
     slug = job.repo_id.replace("/", "--")
     dest_dir = mlx_root / slug
     tmp_dir = mlx_root / f".{slug}.part"
     headers = {}
-    hf_token = os.getenv("HF_TOKEN")
+    hf_token = hf_token_override.strip() or os.getenv("HF_TOKEN", "").strip()
     if hf_token:
         headers["Authorization"] = f"Bearer {hf_token}"
 
@@ -953,9 +957,10 @@ async def _run_hf_mlx_download(job: DownloadJob) -> None:
 
 
 @app.post("/files/models/pull", response_model=DownloadJob)
-async def pull_model_file(req: PullModelRequest) -> DownloadJob:
+async def pull_model_file(req: PullModelRequest, request: Request) -> DownloadJob:
     if not re.fullmatch(r"[A-Za-z0-9._\-]+/[A-Za-z0-9._\-]+", req.repo_id):
         raise HTTPException(status_code=400, detail="Invalid Hugging Face repo_id")
+    hf_token_hdr = request.headers.get("x-splitch-hf-token", "").strip()
     if req.format == "mlx":
         mounted, _, _ = await asyncio.to_thread(_collect_storage, STORAGE_PATH)
         if not mounted:
@@ -969,7 +974,7 @@ async def pull_model_file(req: PullModelRequest) -> DownloadJob:
             status="downloading",
         )
         state.downloads[job.id] = job
-        asyncio.create_task(_run_hf_mlx_download(job))
+        asyncio.create_task(_run_hf_mlx_download(job, hf_token_override=hf_token_hdr))
         return job
 
     if ".." in req.filename or not req.filename.lower().endswith((".gguf", ".safetensors", ".strata")):
@@ -988,8 +993,300 @@ async def pull_model_file(req: PullModelRequest) -> DownloadJob:
         status="downloading",
     )
     state.downloads[job.id] = job
-    asyncio.create_task(_run_hf_download(job))
+    asyncio.create_task(_run_hf_download(job, hf_token_override=hf_token_hdr))
     return job
+
+
+def _engine_runtime_state_file() -> Path:
+    return default_data_root() / "engine_runtime.json"
+
+
+def _resolve_llama_service_target() -> tuple[str, str, Path | None]:
+    if sys.platform.startswith("linux"):
+        systemd_dir = Path.home() / ".config" / "systemd" / "user"
+        for unit in ("splitch-llama.service", "llama-server.service"):
+            unit_file = systemd_dir / unit
+            if unit_file.is_file():
+                return "systemd", unit, systemd_dir / f"{unit}.d" / "99-splitch-runtime.conf"
+    elif sys.platform == "darwin":
+        agents_dir = Path.home() / "Library" / "LaunchAgents"
+        for label in ("com.splitch.llama", "ai.splitch.llama"):
+            plist_file = agents_dir / f"{label}.plist"
+            if plist_file.is_file():
+                return "launchd", label, plist_file
+    return "none", "", None
+
+
+def _read_engine_runtime_config() -> EngineRuntimeConfig:
+    kind, name, target_path = _resolve_llama_service_target()
+    data: dict[str, object] = {}
+    p = _engine_runtime_state_file()
+    if p.is_file():
+        with contextlib.suppress(OSError, ValueError):
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                data = raw
+    data["supported"] = kind != "none"
+    data["unit_name"] = name
+    data["override_path"] = str(target_path) if target_path else ""
+    data["apply_restart"] = False
+    return EngineRuntimeConfig.model_validate(data)
+
+
+def _strip_llama_managed_flags(args: list[str]) -> list[str]:
+    """Strip flags managed by EngineRuntimeConfig so updated values replace cleanly."""
+    valued = {
+        "--ctx-size",
+        "-c",
+        "--cache-type-k",
+        "-ctk",
+        "--cache-type-v",
+        "-ctv",
+        "--flash-attn",
+        "-fa",
+        "--models-max",
+        "--sleep-idle-seconds",
+        "--parallel",
+        "-np",
+    }
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        flag_name = tok.split("=", 1)[0]
+        if flag_name in valued:
+            if "=" not in tok and i + 1 < len(args):
+                i += 2
+            else:
+                i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _apply_engine_runtime_config(cfg: EngineRuntimeConfig) -> EngineRuntimeConfig:
+    kind, name, target_path = _resolve_llama_service_target()
+    state_file = _engine_runtime_state_file()
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    saved = cfg.model_dump()
+    saved["apply_restart"] = False
+    saved["supported"] = kind != "none"
+    saved["unit_name"] = name
+    saved["override_path"] = str(target_path) if target_path else ""
+    state_file.write_text(json.dumps(saved, indent=2) + "\n", encoding="utf-8")
+
+    managed_flags = [
+        "--ctx-size",
+        str(cfg.ctx_size),
+        "--cache-type-k",
+        cfg.cache_type_k,
+        "--cache-type-v",
+        cfg.cache_type_v,
+        "--flash-attn",
+        "on" if cfg.flash_attn else "off",
+        "--models-max",
+        str(cfg.models_max),
+        "--sleep-idle-seconds",
+        str(cfg.sleep_idle_seconds),
+        "--parallel",
+        str(cfg.parallel),
+    ]
+
+    if kind == "systemd" and target_path is not None:
+        unit_file = target_path.parent.parent / name
+        base_exec: list[str] = []
+        with contextlib.suppress(OSError):
+            raw_unit = unit_file.read_text(encoding="utf-8")
+            # Collapse line-continued ExecStart= blocks
+            joined = re.sub(r"\\\s*\n\s*", " ", raw_unit)
+            m = re.search(r"^ExecStart=(.+)$", joined, re.MULTILINE)
+            if m:
+                base_exec = shlex.split(m.group(1).strip())
+        if not base_exec:
+            llama_bin = shutil.which("llama-server") or "/usr/bin/llama-server"
+            base_exec = [
+                llama_bin,
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8081",
+                "--models-dir",
+                STORAGE_PATH,
+            ]
+        final_args = _strip_llama_managed_flags(base_exec) + managed_flags
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        escaped_cmd = " ".join(shlex.quote(a) for a in final_args)
+        target_path.write_text(f"[Service]\nExecStart=\nExecStart={escaped_cmd}\n", encoding="utf-8")
+        if cfg.apply_restart and shutil.which("systemctl"):
+            subprocess.run(
+                ["systemctl", "--user", "daemon-reload"],
+                capture_output=True,
+                timeout=8.0,
+                check=False,
+            )
+            subprocess.run(
+                ["systemctl", "--user", "restart", name],
+                capture_output=True,
+                timeout=12.0,
+                check=False,
+            )
+    elif kind == "launchd" and target_path is not None:
+        with contextlib.suppress(OSError, plistlib.InvalidFileException, ValueError):
+            plist_data = plistlib.loads(target_path.read_bytes())
+            prog = list(plist_data.get("ProgramArguments") or [])
+            if prog:
+                plist_data["ProgramArguments"] = _strip_llama_managed_flags(
+                    [str(x) for x in prog]
+                ) + managed_flags
+                target_path.write_bytes(plistlib.dumps(plist_data))
+                if cfg.apply_restart and shutil.which("launchctl"):
+                    uid = os.getuid()
+                    subprocess.run(
+                        ["launchctl", "kickstart", "-k", f"gui/{uid}/{name}"],
+                        capture_output=True,
+                        timeout=10.0,
+                        check=False,
+                    )
+
+    return EngineRuntimeConfig.model_validate(saved)
+
+
+def _storage_cache_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    llama_cache = os.getenv("LLAMA_CACHE", "").strip()
+    if llama_cache:
+        dirs.append(Path(llama_cache).expanduser())
+    sib_cache = Path(STORAGE_PATH).expanduser().parent / "cache"
+    if sib_cache.is_dir():
+        dirs.append(sib_cache)
+    hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
+    if hf_hub.is_dir():
+        dirs.append(hf_hub)
+    seen: set[Path] = set()
+    uniq: list[Path] = []
+    for d in dirs:
+        res = d.resolve()
+        if res not in seen and res != Path(STORAGE_PATH).expanduser().resolve():
+            seen.add(res)
+            uniq.append(d)
+    return uniq
+
+
+def _scan_storage_usage() -> StorageUsageResponse:
+    root = Path(STORAGE_PATH).expanduser()
+    free_gb = 0.0
+    if root.exists():
+        with contextlib.suppress(OSError):
+            free_gb = round(shutil.disk_usage(root).free / (1024**3), 2)
+
+    models_bytes = 0
+    partial_bytes = 0
+    partial_count = 0
+    if root.is_dir():
+        for entry in root.rglob("*"):
+            with contextlib.suppress(OSError):
+                rel_parts = entry.relative_to(root).parts
+                if any(p.endswith(".part") for p in rel_parts[:-1]):
+                    continue
+                if entry.name.endswith(".part"):
+                    partial_count += 1
+                    if entry.is_file():
+                        partial_bytes += entry.stat().st_size
+                    elif entry.is_dir():
+                        partial_bytes += sum(
+                            p.stat().st_size for p in entry.rglob("*") if p.is_file()
+                        )
+                elif entry.is_file() and entry.suffix.lower() in (
+                    ".gguf",
+                    ".strata",
+                    ".safetensors",
+                    ".ckpt",
+                ):
+                    models_bytes += entry.stat().st_size
+
+    cache_bytes = 0
+    cache_entries = 0
+    for cdir in _storage_cache_dirs():
+        if not cdir.is_dir():
+            continue
+        with contextlib.suppress(OSError):
+            for entry in cdir.rglob("*"):
+                if entry.is_file():
+                    cache_entries += 1
+                    cache_bytes += entry.stat().st_size
+
+    return StorageUsageResponse(
+        storage_path=str(root),
+        free_gb=free_gb,
+        models_gb=round(models_bytes / (1024**3), 2),
+        partial_gb=round(partial_bytes / (1024**3), 2),
+        cache_gb=round(cache_bytes / (1024**3), 2),
+        partial_count=partial_count,
+        cache_entries=cache_entries,
+    )
+
+
+def _clean_storage_cache() -> StorageCleanResponse:
+    root = Path(STORAGE_PATH).expanduser()
+    removed = 0
+    freed_bytes = 0
+    if root.is_dir():
+        for entry in list(root.rglob("*.part")):
+            with contextlib.suppress(OSError):
+                if entry.is_file():
+                    sz = entry.stat().st_size
+                    entry.unlink()
+                    removed += 1
+                    freed_bytes += sz
+                elif entry.is_dir():
+                    sz = sum(p.stat().st_size for p in entry.rglob("*") if p.is_file())
+                    shutil.rmtree(entry)
+                    removed += 1
+                    freed_bytes += sz
+
+    for cdir in _storage_cache_dirs():
+        if not cdir.is_dir():
+            continue
+        for child in list(cdir.iterdir()):
+            with contextlib.suppress(OSError):
+                if child.is_file():
+                    sz = child.stat().st_size
+                    child.unlink()
+                    removed += 1
+                    freed_bytes += sz
+                elif child.is_dir():
+                    sz = sum(p.stat().st_size for p in child.rglob("*") if p.is_file())
+                    shutil.rmtree(child)
+                    removed += 1
+                    freed_bytes += sz
+
+    return StorageCleanResponse(removed_files=removed, freed_gb=round(freed_bytes / (1024**3), 2))
+
+
+@app.get("/engine/runtime-config", response_model=EngineRuntimeConfig)
+async def get_engine_runtime_config() -> EngineRuntimeConfig:
+    return await asyncio.to_thread(_read_engine_runtime_config)
+
+
+@app.post("/engine/runtime-config", response_model=EngineRuntimeConfig)
+async def set_engine_runtime_config(cfg: EngineRuntimeConfig) -> EngineRuntimeConfig:
+    updated = await asyncio.to_thread(_apply_engine_runtime_config, cfg)
+    if cfg.apply_restart:
+        asyncio.create_task(state.poll_once())
+    return updated
+
+
+@app.get("/files/storage/usage", response_model=StorageUsageResponse)
+async def get_storage_usage() -> StorageUsageResponse:
+    return await asyncio.to_thread(_scan_storage_usage)
+
+
+@app.post("/files/storage/clean-cache", response_model=StorageCleanResponse)
+async def clean_storage_cache() -> StorageCleanResponse:
+    res = await asyncio.to_thread(_clean_storage_cache)
+    asyncio.create_task(state.poll_once())
+    return res
 
 
 # ── Managed Local Media Engine (`sd-server` / ComfyUI) Lifecycle ─────────────

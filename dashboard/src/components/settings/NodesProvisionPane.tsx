@@ -1,15 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy, KeyRound, Plus, Server, Terminal, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  HardDrive,
+  KeyRound,
+  Pencil,
+  Plus,
+  Save,
+  Server,
+  Sliders,
+  Terminal,
+  Trash2
+} from "lucide-react";
 import type {
+  DashboardSnapshot,
+  EngineRuntimeConfig,
   JoinTokenInfo,
   JoinTokenResponse,
   NodeRole,
   NodeSshTestResponse,
-  RuntimeSettings
+  NodeStatus,
+  RuntimeSettings,
+  StorageUsageResponse
 } from "../../types";
 
 export function NodesProvisionPane({
   settings,
+  snapshot,
   copiedKey,
   copyText,
   onStatusRefresh,
@@ -18,6 +35,7 @@ export function NodesProvisionPane({
   onParentError
 }: {
   settings: RuntimeSettings | null;
+  snapshot?: DashboardSnapshot | null;
   copiedKey: string | null;
   copyText: (key: string, text: string) => Promise<void>;
   onStatusRefresh: () => Promise<void>;
@@ -77,6 +95,146 @@ export function NodesProvisionPane({
     media_url: ""
   });
   const [registering, setRegistering] = useState(false);
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState({
+    display_name: "",
+    role: "gpu" as NodeRole,
+    yield_on_gaming: false,
+    yield_gpus: "",
+    agent_url: "",
+    engine_url: "",
+    media_url: ""
+  });
+  const [editSaving, setEditSaving] = useState(false);
+  const [engineNodeId, setEngineNodeId] = useState<string | null>(null);
+  const [engineCfg, setEngineCfg] = useState<EngineRuntimeConfig | null>(null);
+  const [engineBusy, setEngineBusy] = useState(false);
+  const [storageMap, setStorageMap] = useState<Record<string, StorageUsageResponse>>({});
+  const [storageBusyNode, setStorageBusyNode] = useState<string | null>(null);
+
+  const startEditNode = (n: NodeStatus) => {
+    if (editingNodeId === n.node_id) {
+      setEditingNodeId(null);
+      return;
+    }
+    setEditingNodeId(n.node_id);
+    setEditForm({
+      display_name: n.display_name,
+      role: n.role,
+      yield_on_gaming: n.yield_on_gaming,
+      yield_gpus: (n.yield_gpu_indices ?? []).join(", "),
+      agent_url: n.agent_url,
+      engine_url: n.engine_url,
+      media_url: n.media_url ?? ""
+    });
+  };
+
+  const saveEditNode = async (e: React.FormEvent, nodeId: string) => {
+    e.preventDefault();
+    setEditSaving(true);
+    onLocalError(null);
+    const yield_gpu_indices = editForm.yield_gpus
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => /^\d+$/.test(s))
+      .map((s) => Number(s));
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          display_name: editForm.display_name,
+          role: editForm.role,
+          yield_on_gaming: editForm.yield_on_gaming,
+          yield_gpu_indices,
+          agent_url: editForm.agent_url,
+          engine_url: editForm.engine_url,
+          media_url: editForm.media_url
+        })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      setEditingNodeId(null);
+      onSavedNotice(`Updated ${nodeId}`);
+      await onStatusRefresh();
+    } catch (err) {
+      onLocalError(err instanceof Error ? err.message : "Failed to update node");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const toggleEngineTuning = async (nodeId: string) => {
+    if (engineNodeId === nodeId) {
+      setEngineNodeId(null);
+      return;
+    }
+    setEngineNodeId(nodeId);
+    setEngineBusy(true);
+    onLocalError(null);
+    try {
+      const [cfgRes, storRes] = await Promise.all([
+        fetch(`/api/nodes/${encodeURIComponent(nodeId)}/engine-config`),
+        fetch(`/api/nodes/${encodeURIComponent(nodeId)}/storage/usage`)
+      ]);
+      if (cfgRes.ok) setEngineCfg((await cfgRes.json()) as EngineRuntimeConfig);
+      if (storRes.ok) {
+        const usage = (await storRes.json()) as StorageUsageResponse;
+        setStorageMap((prev) => ({ ...prev, [nodeId]: usage }));
+      }
+    } catch (err) {
+      onLocalError(err instanceof Error ? err.message : "Failed to inspect node engine config");
+    } finally {
+      setEngineBusy(false);
+    }
+  };
+
+  const saveEngineConfig = async (nodeId: string, applyRestart: boolean) => {
+    if (!engineCfg) return;
+    setEngineBusy(true);
+    onLocalError(null);
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/engine-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...engineCfg, apply_restart: applyRestart })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      setEngineCfg(body as EngineRuntimeConfig);
+      onSavedNotice(
+        applyRestart ? `Saved & restarted engine on ${nodeId}` : `Saved engine config on ${nodeId}`
+      );
+      await onStatusRefresh();
+    } catch (err) {
+      onLocalError(err instanceof Error ? err.message : "Failed to save engine config");
+    } finally {
+      setEngineBusy(false);
+    }
+  };
+
+  const cleanNodeCache = async (nodeId: string) => {
+    setStorageBusyNode(nodeId);
+    onLocalError(null);
+    try {
+      const res = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/storage/clean-cache`, {
+        method: "POST"
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      onSavedNotice(`Cleaned ${body.removed_files} file(s), freed ${body.freed_gb} GB on ${nodeId}`);
+      const storRes = await fetch(`/api/nodes/${encodeURIComponent(nodeId)}/storage/usage`);
+      if (storRes.ok) {
+        const usage = (await storRes.json()) as StorageUsageResponse;
+        setStorageMap((prev) => ({ ...prev, [nodeId]: usage }));
+      }
+      await onStatusRefresh();
+    } catch (err) {
+      onLocalError(err instanceof Error ? err.message : "Cache cleanup failed");
+    } finally {
+      setStorageBusyNode(null);
+    }
+  };
 
   const loadJoinTokens = async () => {
     try {
@@ -280,6 +438,308 @@ export function NodesProvisionPane({
 
   return (
     <div className="settings-stack">
+      {(snapshot?.nodes ?? []).length > 0 && (
+        <div className="settings-subcard settings-stack">
+          <strong>Cluster Nodes — Config, Engine Runtime &amp; Storage</strong>
+          {(snapshot?.nodes ?? []).map((n) => {
+            const isEditing = editingNodeId === n.node_id;
+            const isTuning = engineNodeId === n.node_id;
+            const usage = storageMap[n.node_id];
+            return (
+              <div
+                key={n.node_id}
+                className="panel settings-stack"
+                style={{ padding: "0.65rem", background: "var(--surface-2)" }}
+              >
+                <div className="panel-head" style={{ flexWrap: "wrap", gap: "0.45rem" }}>
+                  <div className="row-actions" style={{ flexWrap: "wrap" }}>
+                    <strong>{n.display_name}</strong>
+                    <code>{n.node_id}</code>
+                    <span className={`pill ${n.online ? "pill--ok" : "pill--warn"}`}>
+                      {n.online ? "Online" : "Offline"}
+                    </span>
+                    <span className="pill">{n.role}</span>
+                    {n.telemetry && (
+                      <span className="pill">
+                        {n.telemetry.storage_free_gb.toFixed(1)} GB free
+                      </span>
+                    )}
+                  </div>
+                  <div className="row-actions">
+                    <button
+                      type="button"
+                      className={`btn btn--sm ${isEditing ? "btn--accent" : ""}`}
+                      onClick={() => startEditNode(n)}
+                    >
+                      <Pencil size={11} aria-hidden="true" /> Edit
+                    </button>
+                    <button
+                      type="button"
+                      className={`btn btn--sm ${isTuning ? "btn--accent" : ""}`}
+                      disabled={!n.online}
+                      onClick={() => void toggleEngineTuning(n.node_id)}
+                    >
+                      <Sliders size={11} aria-hidden="true" /> Engine &amp; Cache
+                    </button>
+                  </div>
+                </div>
+
+                {isEditing && (
+                  <form className="settings-stack" onSubmit={(e) => void saveEditNode(e, n.node_id)}>
+                    <div className="two-col">
+                      <label className="media-field">
+                        <span>Display Name</span>
+                        <input
+                          required
+                          value={editForm.display_name}
+                          onChange={(e) =>
+                            setEditForm({ ...editForm, display_name: e.target.value })
+                          }
+                        />
+                      </label>
+                      <label className="media-field">
+                        <span>Role</span>
+                        <select
+                          value={editForm.role}
+                          onChange={(e) =>
+                            setEditForm({ ...editForm, role: e.target.value as NodeRole })
+                          }
+                        >
+                          <option value="gpu">Discrete GPU</option>
+                          <option value="unified">Unified Memory</option>
+                          <option value="cpu">CPU</option>
+                        </select>
+                      </label>
+                      <label className="media-field">
+                        <span>Agent URL</span>
+                        <input
+                          required
+                          type="url"
+                          value={editForm.agent_url}
+                          onChange={(e) =>
+                            setEditForm({ ...editForm, agent_url: e.target.value })
+                          }
+                        />
+                      </label>
+                      <label className="media-field">
+                        <span>Engine URL</span>
+                        <input
+                          required
+                          type="url"
+                          value={editForm.engine_url}
+                          onChange={(e) =>
+                            setEditForm({ ...editForm, engine_url: e.target.value })
+                          }
+                        />
+                      </label>
+                      <label className="media-field">
+                        <span>Media URL (optional)</span>
+                        <input
+                          type="url"
+                          value={editForm.media_url}
+                          onChange={(e) =>
+                            setEditForm({ ...editForm, media_url: e.target.value })
+                          }
+                        />
+                      </label>
+                      <label className="media-field">
+                        <span>Watch GPU Indices (empty = all)</span>
+                        <input
+                          value={editForm.yield_gpus}
+                          onChange={(e) =>
+                            setEditForm({ ...editForm, yield_gpus: e.target.value })
+                          }
+                          placeholder="e.g. 0, 1"
+                        />
+                      </label>
+                    </div>
+                    <div className="row-actions">
+                      <label className="gaming-toggle">
+                        <input
+                          type="checkbox"
+                          {...({ switch: "" } as Record<string, string>)}
+                          checked={editForm.yield_on_gaming}
+                          onChange={(e) =>
+                            setEditForm({ ...editForm, yield_on_gaming: e.target.checked })
+                          }
+                        />
+                        <span>GPU Auto-Yield</span>
+                      </label>
+                      <button
+                        type="submit"
+                        className="btn btn--sm btn--accent"
+                        style={{ marginInlineStart: "auto" }}
+                        disabled={editSaving}
+                      >
+                        <Save size={11} aria-hidden="true" />{" "}
+                        {editSaving ? "Saving…" : "Save Node"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {isTuning && engineCfg && (
+                  <div className="settings-stack">
+                    {!engineCfg.supported && (
+                      <div className="muted" style={{ fontSize: "0.76rem" }}>
+                        No managed systemd/launchd <code>llama-server</code> unit detected — values
+                        saved to <code>engine_runtime.json</code> only.
+                      </div>
+                    )}
+                    <div className="two-col">
+                      <label className="media-field">
+                        <span>Context Size (--ctx-size)</span>
+                        <input
+                          type="number"
+                          min={1024}
+                          max={1048576}
+                          step={1024}
+                          value={engineCfg.ctx_size}
+                          onChange={(e) =>
+                            setEngineCfg({ ...engineCfg, ctx_size: Number(e.target.value) })
+                          }
+                        />
+                      </label>
+                      <label className="media-field">
+                        <span>Parallel Slots (--parallel)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={32}
+                          value={engineCfg.parallel}
+                          onChange={(e) =>
+                            setEngineCfg({ ...engineCfg, parallel: Number(e.target.value) })
+                          }
+                        />
+                      </label>
+                      <label className="media-field">
+                        <span>KV Cache K (--cache-type-k)</span>
+                        <select
+                          value={engineCfg.cache_type_k}
+                          onChange={(e) =>
+                            setEngineCfg({
+                              ...engineCfg,
+                              cache_type_k: e.target.value as EngineRuntimeConfig["cache_type_k"]
+                            })
+                          }
+                        >
+                          <option value="q8_0">q8_0</option>
+                          <option value="q4_0">q4_0</option>
+                          <option value="f16">f16</option>
+                        </select>
+                      </label>
+                      <label className="media-field">
+                        <span>KV Cache V (--cache-type-v)</span>
+                        <select
+                          value={engineCfg.cache_type_v}
+                          onChange={(e) =>
+                            setEngineCfg({
+                              ...engineCfg,
+                              cache_type_v: e.target.value as EngineRuntimeConfig["cache_type_v"]
+                            })
+                          }
+                        >
+                          <option value="q8_0">q8_0</option>
+                          <option value="q4_0">q4_0</option>
+                          <option value="f16">f16</option>
+                        </select>
+                      </label>
+                      <label className="media-field">
+                        <span>Models Max (--models-max)</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={16}
+                          value={engineCfg.models_max}
+                          onChange={(e) =>
+                            setEngineCfg({ ...engineCfg, models_max: Number(e.target.value) })
+                          }
+                        />
+                      </label>
+                      <label className="media-field">
+                        <span>Idle Sleep (seconds, 0 = off)</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={86400}
+                          value={engineCfg.sleep_idle_seconds}
+                          onChange={(e) =>
+                            setEngineCfg({
+                              ...engineCfg,
+                              sleep_idle_seconds: Number(e.target.value)
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+
+                    <div className="row-actions" style={{ flexWrap: "wrap" }}>
+                      <label className="gaming-toggle">
+                        <input
+                          type="checkbox"
+                          {...({ switch: "" } as Record<string, string>)}
+                          checked={engineCfg.flash_attn}
+                          onChange={(e) =>
+                            setEngineCfg({ ...engineCfg, flash_attn: e.target.checked })
+                          }
+                        />
+                        <span>Flash Attention (--flash-attn)</span>
+                      </label>
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        style={{ marginInlineStart: "auto" }}
+                        disabled={engineBusy}
+                        onClick={() => void saveEngineConfig(n.node_id, false)}
+                      >
+                        Save Drop-In
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--sm btn--accent"
+                        disabled={engineBusy || !engineCfg.supported}
+                        onClick={() => void saveEngineConfig(n.node_id, true)}
+                      >
+                        <Save size={11} aria-hidden="true" /> Save &amp; Restart Engine
+                      </button>
+                    </div>
+
+                    {usage && (
+                      <div className="panel-head" style={{ flexWrap: "wrap", gap: "0.45rem" }}>
+                        <div className="row-actions" style={{ flexWrap: "wrap" }}>
+                          <span className="pill">
+                            <HardDrive size={11} aria-hidden="true" /> {usage.storage_path}
+                          </span>
+                          <span className="pill">Models: {usage.models_gb} GB</span>
+                          <span className="pill">Cache: {usage.cache_gb} GB</span>
+                          {usage.partial_count > 0 && (
+                            <span className="pill pill--warn">
+                              Partials ({usage.partial_count}): {usage.partial_gb} GB
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          className="btn btn--sm btn--danger"
+                          disabled={
+                            storageBusyNode === n.node_id ||
+                            (usage.cache_entries === 0 && usage.partial_count === 0)
+                          }
+                          onClick={() => void cleanNodeCache(n.node_id)}
+                        >
+                          <Trash2 size={11} aria-hidden="true" />{" "}
+                          {storageBusyNode === n.node_id ? "Cleaning…" : "Clean Cache & Partials"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <div className="client-pill-row" role="group" aria-label="Node provisioning method">
         <button
           type="button"

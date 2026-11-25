@@ -324,6 +324,9 @@ async def execute_web_search(query: str, max_results: int = 6) -> tuple[bool, st
     clean_q = query.strip()
     if not clean_q:
         return False, "Missing 'query' argument"
+    provider_pref = os.getenv("SPLITCH_WEB_SEARCH_PROVIDER", "auto").strip().lower() or "auto"
+    if provider_pref == "off":
+        return False, "Web search is disabled in router settings"
     limit = max(1, min(int(max_results or 6), 10))
 
     data_dir = Path(os.getenv("SPLITCH_DATA_DIR", str(default_data_root() / "data")))
@@ -345,6 +348,33 @@ async def execute_web_search(query: str, max_results: int = 6) -> tuple[bool, st
     async with httpx.AsyncClient(
         timeout=10.0, follow_redirects=True, headers={"User-Agent": USER_AGENT}
     ) as client:
+        if provider_pref == "searxng":
+            if not searxng_url:
+                return False, "SearXNG selected as web search provider, but SearXNG URL is empty"
+            try:
+                items = await _search_searxng(client, searxng_url, clean_q, limit)
+                return True, _format_results("SearXNG", clean_q, items)
+            except (httpx.HTTPError, ValueError) as exc:
+                return False, f"SearXNG search error: {exc}"
+
+        if provider_pref == "brave":
+            if not brave_key:
+                return False, "Brave Search selected, but Brave API key is not configured"
+            try:
+                items = await _search_brave(client, brave_key, clean_q, limit)
+                return True, _format_results("Brave Search", clean_q, items)
+            except (httpx.HTTPError, ValueError) as exc:
+                return False, f"Brave search error: {exc}"
+
+        if provider_pref == "tavily":
+            if not tavily_key:
+                return False, "Tavily selected, but Tavily API key is not configured"
+            try:
+                items = await _search_tavily(client, tavily_key, clean_q, limit)
+                return True, _format_results("Tavily", clean_q, items)
+            except (httpx.HTTPError, ValueError) as exc:
+                return False, f"Tavily search error: {exc}"
+
         if searxng_url:
             try:
                 items = await _search_searxng(client, searxng_url, clean_q, limit)

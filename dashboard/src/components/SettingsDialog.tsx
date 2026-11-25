@@ -45,6 +45,12 @@ export function SettingsDialog({
   const [localError, setLocalError] = useState<string | null>(null);
   const [originsText, setOriginsText] = useState("");
   const [controlBusy, setControlBusy] = useState(false);
+  const [secretInputs, setSecretInputs] = useState<{
+    brave_api_key: string;
+    tavily_api_key: string;
+    hf_token: string;
+  }>({ brave_api_key: "", tavily_api_key: "", hf_token: "" });
+  const [secretBusy, setSecretBusy] = useState<string | null>(null);
 
   // Connect Clients state
   const [clientId, setClientId] = useState<ClientId>("hermes");
@@ -125,6 +131,7 @@ export function SettingsDialog({
           max_traces: settings.max_traces,
           public_url: settings.public_url,
           searxng_url: settings.searxng_url,
+          web_search_provider: settings.web_search_provider,
           hsts_enabled: settings.hsts_enabled,
           trusted_proxies: settings.trusted_proxies,
           allowed_origins,
@@ -145,6 +152,47 @@ export function SettingsDialog({
       setLocalError(err instanceof Error ? err.message : "Failed to save settings");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveSecretKey = async (name: "brave_api_key" | "tavily_api_key" | "hf_token") => {
+    const val = secretInputs[name].trim();
+    if (!val) return;
+    setSecretBusy(name);
+    setLocalError(null);
+    try {
+      const res = await fetch("/api/settings/secrets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, value: val })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      setSettings(body as RuntimeSettings);
+      setSecretInputs((prev) => ({ ...prev, [name]: "" }));
+      showSavedNotice(`Saved ${name} to encrypted Vault`);
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : "Failed to store secret");
+    } finally {
+      setSecretBusy(null);
+    }
+  };
+
+  const clearSecretKey = async (name: "brave_api_key" | "tavily_api_key" | "hf_token") => {
+    setSecretBusy(name);
+    setLocalError(null);
+    try {
+      const res = await fetch(`/api/settings/secrets/${encodeURIComponent(name)}`, {
+        method: "DELETE"
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+      setSettings(body as RuntimeSettings);
+      showSavedNotice(`Cleared ${name} from Vault`);
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : "Failed to remove secret");
+    } finally {
+      setSecretBusy(null);
     }
   };
 
@@ -637,23 +685,98 @@ export function SettingsDialog({
                   </label>
                 </div>
 
-                <label className="media-field">
-                  <span>SearXNG URL (Web Search)</span>
-                  <input
-                    type="url"
-                    value={settings.searxng_url}
-                    onChange={(e) => setSettings({ ...settings, searxng_url: e.target.value })}
-                    placeholder="http://localhost:8888"
-                  />
-                </label>
+                <div className="two-col">
+                  <label className="media-field">
+                    <span>Web Search Provider</span>
+                    <select
+                      value={settings.web_search_provider}
+                      onChange={(e) =>
+                        setSettings({
+                          ...settings,
+                          web_search_provider: e.target.value as RuntimeSettings["web_search_provider"]
+                        })
+                      }
+                    >
+                      <option value="auto">Auto (SearXNG → Brave → Tavily → Open Web)</option>
+                      <option value="searxng">SearXNG Only</option>
+                      <option value="brave">Brave Search Only</option>
+                      <option value="tavily">Tavily AI Only</option>
+                      <option value="off">Disabled</option>
+                    </select>
+                  </label>
+                  <label className="media-field">
+                    <span>SearXNG URL</span>
+                    <input
+                      type="url"
+                      value={settings.searxng_url}
+                      onChange={(e) => setSettings({ ...settings, searxng_url: e.target.value })}
+                      placeholder="http://localhost:8888"
+                    />
+                  </label>
+                </div>
+
+                <h3>Encrypted Vault Keys (Write-Only)</h3>
+                <div className="settings-subcard settings-stack">
+                  {(
+                    [
+                      {
+                        name: "hf_token" as const,
+                        label: "Hugging Face Token (HF_TOKEN — gated pulls)",
+                        isSet: settings.hf_token_set,
+                        placeholder: "hf_..."
+                      },
+                      {
+                        name: "brave_api_key" as const,
+                        label: "Brave Search API Key",
+                        isSet: settings.brave_api_key_set,
+                        placeholder: "BSA..."
+                      },
+                      {
+                        name: "tavily_api_key" as const,
+                        label: "Tavily API Key",
+                        isSet: settings.tavily_api_key_set,
+                        placeholder: "tvly-..."
+                      }
+                    ] as const
+                  ).map((item) => (
+                    <div key={item.name} className="probe-row" style={{ gap: "0.5rem", flexWrap: "wrap" }}>
+                      <span className={`pill ${item.isSet ? "pill--ok" : ""}`}>
+                        {item.isSet ? "Set" : "Unset"}
+                      </span>
+                      <span style={{ minWidth: "14rem", fontSize: "0.82rem" }}>{item.label}</span>
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        value={secretInputs[item.name]}
+                        onChange={(e) =>
+                          setSecretInputs((prev) => ({ ...prev, [item.name]: e.target.value }))
+                        }
+                        placeholder={item.isSet ? "•••••••• (replace)" : item.placeholder}
+                        style={{ flex: "1 1 12rem" }}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn--sm btn--accent"
+                        disabled={secretBusy !== null || !secretInputs[item.name].trim()}
+                        onClick={() => void saveSecretKey(item.name)}
+                      >
+                        Save Key
+                      </button>
+                      {item.isSet && (
+                        <button
+                          type="button"
+                          className="btn btn--sm btn--danger"
+                          disabled={secretBusy !== null}
+                          onClick={() => void clearSecretKey(item.name)}
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
 
                 <div className="row-actions">
-                  <span className={`pill ${settings.brave_api_key_set ? "pill--ok" : ""}`}>
-                    Brave Key: {settings.brave_api_key_set ? "Set" : "Unset"}
-                  </span>
-                  <span className={`pill ${settings.tavily_api_key_set ? "pill--ok" : ""}`}>
-                    Tavily Key: {settings.tavily_api_key_set ? "Set" : "Unset"}
-                  </span>
                   <button
                     type="submit"
                     className="btn btn--accent"
@@ -681,6 +804,7 @@ export function SettingsDialog({
             {activeTab === "nodes" && (
               <NodesProvisionPane
                 settings={settings}
+                snapshot={snapshot}
                 copiedKey={copiedKey}
                 copyText={copyText}
                 onStatusRefresh={onStatusRefresh}
@@ -699,6 +823,7 @@ export function SettingsDialog({
                 saving={saving}
                 saveSettings={saveSettings}
                 snapshot={snapshot}
+                onSavedNotice={showSavedNotice}
                 onLocalError={setLocalError}
               />
             )}

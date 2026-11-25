@@ -35,6 +35,7 @@ from backend.shared.models import (
     NodeRegisterRequest,
     NodeStatus,
     NodeTelemetry,
+    NodeUpdateRequest,
     TraceEntry,
     UiThemeConfig,
     UiThemeUpdate,
@@ -91,6 +92,7 @@ class ClusterState:
             )
             for n in config.nodes
         }
+        self._overridden_node_ids: set[str] = set()
         self._load_dynamic_nodes()
         self.theme: UiThemeConfig = self._load_ui_theme()
         self.aliases: dict[str, AliasConfig] = {a.alias: a for a in config.aliases}
@@ -153,6 +155,8 @@ class ClusterState:
             if isinstance(raw, list):
                 for item in raw:
                     reg = NodeRegisterRequest.model_validate(item)
+                    if reg.id in self.nodes:
+                        self._overridden_node_ids.add(reg.id)
                     self.nodes[reg.id] = NodeStatus(
                         node_id=reg.id,
                         display_name=reg.display_name,
@@ -184,7 +188,7 @@ class ClusterState:
                 media_url=n.media_url,
             ).model_dump()
             for n in self.nodes.values()
-            if n.node_id not in static_ids
+            if n.node_id not in static_ids or n.node_id in self._overridden_node_ids
         ]
         def _write_nodes() -> None:
             p.write_text(json.dumps(dynamic, indent=2), encoding="utf-8")
@@ -206,6 +210,31 @@ class ClusterState:
             media_url=req.media_url.rstrip("/"),
         )
         self.nodes[req.id] = node
+        await self._persist_dynamic_nodes()
+        if self._poll_client is not None:
+            await self._poll_single(node)
+        await self.broadcast_snapshot()
+        return node
+
+    async def update_node(self, node_id: str, patch: NodeUpdateRequest) -> NodeStatus | None:
+        node = self.nodes.get(node_id)
+        if node is None:
+            return None
+        if patch.display_name is not None and patch.display_name.strip():
+            node.display_name = patch.display_name.strip()
+        if patch.role is not None:
+            node.role = patch.role
+        if patch.yield_on_gaming is not None:
+            node.yield_on_gaming = patch.yield_on_gaming
+        if patch.yield_gpu_indices is not None:
+            node.yield_gpu_indices = list(patch.yield_gpu_indices)
+        if patch.agent_url is not None and patch.agent_url.strip():
+            node.agent_url = patch.agent_url.strip().rstrip("/")
+        if patch.engine_url is not None and patch.engine_url.strip():
+            node.engine_url = patch.engine_url.strip().rstrip("/")
+        if patch.media_url is not None:
+            node.media_url = patch.media_url.strip().rstrip("/")
+        self._overridden_node_ids.add(node_id)
         await self._persist_dynamic_nodes()
         if self._poll_client is not None:
             await self._poll_single(node)

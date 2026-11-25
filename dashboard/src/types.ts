@@ -506,8 +506,10 @@ export interface RuntimeSettings {
   max_traces: number;
   public_url: string;
   searxng_url: string;
+  web_search_provider: "auto" | "searxng" | "brave" | "tavily" | "off";
   brave_api_key_set: boolean;
   tavily_api_key_set: boolean;
+  hf_token_set: boolean;
   auth_enabled: boolean;
   agent_token_enabled: boolean;
   tls_enabled: boolean;
@@ -517,6 +519,42 @@ export interface RuntimeSettings {
   login_max_attempts: number;
   login_window_s: number;
   remote_provision_enabled: boolean;
+}
+
+export interface DesktopConfigView {
+  launch_mode: "app" | "browser" | "firefoxpwa";
+  auto_tray: boolean;
+  autostart: boolean;
+  desktop_icon: boolean;
+}
+
+export interface EngineRuntimeConfig {
+  ctx_size: number;
+  cache_type_k: "f16" | "q8_0" | "q4_0";
+  cache_type_v: "f16" | "q8_0" | "q4_0";
+  flash_attn: boolean;
+  models_max: number;
+  sleep_idle_seconds: number;
+  parallel: number;
+  apply_restart?: boolean;
+  supported?: boolean;
+  unit_name?: string;
+  override_path?: string;
+}
+
+export interface StorageUsageResponse {
+  storage_path: string;
+  free_gb: number;
+  models_gb: number;
+  partial_gb: number;
+  cache_gb: number;
+  partial_count: number;
+  cache_entries: number;
+}
+
+export interface StorageCleanResponse {
+  removed_files: number;
+  freed_gb: number;
 }
 
 export interface ClientProbeResponse {

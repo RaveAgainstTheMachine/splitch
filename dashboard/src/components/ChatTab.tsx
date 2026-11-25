@@ -14,7 +14,7 @@ import type { ConfirmState } from "./ConfirmDialog";
 import { classifyClientMcpEgress } from "./McpTab";
 import { useDialogLightDismiss } from "./ModelsTab";
 import { CodeBlock } from "./chat/ChatCodeBlocks";
-import { ChatComposer } from "./chat/ChatComposer";
+import { ChatComposer, DEFAULT_SAMPLING, type SamplingConfig } from "./chat/ChatComposer";
 import { ContextMemoryDialog, WorkspaceBrowserDialog } from "./chat/ChatDialogs";
 import { ChatMessageList } from "./chat/ChatMessageList";
 import { ChatSidebar, type SidebarMode } from "./chat/ChatSidebar";
@@ -69,7 +69,7 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
 
   const [composerText, setComposerText] = useState("");
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
-  const [temperature, setTemperature] = useState<string>("");
+  const [sampling, setSampling] = useState<SamplingConfig>(DEFAULT_SAMPLING);
   const [dragActive, setDragActive] = useState(false);
 
   const [streaming, setStreaming] = useState(false);
@@ -978,13 +978,40 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
     let roundIdx = 0;
 
     try {
-      const tempNum = temperature.trim() !== "" ? Number(temperature) : null;
       const bodyPayload: Record<string, unknown> = {
         content: trimmed,
         images: promptImages
       };
-      if (tempNum !== null && !Number.isNaN(tempNum)) {
-        bodyPayload.temperature = tempNum;
+      const optFloat = (v: string) => {
+        const n = v.trim() !== "" ? Number(v) : Number.NaN;
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const optInt = (v: string) => {
+        const n = v.trim() !== "" ? Number.parseInt(v, 10) : Number.NaN;
+        return Number.isFinite(n) ? n : undefined;
+      };
+      const t = optFloat(sampling.temperature);
+      const tp = optFloat(sampling.topP);
+      const tk = optInt(sampling.topK);
+      const mp = optFloat(sampling.minP);
+      const rp = optFloat(sampling.repeatPenalty);
+      const mt = optInt(sampling.maxTokens);
+      const sd = optInt(sampling.seed);
+      const stopSeqs = sampling.stop
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (t !== undefined) bodyPayload.temperature = t;
+      if (tp !== undefined) bodyPayload.top_p = tp;
+      if (tk !== undefined) bodyPayload.top_k = tk;
+      if (mp !== undefined) bodyPayload.min_p = mp;
+      if (rp !== undefined) bodyPayload.repeat_penalty = rp;
+      if (mt !== undefined) bodyPayload.max_tokens = mt;
+      if (sd !== undefined) bodyPayload.seed = sd;
+      if (stopSeqs.length > 0) bodyPayload.stop = stopSeqs;
+      if (sampling.reasoningEffort) bodyPayload.reasoning_effort = sampling.reasoningEffort;
+      if (sampling.enableThinking) {
+        bodyPayload.enable_thinking = sampling.enableThinking === "on";
       }
 
       const res = await fetch(`/api/chat/conversations/${encodeURIComponent(targetId)}/send`, {
@@ -1647,8 +1674,8 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
           effectiveSkillCount={effectiveSkillIds.length}
           effectiveMcpCount={effectiveMcpIds.length}
           activeExternalMcps={activeExternalMcps}
-          temperature={temperature}
-          setTemperature={setTemperature}
+          sampling={sampling}
+          setSampling={setSampling}
           gamingMode={Boolean(snapshot?.control.gaming_mode)}
           compactNotice={compactNotice}
           contextStats={contextStats}

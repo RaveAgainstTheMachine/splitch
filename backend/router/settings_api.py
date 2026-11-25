@@ -26,9 +26,13 @@ from backend.shared.models import (
     ClientProbeRequest,
     ClientProbeResponse,
     ClientPushRequest,
+    DesktopConfigPatch,
+    DesktopConfigView,
     McpServerConfig,
     RuntimeSettings,
     RuntimeSettingsPatch,
+    SecretKeyName,
+    SecretUpdateRequest,
 )
 
 
@@ -142,6 +146,8 @@ def apply_persisted_settings(cluster: ClusterState, data_dir: Path) -> None:
         r.public_url = raw["public_url"].strip().rstrip("/")
     if isinstance(raw.get("searxng_url"), str) and raw["searxng_url"].strip():
         os.environ["SPLITCH_SEARXNG_URL"] = raw["searxng_url"].strip().rstrip("/")
+    if raw.get("web_search_provider") in ("auto", "searxng", "brave", "tavily", "off"):
+        os.environ["SPLITCH_WEB_SEARCH_PROVIDER"] = str(raw["web_search_provider"])
     if isinstance(raw.get("hsts_enabled"), bool):
         s.hsts_enabled = raw["hsts_enabled"]
     if isinstance(raw.get("trusted_proxies"), str):
@@ -196,11 +202,17 @@ def build_settings_router(
             max_traces=cluster.config.router.max_traces,
             public_url=cluster.config.router.public_url,
             searxng_url=os.getenv("SPLITCH_SEARXNG_URL", "").strip(),
+            web_search_provider=str(
+                os.getenv("SPLITCH_WEB_SEARCH_PROVIDER", "auto").strip().lower() or "auto"
+            ),  # type: ignore[arg-type]
             brave_api_key_set=bool(
                 os.getenv("BRAVE_API_KEY", "").strip() or cluster.vault.has("brave_api_key")
             ),
             tavily_api_key_set=bool(
                 os.getenv("TAVILY_API_KEY", "").strip() or cluster.vault.has("tavily_api_key")
+            ),
+            hf_token_set=bool(
+                os.getenv("HF_TOKEN", "").strip() or cluster.vault.has("hf_token")
             ),
             auth_enabled=auth_on,
             agent_token_enabled=bool(cluster.agent_token or cluster.router_private_key),
@@ -266,6 +278,8 @@ def build_settings_router(
                 os.environ["SPLITCH_SEARXNG_URL"] = clean_sx
             else:
                 os.environ.pop("SPLITCH_SEARXNG_URL", None)
+        if patch.web_search_provider is not None:
+            os.environ["SPLITCH_WEB_SEARCH_PROVIDER"] = patch.web_search_provider
         if patch.hsts_enabled is not None:
             s.hsts_enabled = patch.hsts_enabled
         if patch.trusted_proxies is not None:
@@ -293,6 +307,7 @@ def build_settings_router(
             "max_traces": current.max_traces,
             "public_url": current.public_url,
             "searxng_url": current.searxng_url,
+            "web_search_provider": current.web_search_provider,
             "hsts_enabled": current.hsts_enabled,
             "trusted_proxies": current.trusted_proxies,
             "allowed_origins": current.allowed_origins,
@@ -302,6 +317,88 @@ def build_settings_router(
         await asyncio.to_thread(_write_settings, persist_dict)
         await cluster.broadcast_snapshot()
         return current
+
+    @router.post("/settings/secrets", response_model=RuntimeSettings)
+    async def upsert_secret(req: SecretUpdateRequest) -> RuntimeSettings:
+        val = req.value.strip()
+        if not val:
+            cluster.vault.delete(req.name)
+        else:
+            cluster.vault.set(req.name, val)
+        return _current_settings()
+
+    @router.delete("/settings/secrets/{name}", response_model=RuntimeSettings)
+    async def delete_secret(name: SecretKeyName) -> RuntimeSettings:
+        cluster.vault.delete(name)
+        return _current_settings()
+
+    @router.get("/desktop/config", response_model=DesktopConfigView)
+    async def get_desktop_config() -> DesktopConfigView:
+        from backend.desktop.shortcuts import load_desktop_config
+
+        cfg = await asyncio.to_thread(load_desktop_config)
+        return DesktopConfigView(
+            launch_mode=cfg.launch_mode,
+            auto_tray=cfg.auto_tray,
+            autostart=cfg.autostart,
+            desktop_icon=cfg.desktop_icon,
+        )
+
+    @router.patch("/desktop/config", response_model=DesktopConfigView)
+    async def patch_desktop_config(patch: DesktopConfigPatch) -> DesktopConfigView:
+        from backend.desktop.shortcuts import (
+            install_desktop_integration,
+            is_desktop_applicable,
+            load_desktop_config,
+            save_desktop_config,
+        )
+
+        def _update() -> DesktopConfigView:
+            cfg = load_desktop_config()
+            if patch.launch_mode is not None:
+                cfg.launch_mode = patch.launch_mode
+            if patch.auto_tray is not None:
+                cfg.auto_tray = patch.auto_tray
+            if patch.autostart is not None:
+                cfg.autostart = patch.autostart
+                if is_desktop_applicable():
+                    with contextlib.suppress(OSError, RuntimeError):
+                        install_desktop_integration(
+                            desktop_icon=cfg.desktop_icon,
+                            autostart=cfg.autostart,
+                            router_url=cfg.router_url,
+                            mode=cfg.mode,
+                            local_service=cfg.local_service,
+                        )
+            if patch.desktop_icon is not None:
+                cfg.desktop_icon = patch.desktop_icon
+            save_desktop_config(cfg)
+            return DesktopConfigView(
+                launch_mode=cfg.launch_mode,
+                auto_tray=cfg.auto_tray,
+                autostart=cfg.autostart,
+                desktop_icon=cfg.desktop_icon,
+            )
+
+        return await asyncio.to_thread(_update)
+
+    @router.post("/system/tls/self-signed")
+    async def generate_tls_self_signed() -> dict:
+        from backend.shared.tls import generate_self_signed_cert
+
+        try:
+            cert_path, key_path = await asyncio.to_thread(generate_self_signed_cert)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        cluster.config.tls.self_signed = True
+        cluster.config.tls.certfile = str(cert_path)
+        cluster.config.tls.keyfile = str(key_path)
+        return {
+            "ok": True,
+            "certfile": str(cert_path),
+            "keyfile": str(key_path),
+            "note": "Restart router with --ssl-self-signed (or SPLITCH_TLS_SELF_SIGNED=1) to serve HTTPS directly.",
+        }
 
     @router.post("/clients/probe", response_model=ClientProbeResponse)
     async def probe_client_protocol(

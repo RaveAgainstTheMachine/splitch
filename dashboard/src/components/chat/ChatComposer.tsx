@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type React from "react";
 import {
   AlertTriangle,
@@ -11,6 +12,32 @@ import {
 } from "lucide-react";
 import type { McpServerConfig } from "../../types";
 import { type DraftChatConfig, fmtTokenCompact } from "./chatHelpers";
+
+export interface SamplingConfig {
+  temperature: string;
+  topP: string;
+  topK: string;
+  minP: string;
+  repeatPenalty: string;
+  maxTokens: string;
+  seed: string;
+  stop: string;
+  reasoningEffort: "" | "off" | "low" | "medium" | "high";
+  enableThinking: "" | "on" | "off";
+}
+
+export const DEFAULT_SAMPLING: SamplingConfig = {
+  temperature: "",
+  topP: "",
+  topK: "",
+  minP: "",
+  repeatPenalty: "",
+  maxTokens: "",
+  seed: "",
+  stop: "",
+  reasoningEffort: "",
+  enableThinking: ""
+};
 
 export interface ChatComposerProps {
   formRef: React.RefObject<HTMLFormElement | null>;
@@ -29,8 +56,8 @@ export interface ChatComposerProps {
   effectiveSkillCount: number;
   effectiveMcpCount: number;
   activeExternalMcps: McpServerConfig[];
-  temperature: string;
-  setTemperature: (val: string) => void;
+  sampling: SamplingConfig;
+  setSampling: React.Dispatch<React.SetStateAction<SamplingConfig>>;
   gamingMode: boolean;
   compactNotice: string | null;
   contextStats: { used: number; max: number; estimated: boolean };
@@ -59,8 +86,8 @@ export function ChatComposer({
   effectiveSkillCount,
   effectiveMcpCount,
   activeExternalMcps,
-  temperature,
-  setTemperature,
+  sampling,
+  setSampling,
   gamingMode,
   compactNotice,
   contextStats,
@@ -71,6 +98,27 @@ export function ChatComposer({
   openContextDialog,
   stopGeneration
 }: ChatComposerProps) {
+  const [samplingOpen, setSamplingOpen] = useState(false);
+
+  const hasCustomSampling = Boolean(
+    sampling.temperature ||
+      sampling.topP ||
+      sampling.topK ||
+      sampling.minP ||
+      sampling.repeatPenalty ||
+      sampling.maxTokens ||
+      sampling.seed ||
+      sampling.stop ||
+      sampling.reasoningEffort ||
+      sampling.enableThinking
+  );
+
+  const samplingSummary = [
+    sampling.temperature ? `T=${sampling.temperature}` : null,
+    sampling.reasoningEffort ? `Think=${sampling.reasoningEffort}` : null
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <div className="chat-composer-shell">
       <form
@@ -186,19 +234,217 @@ export function ChatComposer({
               </span>
             )}
 
-            <label className="composer-chip chat-temp-field" title="Sampling temperature">
-              <Thermometer size={12} aria-hidden="true" className="muted" />
-              <span>Temp</span>
-              <input
-                type="number"
-                min={0}
-                max={2}
-                step={0.1}
-                value={temperature}
-                onChange={(e) => setTemperature(e.target.value)}
-                placeholder="auto"
-              />
-            </label>
+            <div className="sampling-anchor">
+              <button
+                type="button"
+                className={`btn btn--sm composer-chip ${
+                  hasCustomSampling ? "composer-chip--active" : ""
+                }`}
+                aria-expanded={samplingOpen}
+                disabled={streaming}
+                onClick={() => setSamplingOpen((v) => !v)}
+                title="Sampling & Reasoning Effort controls"
+              >
+                <Thermometer size={12} aria-hidden="true" />
+                {samplingSummary || "Sampling"}
+              </button>
+
+              {samplingOpen && (
+                <div className="sampling-popover" role="region" aria-label="Sampling & Reasoning">
+                  <div className="panel-head" style={{ marginBottom: "0.5rem" }}>
+                    <strong>Sampling &amp; Reasoning</strong>
+                    <div className="row-actions" style={{ flexWrap: "wrap" }}>
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        onClick={() =>
+                          setSampling({
+                            ...DEFAULT_SAMPLING,
+                            temperature: "0.2",
+                            topP: "0.9"
+                          })
+                        }
+                      >
+                        Coding
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        onClick={() =>
+                          setSampling({
+                            ...DEFAULT_SAMPLING,
+                            temperature: "0.7",
+                            topP: "0.95"
+                          })
+                        }
+                      >
+                        Balanced
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        onClick={() =>
+                          setSampling({
+                            ...DEFAULT_SAMPLING,
+                            temperature: "1.0",
+                            minP: "0.05"
+                          })
+                        }
+                      >
+                        Creative
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--sm"
+                        onClick={() =>
+                          setSampling({
+                            ...DEFAULT_SAMPLING,
+                            temperature: "0.6",
+                            reasoningEffort: "high",
+                            enableThinking: "on"
+                          })
+                        }
+                      >
+                        Reasoning
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn--sm btn--ghost"
+                        onClick={() => setSampling(DEFAULT_SAMPLING)}
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="two-col" style={{ gap: "0.45rem" }}>
+                    <label className="media-field">
+                      <span>Temperature</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={2}
+                        step={0.05}
+                        value={sampling.temperature}
+                        onChange={(e) => setSampling((p) => ({ ...p, temperature: e.target.value }))}
+                        placeholder="auto"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Top P</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={sampling.topP}
+                        onChange={(e) => setSampling((p) => ({ ...p, topP: e.target.value }))}
+                        placeholder="auto"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Top K</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={500}
+                        value={sampling.topK}
+                        onChange={(e) => setSampling((p) => ({ ...p, topK: e.target.value }))}
+                        placeholder="auto"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Min P</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        value={sampling.minP}
+                        onChange={(e) => setSampling((p) => ({ ...p, minP: e.target.value }))}
+                        placeholder="auto"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Repeat Penalty</span>
+                      <input
+                        type="number"
+                        min={0.5}
+                        max={2.5}
+                        step={0.05}
+                        value={sampling.repeatPenalty}
+                        onChange={(e) =>
+                          setSampling((p) => ({ ...p, repeatPenalty: e.target.value }))
+                        }
+                        placeholder="auto"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Max Tokens</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={262144}
+                        value={sampling.maxTokens}
+                        onChange={(e) => setSampling((p) => ({ ...p, maxTokens: e.target.value }))}
+                        placeholder="auto"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Reasoning Effort</span>
+                      <select
+                        value={sampling.reasoningEffort}
+                        onChange={(e) =>
+                          setSampling((p) => ({
+                            ...p,
+                            reasoningEffort: e.target.value as SamplingConfig["reasoningEffort"]
+                          }))
+                        }
+                      >
+                        <option value="">Auto</option>
+                        <option value="off">Off</option>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                      </select>
+                    </label>
+                    <label className="media-field">
+                      <span>Thinking Tokens</span>
+                      <select
+                        value={sampling.enableThinking}
+                        onChange={(e) =>
+                          setSampling((p) => ({
+                            ...p,
+                            enableThinking: e.target.value as SamplingConfig["enableThinking"]
+                          }))
+                        }
+                      >
+                        <option value="">Auto</option>
+                        <option value="on">Enable Thinking</option>
+                        <option value="off">Disable Thinking</option>
+                      </select>
+                    </label>
+                    <label className="media-field">
+                      <span>Seed</span>
+                      <input
+                        type="number"
+                        value={sampling.seed}
+                        onChange={(e) => setSampling((p) => ({ ...p, seed: e.target.value }))}
+                        placeholder="random"
+                      />
+                    </label>
+                    <label className="media-field">
+                      <span>Stop Sequences (comma)</span>
+                      <input
+                        value={sampling.stop}
+                        onChange={(e) => setSampling((p) => ({ ...p, stop: e.target.value }))}
+                        placeholder="END, ###"
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+            </div>
 
             {gamingMode && (
               <span className="pill pill--warn">

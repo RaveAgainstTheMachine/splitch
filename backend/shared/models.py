@@ -121,6 +121,16 @@ class NodeRegisterRequest(BaseModel):
     storage_path: str = ""
 
 
+class NodeUpdateRequest(BaseModel):
+    display_name: str | None = None
+    role: NodeRole | None = None
+    yield_on_gaming: bool | None = None
+    yield_gpu_indices: list[int] | None = None
+    agent_url: str | None = None
+    engine_url: str | None = None
+    media_url: str | None = None
+
+
 class AliasConfig(BaseModel):
     alias: str
     task_kind: Literal["chat", "code", "fim", "embed", "image", "video"] = "chat"
@@ -232,7 +242,7 @@ class PullModelRequest(BaseModel):
     node_id: str = ""
     repo_id: str
     filename: str = ""
-    format: Literal["gguf", "mlx"] = "gguf"
+    format: Literal["gguf", "mlx", "strata"] = "gguf"
 
 
 class HfRepoResult(BaseModel):
@@ -564,7 +574,16 @@ class ChatMessageRecord(BaseModel):
 class ChatSendRequest(BaseModel):
     content: str
     images: list[str] = Field(default_factory=list)
-    temperature: float | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=0, le=500)
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    repeat_penalty: float | None = Field(default=None, ge=0.5, le=2.5)
+    max_tokens: int | None = Field(default=None, ge=1, le=262144)
+    seed: int | None = None
+    stop: list[str] | None = None
+    reasoning_effort: Literal["off", "low", "medium", "high"] | None = None
+    enable_thinking: bool | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -739,8 +758,10 @@ class RuntimeSettings(BaseModel):
     max_traces: int = 120
     public_url: str = ""
     searxng_url: str = ""
+    web_search_provider: Literal["auto", "searxng", "brave", "tavily", "off"] = "auto"
     brave_api_key_set: bool = False
     tavily_api_key_set: bool = False
+    hf_token_set: bool = False
     auth_enabled: bool = False
     agent_token_enabled: bool = False
     tls_enabled: bool = False
@@ -763,11 +784,63 @@ class RuntimeSettingsPatch(BaseModel):
     max_traces: int | None = Field(default=None, ge=10, le=1000)
     public_url: str | None = None
     searxng_url: str | None = None
+    web_search_provider: Literal["auto", "searxng", "brave", "tavily", "off"] | None = None
     hsts_enabled: bool | None = None
     trusted_proxies: str | None = None
     allowed_origins: list[str] | None = None
     login_max_attempts: int | None = Field(default=None, ge=1, le=100)
     login_window_s: float | None = Field(default=None, ge=5.0, le=3600.0)
+
+
+SecretKeyName = Literal["brave_api_key", "tavily_api_key", "hf_token"]
+
+
+class SecretUpdateRequest(BaseModel):
+    name: SecretKeyName
+    value: str = Field(default="", max_length=512)
+
+
+class DesktopConfigView(BaseModel):
+    launch_mode: Literal["app", "browser", "firefoxpwa"] = "app"
+    auto_tray: bool = True
+    autostart: bool = False
+    desktop_icon: bool = True
+
+
+class DesktopConfigPatch(BaseModel):
+    launch_mode: Literal["app", "browser", "firefoxpwa"] | None = None
+    auto_tray: bool | None = None
+    autostart: bool | None = None
+    desktop_icon: bool | None = None
+
+
+class EngineRuntimeConfig(BaseModel):
+    ctx_size: int = Field(default=32768, ge=1024, le=1048576)
+    cache_type_k: Literal["f16", "q8_0", "q4_0"] = "q8_0"
+    cache_type_v: Literal["f16", "q8_0", "q4_0"] = "q8_0"
+    flash_attn: bool = True
+    models_max: int = Field(default=1, ge=1, le=16)
+    sleep_idle_seconds: int = Field(default=600, ge=0, le=86400)
+    parallel: int = Field(default=1, ge=1, le=32)
+    apply_restart: bool = False
+    supported: bool = True
+    unit_name: str = ""
+    override_path: str = ""
+
+
+class StorageUsageResponse(BaseModel):
+    storage_path: str
+    free_gb: float = 0.0
+    models_gb: float = 0.0
+    partial_gb: float = 0.0
+    cache_gb: float = 0.0
+    partial_count: int = 0
+    cache_entries: int = 0
+
+
+class StorageCleanResponse(BaseModel):
+    removed_files: int = 0
+    freed_gb: float = 0.0
 
 
 class ClientProbeRequest(BaseModel):

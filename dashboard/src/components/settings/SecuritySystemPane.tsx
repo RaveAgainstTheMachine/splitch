@@ -3,6 +3,7 @@ import { Cpu, Download, RefreshCw, RotateCcw, Save } from "lucide-react";
 import type {
   ClusterUpdateJob,
   DashboardSnapshot,
+  DesktopConfigView,
   DoctorReport,
   EngineStatus,
   NodeUpdateStepStatus,
@@ -43,6 +44,7 @@ export function SecuritySystemPane({
   saving,
   saveSettings,
   snapshot,
+  onSavedNotice,
   onLocalError
 }: {
   settings: RuntimeSettings;
@@ -52,11 +54,16 @@ export function SecuritySystemPane({
   saving: boolean;
   saveSettings: (e: React.FormEvent) => Promise<void>;
   snapshot: DashboardSnapshot | null;
+  onSavedNotice?: (msg: string) => void;
   onLocalError?: (msg: string | null) => void;
 }) {
   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [desktopCfg, setDesktopCfg] = useState<DesktopConfigView | null>(null);
+  const [desktopBusy, setDesktopBusy] = useState(false);
+  const [tlsBusy, setTlsBusy] = useState(false);
+  const [tlsNotice, setTlsNotice] = useState<string | null>(null);
   const [loadingSys, setLoadingSys] = useState(false);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [withEngine, setWithEngine] = useState(false);
@@ -84,15 +91,17 @@ export function SecuritySystemPane({
     if (checkRemote) setCheckingUpdates(true);
     else setLoadingSys(true);
     try {
-      const [docRes, engRes, updRes, jobRes] = await Promise.all([
+      const [docRes, engRes, updRes, jobRes, deskRes] = await Promise.all([
         fetch(`/api/system/doctor?check_updates=${checkRemote ? "true" : "false"}`),
         fetch(`/api/system/engine?check_remote=${checkRemote ? "true" : "false"}`),
         fetch(`/api/system/update-status?fetch=${checkRemote ? "true" : "false"}`),
-        fetch("/api/system/update-cluster/status")
+        fetch("/api/system/update-cluster/status"),
+        fetch("/api/desktop/config")
       ]);
       if (docRes.ok) setDoctor((await docRes.json()) as DoctorReport);
       if (engRes.ok) setEngineStatus((await engRes.json()) as EngineStatus);
       if (updRes.ok) setUpdateStatus((await updRes.json()) as UpdateStatus);
+      if (deskRes.ok) setDesktopCfg((await deskRes.json()) as DesktopConfigView);
       if (jobRes.ok) {
         const job = (await jobRes.json()) as ClusterUpdateJob;
         if (job.status !== "idle") setClusterJob(job);
@@ -257,12 +266,122 @@ export function SecuritySystemPane({
           </label>
         </div>
         <div className="modal-actions">
+          <button
+            type="button"
+            className="btn btn--sm"
+            disabled={tlsBusy}
+            onClick={async () => {
+              setTlsBusy(true);
+              setTlsNotice(null);
+              onLocalError?.(null);
+              try {
+                const res = await fetch("/api/system/tls/self-signed", { method: "POST" });
+                const body = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+                setTlsNotice(`${body.certfile} · ${body.note}`);
+                onSavedNotice?.("Generated self-signed TLS certificate");
+              } catch (err) {
+                onLocalError?.(err instanceof Error ? err.message : "Failed to generate TLS cert");
+              } finally {
+                setTlsBusy(false);
+              }
+            }}
+          >
+            {tlsBusy ? "Generating…" : "Generate Self-Signed TLS Cert"}
+          </button>
           <button type="submit" className="btn btn--accent" disabled={saving}>
             <Save size={13} aria-hidden="true" />
             {saving ? "Saving…" : "Save Security Settings"}
           </button>
         </div>
+        {tlsNotice && (
+          <div className="pill pill--ok" style={{ fontSize: "0.75rem" }}>
+            {tlsNotice}
+          </div>
+        )}
       </form>
+
+      {desktopCfg && (
+        <div className="settings-subcard">
+          <div className="panel-head">
+            <strong>Desktop, Tray &amp; PWA Launcher</strong>
+            <label className="inline-field">
+              <span className="muted">Launch Mode</span>
+              <select
+                disabled={desktopBusy}
+                value={desktopCfg.launch_mode}
+                onChange={async (e) => {
+                  const launch_mode = e.target.value as DesktopConfigView["launch_mode"];
+                  setDesktopBusy(true);
+                  try {
+                    const res = await fetch("/api/desktop/config", {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ launch_mode })
+                    });
+                    if (res.ok) {
+                      setDesktopCfg((await res.json()) as DesktopConfigView);
+                      onSavedNotice?.(`Launch mode set to ${launch_mode}`);
+                    }
+                  } finally {
+                    setDesktopBusy(false);
+                  }
+                }}
+              >
+                <option value="app">App Window (Chromium --app / firefoxpwa)</option>
+                <option value="firefoxpwa">Prefer PWAsForFirefox (firefoxpwa)</option>
+                <option value="browser">Standard Browser Tab</option>
+              </select>
+            </label>
+          </div>
+          <div className="checkbox-row">
+            <label className="gaming-toggle">
+              <input
+                type="checkbox"
+                {...({ switch: "" } as Record<string, string>)}
+                disabled={desktopBusy}
+                checked={desktopCfg.auto_tray}
+                onChange={async (e) => {
+                  setDesktopBusy(true);
+                  try {
+                    const res = await fetch("/api/desktop/config", {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ auto_tray: e.target.checked })
+                    });
+                    if (res.ok) setDesktopCfg((await res.json()) as DesktopConfigView);
+                  } finally {
+                    setDesktopBusy(false);
+                  }
+                }}
+              />
+              <span>Auto-start System Tray on Launch</span>
+            </label>
+            <label className="gaming-toggle">
+              <input
+                type="checkbox"
+                {...({ switch: "" } as Record<string, string>)}
+                disabled={desktopBusy}
+                checked={desktopCfg.autostart}
+                onChange={async (e) => {
+                  setDesktopBusy(true);
+                  try {
+                    const res = await fetch("/api/desktop/config", {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ autostart: e.target.checked })
+                    });
+                    if (res.ok) setDesktopCfg((await res.json()) as DesktopConfigView);
+                  } finally {
+                    setDesktopBusy(false);
+                  }
+                }}
+              />
+              <span>Start Tray on Login</span>
+            </label>
+          </div>
+        </div>
+      )}
 
       <div className="settings-subcard">
         <div className="panel-head">
