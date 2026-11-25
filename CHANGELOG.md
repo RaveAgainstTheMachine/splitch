@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.20.1] - 2026-11-25
+
+### Compaction Performance & New-Tab Agent Links
+- **Faster Auto-Compaction (`backend/router/chat_api.py`):** Routes compaction to `"heavy"` (fastest online GPU node) before falling back to `"fast"` / `conv.model`, disables thinking tokens (`enable_thinking: False`), and trims compaction payloads (`14,000` chars max, `1,000` chars/message, `max_tokens: 500`).
+- **Agent Links Open in New Tab (`dashboard/src/components/ChatTab.tsx`, `dashboard/src/components/chat/ChatMessageList.tsx`):** Added `target="_blank" rel="noopener noreferrer"` to Markdown `<a>` links in both chat messages and compacted summaries.
+
 ## [0.20.0] - 2026-11-25
 
 ### HTTPS-Only Enforcement & Web Fetch HTTPS Preference

@@ -504,7 +504,7 @@ export function ChatMessageList({
                     </button>
                   </summary>
                   <div className="chat-disclosure__body chat-prose">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
                       {activeConv.compacted_summary}
                     </ReactMarkdown>
                   </div>

@@ -20,6 +20,8 @@ from backend.router.config import SplitchConfig
 from backend.router.telemetry import ClusterState
 from backend.router.web_search import _is_public_url
 from backend.shared.models import (
+    AliasConfig,
+    ChatMessageRecord,
     ConversationCreate,
     LoadedModel,
     NodeStatus,
@@ -658,5 +660,174 @@ def test_chat_final_round_without_tool_calls_does_not_set_max_rounds_reached(
     asst_msgs = [m for m in msgs if m["role"] == "assistant"]
     assert len(asst_msgs) == 2
     assert all("max_rounds_reached" not in m["meta"] for m in asst_msgs)
+
+
+def _run_compaction_against_loopback(
+    tmp_path: Path,
+    *,
+    gaming_mode: bool = False,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run /compact against two real loopback servers (gpu-1=heavy, mac-1=fast)."""
+    gpu_requests: list[dict[str, Any]] = []
+    mac_requests: list[dict[str, Any]] = []
+
+    def _make_handler(sink: list[dict[str, Any]], summary_text: str):
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or "0")
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                sink.append(json.loads(raw.decode("utf-8")))
+                payload = json.dumps(
+                    {
+                        "choices": [
+                            {"message": {"role": "assistant", "content": summary_text}}
+                        ]
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return
+
+        return _Handler
+
+    gpu_srv = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(gpu_requests, "- GPU summary"))
+    mac_srv = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(mac_requests, "- Mac summary"))
+    gpu_th = threading.Thread(target=gpu_srv.serve_forever, daemon=True)
+    mac_th = threading.Thread(target=mac_srv.serve_forever, daemon=True)
+    gpu_th.start()
+    mac_th.start()
+    try:
+        gpu_url = f"http://{gpu_srv.server_address[0]}:{gpu_srv.server_address[1]}"
+        mac_url = f"http://{mac_srv.server_address[0]}:{mac_srv.server_address[1]}"
+
+        cluster = ClusterState(SplitchConfig(), data_dir=tmp_path)
+        cluster.control.gaming_mode = gaming_mode
+        cluster.nodes["gpu-1"] = NodeStatus(
+            node_id="gpu-1",
+            display_name="GPU 1",
+            role="gpu",
+            agent_url=gpu_url,
+            engine_url=gpu_url,
+            online=True,
+            yield_on_gaming=True,
+            telemetry=NodeTelemetry(
+                node_id="gpu-1",
+                role="gpu",
+                platform="linux",
+                timestamp=1.0,
+                online=True,
+                engine="llama-server",
+                engine_healthy=True,
+                context_length=32768,
+                models=[LoadedModel(id="qwen-32b", status="loaded")],
+            ),
+        )
+        cluster.nodes["mac-1"] = NodeStatus(
+            node_id="mac-1",
+            display_name="Mac 1",
+            role="unified",
+            agent_url=mac_url,
+            engine_url=mac_url,
+            online=True,
+            yield_on_gaming=False,
+            telemetry=NodeTelemetry(
+                node_id="mac-1",
+                role="unified",
+                platform="darwin",
+                timestamp=1.0,
+                online=True,
+                engine="llama-server",
+                engine_healthy=True,
+                context_length=32768,
+                models=[LoadedModel(id="qwen-7b", status="loaded")],
+            ),
+        )
+        cluster.aliases["heavy"] = AliasConfig(
+            alias="heavy",
+            task_kind="code",
+            primary_node="gpu-1",
+            primary_model="qwen-32b",
+        )
+        cluster.aliases["fast"] = AliasConfig(
+            alias="fast",
+            task_kind="chat",
+            primary_node="mac-1",
+            primary_model="qwen-7b",
+        )
+
+        @asynccontextmanager
+        async def _lifespan(_app: FastAPI):
+            cluster._proxy_client = httpx.AsyncClient()
+            try:
+                yield
+            finally:
+                await cluster._proxy_client.aclose()
+
+        app = FastAPI(lifespan=_lifespan)
+        app.include_router(build_chat_router(cluster, tmp_path, tmp_path / "skills"))
+        with TestClient(app) as tc:
+            conv = tc.post(
+                "/api/chat/conversations",
+                json={"title": "Compaction Routing Test", "model": "fast"},
+            ).json()
+            store = ChatStore(tmp_path / "chats.db")
+            for i in range(20):
+                store.add_message(
+                    ChatMessageRecord(
+                        id=f"m_{i}",
+                        conversation_id=conv["id"],
+                        role="user" if i % 2 == 0 else "assistant",
+                        content=f"msg{i}_" + ("x" * 2500),
+                        created_at=float(1000 + i),
+                    )
+                )
+            resp = tc.post(f"/api/chat/conversations/{conv['id']}/compact?keep_recent=4")
+            assert resp.status_code == 200, resp.text
+            return resp.json(), gpu_requests, mac_requests
+    finally:
+        gpu_srv.shutdown()
+        gpu_srv.server_close()
+        mac_srv.shutdown()
+        mac_srv.server_close()
+        gpu_th.join(timeout=2.0)
+        mac_th.join(timeout=2.0)
+
+
+def test_compaction_prefers_heavy_node_and_caps_payload(tmp_path: Path) -> None:
+    body, gpu_reqs, mac_reqs = _run_compaction_against_loopback(tmp_path, gaming_mode=False)
+    assert body["compacted"] is True
+    assert body["summary"] == "- GPU summary"
+    assert len(gpu_reqs) == 1
+    assert len(mac_reqs) == 0
+
+    req = gpu_reqs[0]
+    assert req["model"] == "qwen-32b"
+    assert req["max_tokens"] == 500
+    assert req["chat_template_kwargs"] == {"enable_thinking": False}
+
+    transcript = req["messages"][1]["content"]
+    assert len(transcript) <= 14_000
+    assert " ...[truncated]" in transcript
+    for line in transcript.split("\n\n"):
+        assert len(line) <= 1030
+
+
+def test_compaction_falls_back_to_fast_when_gpu_gaming(tmp_path: Path) -> None:
+    body, gpu_reqs, mac_reqs = _run_compaction_against_loopback(tmp_path, gaming_mode=True)
+    assert body["compacted"] is True
+    assert body["summary"] == "- Mac summary"
+    assert len(gpu_reqs) == 0
+    assert len(mac_reqs) == 1
+
+    req = mac_reqs[0]
+    assert req["model"] == "qwen-7b"
+    assert req["max_tokens"] == 500
+    assert req["chat_template_kwargs"] == {"enable_thinking": False}
+
 
 

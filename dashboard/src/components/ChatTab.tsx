@@ -190,6 +190,13 @@ export function ChatTab({ snapshot, onError, onConfirm }: Props) {
 
   const markdownComponents = useMemo<Components>(
     () => ({
+      a({ href, children, ...props }) {
+        return (
+          <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+            {children}
+          </a>
+        );
+      },
       code({ className, children }) {
         return (
           <CodeBlock

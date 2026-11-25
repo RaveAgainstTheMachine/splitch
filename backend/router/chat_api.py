@@ -399,15 +399,23 @@ def build_chat_router(
         for m in older:
             role_tag = m.role.upper() if not m.tool_name else f"TOOL({m.tool_name})"
             body = (m.content or "").strip()
-            if len(body) > 2200:
-                body = body[:2200] + " ...[truncated]"
+            if len(body) > 1000:
+                body = body[:1000] + " ...[truncated]"
             transcript_lines.append(f"{role_tag}: {body}")
 
+        compact_candidates: list[str] = []
+        for cand in ("heavy", "fast"):
+            if cand in cluster.aliases and cand not in compact_candidates:
+                compact_candidates.append(cand)
+        if conv.model not in compact_candidates:
+            compact_candidates.append(conv.model)
+
         compact_req = {
-            "model": "fast" if "fast" in cluster.aliases else conv.model,
+            "model": compact_candidates[0],
             "stream": False,
             "temperature": 0.2,
-            "max_tokens": 900,
+            "max_tokens": 500,
+            "chat_template_kwargs": {"enable_thinking": False},
             "messages": [
                 {
                     "role": "system",
@@ -420,26 +428,18 @@ def build_chat_router(
                 },
                 {
                     "role": "user",
-                    "content": "\n\n".join(transcript_lines)[:32_000],
+                    "content": "\n\n".join(transcript_lines)[:14_000],
                 },
             ],
         }
 
-        decision, skip_reasons = resolve_route(
-            endpoint="/v1/chat/completions",
-            requested_model=str(compact_req["model"]),
-            body=compact_req,
-            nodes=cluster.nodes,
-            aliases=cluster.aliases,
-            control=cluster.control,
-            guards=cluster.config.guards,
-            heavy_char_threshold=cluster.config.router.auto_heavy_char_threshold,
-        )
-        if decision is None and compact_req["model"] != conv.model:
-            compact_req["model"] = conv.model
+        decision = None
+        skip_reasons: dict[str, str] = {}
+        for cand_model in compact_candidates:
+            compact_req["model"] = cand_model
             decision, skip_reasons = resolve_route(
                 endpoint="/v1/chat/completions",
-                requested_model=conv.model,
+                requested_model=cand_model,
                 body=compact_req,
                 nodes=cluster.nodes,
                 aliases=cluster.aliases,
@@ -447,6 +447,8 @@ def build_chat_router(
                 guards=cluster.config.guards,
                 heavy_char_threshold=cluster.config.router.auto_heavy_char_threshold,
             )
+            if decision is not None:
+                break
         if decision is None:
             raise HTTPException(
                 status_code=503, detail=f"No eligible node for compaction: {skip_reasons}"
