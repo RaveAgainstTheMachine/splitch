@@ -3,6 +3,13 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.26.0] - 2026-11-27
+
+### Added — Jeveration Single-Pass Engine (`arXiv:2611.24738`)
+- **Isolated CUDA Sidecar (`backend/agent/jeveration_worker.py`, `backend/agent/jeveration_routes.py`):** Added managed Python 3.12 CUDA venv provisioning (`uv venv` + `Carol-lyh/Jeveration`), Hugging Face weight pulling (`linlinlinlinsdada/Jeveration`, 6.5 GB) via `downloads.py`, lifecycle endpoints (`/jeveration/{status,install,pull-weights,start,stop}`), allowlisted Ed25519-signed proxy (`/jeveration/proxy/{path}`), and gaming-yield auto-eviction (`telemetry.py`).
+- **Router & Chat Integration (`backend/router/media_api.py`, `chat_store.py`, `chat_api.py`):** Added `MediaService._run_jeveration()` supporting single-pass 512×512 Text-to-Image (`t2i`), Image-to-Image (`hed`, `depth`, `colorize`, `anime`, `ghibli`, `watercolor`), and Dense Prediction (`dense` → 3-map `Segmentation`, `Depth`, `Normals` `extra_outputs`), plus `engine="jeveration"` and `jeveration_task` parameters on `generate_image`.
+- **Media Studio UI (`dashboard/src/components/MediaTab.tsx`, `dashboard/src/types.ts`, `backend/shared/models.py`):** Added the Jeveration Engine card (`Install Engine`, `Pull Weights`, `Start` / `Stop`), `Instant 1-Pass (Jeveration)` generator toggle with task & `From Photo` controls, and 3-up `extra_outputs` gallery rendering.
+
 ## [0.25.8] - 2026-11-27
 
 ### Bug Fix

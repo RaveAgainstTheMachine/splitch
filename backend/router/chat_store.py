@@ -27,7 +27,7 @@ MEDIA_TOOLS_SCHEMA: list[dict[str, Any]] = [
         "function": {
             "name": "generate_image",
             "description": (
-                "Generate an image locally on a Splitch GPU/media node (sd-server / ComfyUI). "
+                "Generate an image locally on a Splitch GPU/media node (sd-server / ComfyUI / Jeveration). "
                 "Returns the saved /api/media/files/... URL and metadata."
             ),
             "parameters": {
@@ -38,7 +38,17 @@ MEDIA_TOOLS_SCHEMA: list[dict[str, Any]] = [
                     "width": {"type": "integer", "description": "Image width in pixels (default 1024)"},
                     "height": {"type": "integer", "description": "Image height in pixels (default 1024)"},
                     "steps": {"type": "integer", "description": "Sampling steps (default 20)"},
-                    "model": {"type": "string", "description": "Optional checkpoint/model override"},
+                    "model": {"type": "string", "description": "Optional checkpoint/model override (or 'jeveration')"},
+                    "engine": {
+                        "type": "string",
+                        "enum": ["sd-server", "comfyui", "jeveration"],
+                        "description": "Optional media engine override ('jeveration' for 1-pass 512x512)",
+                    },
+                    "jeveration_task": {
+                        "type": "string",
+                        "enum": ["t2i", "hed", "depth", "colorize", "anime", "ghibli", "watercolor", "dense"],
+                        "description": "Jeveration task mode when engine='jeveration'",
+                    },
                 },
                 "required": ["prompt"],
             },

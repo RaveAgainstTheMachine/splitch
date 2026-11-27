@@ -53,6 +53,10 @@ from backend.agent.downloads import (
 from backend.agent.downloads import (
     run_hf_mlx_download as _run_hf_mlx_download_impl,
 )
+from backend.agent.jeveration_routes import (
+    build_jeveration_agent_router,
+    probe_jeveration_health,
+)
 from backend.agent.media_routes import (
     build_media_agent_router,
 )
@@ -207,6 +211,7 @@ NODE_ROLE: NodeRole = (
 ENGINE_URL = os.getenv("SPLITCH_ENGINE_URL", "http://127.0.0.1:8081").rstrip("/")
 STRATA_PORT = int(os.getenv("SPLITCH_STRATA_PORT", "8085"))
 STRATA_URL = os.getenv("SPLITCH_STRATA_URL", f"http://127.0.0.1:{STRATA_PORT}").rstrip("/")
+JEVERATION_PORT = int(os.getenv("SPLITCH_JEVERATION_PORT", "8084"))
 MEDIA_URL = os.getenv("SPLITCH_MEDIA_URL", "").strip().rstrip("/")
 STORAGE_PATH = os.getenv("SPLITCH_STORAGE_PATH", str(default_data_root() / "models"))
 WORKSPACE_ROOT = os.getenv("SPLITCH_WORKSPACE_ROOT", str(Path.home()))
@@ -555,6 +560,13 @@ class AgentState:
         self.strata_proc: asyncio.subprocess.Process | None = None
         self.strata_log_tail: deque[str] = deque(maxlen=80)
         self.strata_job: StrataJobState = StrataJobState()
+        self.jev_proc: asyncio.subprocess.Process | None = None
+        self.jev_port: int = JEVERATION_PORT
+        self.jev_healthy: bool = False
+        self.jev_vram_mb: float = 0.0
+        self.jev_last_error: str | None = None
+        self.jev_install_in_progress: bool = False
+        self.jev_install_step: str = ""
         self.snapshot: NodeTelemetry = NodeTelemetry(
             node_id=NODE_ID,
             role=NODE_ROLE,
@@ -598,6 +610,9 @@ class AgentState:
         strata_healthy, strata_active_model, strata_models = await _probe_strata_sidecar(
             self.client
         )
+        jev_healthy, jev_vram_mb = await probe_jeveration_health(self.client, self.jev_port)
+        self.jev_healthy = jev_healthy
+        self.jev_vram_mb = jev_vram_mb
 
         effective_sandbox = (
             await asyncio.to_thread(
@@ -650,6 +665,7 @@ class AgentState:
             strata_healthy=strata_healthy,
             strata_active_model=strata_active_model,
             strata_models=strata_models,
+            jeveration_healthy=jev_healthy,
         )
 
     async def _loop(self) -> None:
@@ -675,6 +691,10 @@ async def lifespan(_app: FastAPI):
         state.sd_proc.terminate()
         with contextlib.suppress(TimeoutError, ProcessLookupError):
             await asyncio.wait_for(state.sd_proc.wait(), timeout=3.0)
+    if state.jev_proc and state.jev_proc.returncode is None:
+        state.jev_proc.terminate()
+        with contextlib.suppress(TimeoutError, ProcessLookupError):
+            await asyncio.wait_for(state.jev_proc.wait(), timeout=3.0)
     if state._task:
         state._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1259,6 +1279,7 @@ def _build_strata_status() -> NodeStrataStatus:
 
 app.include_router(build_media_agent_router(lambda: sys.modules[__name__]))
 app.include_router(build_strata_agent_router(lambda: sys.modules[__name__]))
+app.include_router(build_jeveration_agent_router(lambda: sys.modules[__name__]))
 
 
 @app.delete("/files/models/{filename}")

@@ -25,11 +25,13 @@ import {
 import type { ConfirmState } from "./ConfirmDialog";
 import { useDialogLightDismiss } from "./ModelsTab";
 import type {
+  JeverationTask,
   MediaBackendNode,
   MediaHfFile,
   MediaHfRepoResult,
   MediaJob,
   MediaKind,
+  NodeJeverationStatus,
   NodeMediaEngineStatus
 } from "../types";
 
@@ -153,6 +155,11 @@ export function MediaTab({ onError, onConfirm }: Props) {
   const [engineStatus, setEngineStatus] = useState<NodeMediaEngineStatus | null>(null);
   const [selectedStartModel, setSelectedStartModel] = useState("");
   const [engineBusy, setEngineBusy] = useState<string | null>(null);
+  const [jevStatus, setJevStatus] = useState<NodeJeverationStatus | null>(null);
+  const [jevBusy, setJevBusy] = useState<string | null>(null);
+  const [useJeveration, setUseJeveration] = useState(false);
+  const [jevTask, setJevTask] = useState<JeverationTask>("t2i");
+  const [jevFromPhoto, setJevFromPhoto] = useState(false);
 
   const [hfQuery, setHfQuery] = useState("");
   const [hfKind, setHfKind] = useState<MediaKind>("image");
@@ -191,7 +198,10 @@ export function MediaTab({ onError, onConfirm }: Props) {
   const refreshEngineStatus = useCallback(async (targetNode: string) => {
     if (!targetNode) return;
     try {
-      const res = await fetch(`/api/media/nodes/${encodeURIComponent(targetNode)}/engine`);
+      const [res, jRes] = await Promise.all([
+        fetch(`/api/media/nodes/${encodeURIComponent(targetNode)}/engine`),
+        fetch("/api/media/jeveration/status")
+      ]);
       if (res.ok) {
         const st = (await res.json()) as NodeMediaEngineStatus;
         setEngineStatus(st);
@@ -203,6 +213,11 @@ export function MediaTab({ onError, onConfirm }: Props) {
             st.local_media_models[0];
           return preferred ? preferred.filename : "";
         });
+      }
+      if (jRes.ok) {
+        const list = (await jRes.json()) as NodeJeverationStatus[];
+        const match = list.find((item) => item.node_id === targetNode) ?? null;
+        setJevStatus(match);
       }
     } catch {
       // ignore transient poll errors
@@ -456,6 +471,34 @@ export function MediaTab({ onError, onConfirm }: Props) {
     }
   };
 
+  const handleJeverationAction = async (
+    action: "install" | "pull-weights" | "start" | "stop"
+  ) => {
+    if (!setupNodeId) return;
+    setJevBusy(action);
+    onError(null);
+    try {
+      const res = await fetch(
+        `/api/media/nodes/${encodeURIComponent(setupNodeId)}/jeveration/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({})
+        }
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+      setJevStatus((await res.json()) as NodeJeverationStatus);
+      await refresh();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : `Jeveration ${action} failed`);
+    } finally {
+      setJevBusy(null);
+    }
+  };
+
   const switchKind = (next: MediaKind) => {
     setKind(next);
     if (next === "video") {
@@ -500,9 +543,12 @@ export function MediaTab({ onError, onConfirm }: Props) {
           negative_prompt: negativePrompt.trim(),
           node_id: nodeId,
           model: model.trim(),
-          width,
-          height,
-          steps,
+          engine: kind === "image" && useJeveration ? "jeveration" : null,
+          jeveration_task: kind === "image" && useJeveration ? jevTask : null,
+          from_photo: kind === "image" && useJeveration ? jevFromPhoto : false,
+          width: kind === "image" && useJeveration ? 512 : width,
+          height: kind === "image" && useJeveration ? 512 : height,
+          steps: kind === "image" && useJeveration ? 1 : steps,
           cfg_scale: cfgScale,
           seed: Number.isFinite(parsedSeed) ? parsedSeed : null,
           frames,
@@ -727,6 +773,88 @@ export function MediaTab({ onError, onConfirm }: Props) {
             {engineStatus?.sd_error && (
               <div role="alert" className="banner banner--error">
                 {engineStatus.sd_error}
+              </div>
+            )}
+
+            {jevStatus && (
+              <div className="media-starter-card" style={{ marginTop: "0.5rem" }}>
+                <div>
+                  <div className="row-actions" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
+                    <span className="pill pill--accent">1-PASS</span>
+                    <strong>Jeveration (System One 512×512)</strong>
+                    <span className={`pill ${jevStatus.cuda_available ? "pill--ok" : "pill--warn"}`}>
+                      {jevStatus.cuda_available ? "CUDA" : "No CUDA"}
+                    </span>
+                    <span className={`pill ${jevStatus.installed ? "pill--ok" : ""}`}>
+                      {jevStatus.installed ? "Venv Ready" : "Not Installed"}
+                    </span>
+                    <span className={`pill ${jevStatus.weights_ready ? "pill--ok" : ""}`}>
+                      {jevStatus.weights_ready ? "Weights Ready" : "6.5 GB Weights"}
+                    </span>
+                    {jevStatus.healthy && (
+                      <span className="pill pill--ok">Running :{jevStatus.port}</span>
+                    )}
+                  </div>
+                  <div className="muted" style={{ fontSize: "0.73rem", marginTop: "0.2rem" }}>
+                    Single-pass T2I, I2I (hed, depth, colorize, anime, ghibli, watercolor), &amp;
+                    Dense Predict (seg + depth + normals)
+                    {jevStatus.install_in_progress && jevStatus.install_step
+                      ? ` · ${jevStatus.install_step}`
+                      : ""}
+                    {jevStatus.error ? ` · ${jevStatus.error}` : ""}
+                  </div>
+                </div>
+                <div className="row-actions" style={{ gap: "0.35rem", flexShrink: 0 }}>
+                  {!jevStatus.installed && (
+                    <button
+                      type="button"
+                      className="btn btn--sm"
+                      disabled={
+                        !jevStatus.cuda_available ||
+                        jevStatus.install_in_progress ||
+                        jevBusy === "install"
+                      }
+                      onClick={() => void handleJeverationAction("install")}
+                    >
+                      {jevStatus.install_in_progress || jevBusy === "install"
+                        ? "Installing…"
+                        : "Install Engine"}
+                    </button>
+                  )}
+                  {!jevStatus.weights_ready && (
+                    <button
+                      type="button"
+                      className="btn btn--sm"
+                      disabled={jevStatus.weights_downloading || jevBusy === "pull-weights"}
+                      onClick={() => void handleJeverationAction("pull-weights")}
+                    >
+                      <Download size={12} aria-hidden="true" />{" "}
+                      {jevStatus.weights_downloading ? "Pulling…" : "Pull Weights"}
+                    </button>
+                  )}
+                  {jevStatus.installed &&
+                    jevStatus.weights_ready &&
+                    (jevStatus.running ? (
+                      <button
+                        type="button"
+                        className="btn btn--sm btn--danger"
+                        disabled={jevBusy === "stop"}
+                        onClick={() => void handleJeverationAction("stop")}
+                      >
+                        <Square size={12} aria-hidden="true" /> Stop
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn btn--sm btn--accent"
+                        disabled={jevBusy === "start"}
+                        onClick={() => void handleJeverationAction("start")}
+                      >
+                        <Play size={12} aria-hidden="true" />{" "}
+                        {jevBusy === "start" ? "Starting…" : "Start"}
+                      </button>
+                    ))}
+                </div>
               </div>
             )}
 
@@ -1084,6 +1212,54 @@ export function MediaTab({ onError, onConfirm }: Props) {
                 />
                 <span>Evict LLM VRAM</span>
               </label>
+
+              {kind === "image" && (
+                <label
+                  className="chat-check"
+                  title="Use Jeveration single-forward-pass 512x512 engine"
+                >
+                  <input
+                    type="checkbox"
+                    checked={useJeveration}
+                    onChange={(e) => setUseJeveration(e.target.checked)}
+                  />
+                  <span>Instant 1-Pass (Jeveration)</span>
+                </label>
+              )}
+
+              {kind === "image" && useJeveration && (
+                <>
+                  <label className="inline-field">
+                    <span className="muted">Task</span>
+                    <select
+                      value={jevTask}
+                      onChange={(e) => setJevTask(e.target.value as JeverationTask)}
+                    >
+                      <option value="t2i">Text → Image</option>
+                      <option value="hed">Edge (HED) → Image</option>
+                      <option value="depth">Depth → Image</option>
+                      <option value="colorize">Colorize</option>
+                      <option value="anime">Anime Style</option>
+                      <option value="ghibli">Ghibli Style</option>
+                      <option value="watercolor">Watercolor Style</option>
+                      <option value="dense">Dense Predict (Seg + Depth + Normals)</option>
+                    </select>
+                  </label>
+                  {(jevTask === "hed" || jevTask === "depth") && (
+                    <label
+                      className="chat-check"
+                      title="Extract edge/depth map from uploaded photo first"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={jevFromPhoto}
+                        onChange={(e) => setJevFromPhoto(e.target.checked)}
+                      />
+                      <span>From Photo</span>
+                    </label>
+                  )}
+                </>
+              )}
             </div>
           </div>
 
@@ -1366,6 +1542,31 @@ export function MediaTab({ onError, onConfirm }: Props) {
                       <div className="media-card__error">
                         <span className="pill pill--err">FAILED</span>
                         <p className="text-err">{j.error || "Generation failed"}</p>
+                      </div>
+                    ) : j.extra_outputs && j.extra_outputs.length > 0 ? (
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                          gap: "0.25rem",
+                          width: "100%"
+                        }}
+                      >
+                        {j.extra_outputs.map((art) => (
+                          <div key={art.filename} style={{ textAlign: "center" }}>
+                            <img
+                              src={art.file_url}
+                              alt={`${art.label}: ${j.prompt}`}
+                              width={j.width}
+                              height={j.height}
+                              loading="lazy"
+                              className="media-card__media"
+                            />
+                            <span className="muted" style={{ fontSize: "0.68rem" }}>
+                              {art.label}
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     ) : j.file_url ? (
                       isVideo ? (

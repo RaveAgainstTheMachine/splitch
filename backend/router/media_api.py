@@ -43,12 +43,15 @@ from backend.shared.models import (
     MediaHfFile,
     MediaHfRepoResult,
     MediaJob,
+    MediaOutputArtifact,
+    NodeJeverationStatus,
     NodeMediaEngineStatus,
     NodeStatus,
     OpenAIImageRequest,
     OpenAIVideoRequest,
     PullModelRequest,
     SdCliVideoRequest,
+    StartJeverationRequest,
     StartMediaEngineRequest,
 )
 
@@ -333,12 +336,34 @@ class MediaService:
                     busy_reason=n.busy_reason,
                 )
             )
+            if t and t.jeveration_healthy:
+                out.append(
+                    MediaBackendNode(
+                        node_id=n.node_id,
+                        display_name=n.display_name,
+                        role=n.role,
+                        online=n.online,
+                        media_engine="jeveration",
+                        media_healthy=True,
+                        media_url=f"{n.agent_url.rstrip('/')}/jeveration/proxy",
+                        media_models=["jeveration-512"],
+                        vram_free_mb=t.vram_free_mb,
+                        vram_total_mb=t.vram_total_mb,
+                        busy_reason=n.busy_reason,
+                    )
+                )
         return out
 
     def has_healthy_backend(self) -> bool:
         return any(b.online and b.media_healthy and b.media_url for b in self.list_backends())
 
-    def resolve_media_node(self, preferred_node_id: str = "auto") -> tuple[NodeStatus, MediaEngineKind, str]:
+    def resolve_media_node(
+        self,
+        preferred_node_id: str = "auto",
+        *,
+        preferred_engine: MediaEngineKind | None = None,
+        preferred_model: str = "",
+    ) -> tuple[NodeStatus, MediaEngineKind, str]:
         candidates: list[NodeStatus] = []
         if preferred_node_id and preferred_node_id != "auto":
             n = self.cluster.nodes.get(preferred_node_id)
@@ -356,28 +381,39 @@ class MediaService:
                 ),
             )
 
+        want_jev = preferred_engine == "jeveration" or preferred_model.strip().lower().startswith(
+            "jeveration"
+        )
         skip_reasons: list[str] = []
         for n in candidates:
             if not n.online:
                 skip_reasons.append(f"{n.node_id}: offline")
                 continue
-            m_url = _resolve_node_media_url(n)
             t = n.telemetry
-            if not m_url or not t or not t.media_healthy:
-                skip_reasons.append(f"{n.node_id}: no healthy media engine (sd-server / ComfyUI)")
+            if not t:
+                skip_reasons.append(f"{n.node_id}: no telemetry")
                 continue
-            # Respect gaming/GPU-yield guards (ignore engine_down since LLM engine is separate from media engine)
             reason = check_node_eligibility(n, "", self.cluster.control, self.cluster.config.guards)
             if reason and not reason.endswith("_engine_down") and not reason.endswith("_vram_low"):
                 skip_reasons.append(f"{n.node_id}: {reason}")
                 continue
-            return n, t.media_engine, m_url
+            if want_jev:
+                if t.jeveration_healthy and n.agent_url:
+                    return n, "jeveration", f"{n.agent_url.rstrip('/')}/jeveration/proxy"
+                skip_reasons.append(f"{n.node_id}: jeveration worker not running")
+                continue
+            m_url = _resolve_node_media_url(n)
+            if m_url and t.media_healthy:
+                return n, t.media_engine, m_url
+            if preferred_engine is None and t.jeveration_healthy and n.agent_url:
+                return n, "jeveration", f"{n.agent_url.rstrip('/')}/jeveration/proxy"
+            skip_reasons.append(f"{n.node_id}: no healthy media engine (sd-server / ComfyUI / Jeveration)")
 
         raise HTTPException(
             status_code=503,
             detail=(
-                "No healthy image/video engine available. Start `sd-server` (:8082) via "
-                "`splitch engine install sd.cpp` or start ComfyUI (:8188) on a node. "
+                "No healthy image/video engine available. Start `sd-server` (:8082), "
+                "`jeveration` (:8084), or ComfyUI (:8188) on a node. "
                 f"Reasons: {', '.join(skip_reasons) or 'none'}"
             ),
         )
@@ -671,6 +707,82 @@ class MediaService:
             ext, mime = _guess_ext_and_mime(raw, "video")
             return raw, ext, mime
 
+    async def _run_jeveration(
+        self,
+        base_url: str,
+        req: MediaGenerateRequest,
+        seed: int,
+        job: MediaJob,
+    ) -> tuple[bytes, str, str, list[MediaOutputArtifact]]:
+        task = req.jeveration_task or ("hed" if req.init_image else "t2i")
+        job.stage = f"Jeveration 1-pass ({task}, 512x512)"
+        job.progress = 35
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(120.0, connect=10.0),
+            auth=self.cluster.agent_auth(),
+            verify=self.cluster.httpx_verify,
+        ) as client:
+            if task == "dense":
+                if not req.init_image:
+                    raise RuntimeError("Jeveration dense prediction requires an input image")
+                resp = await client.post(
+                    f"{base_url}/v1/dense-predict",
+                    json={"image_b64": req.init_image},
+                )
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"Jeveration dense error HTTP {resp.status_code}: {resp.text[:300]}"
+                    )
+                data = resp.json()
+                self.media_dir.mkdir(parents=True, exist_ok=True)
+                artifacts: list[MediaOutputArtifact] = []
+                primary_raw = b""
+                for idx, (label, key) in enumerate(
+                    (("Segmentation", "seg_png_b64"), ("Depth", "depth_png_b64"), ("Normals", "normal_png_b64"))
+                ):
+                    raw_part = base64.b64decode(str(data[key]))
+                    if idx == 0:
+                        primary_raw = raw_part
+                    fname = f"{job.id}_{label.lower()}.png"
+                    out_p = self.media_dir / fname
+                    await asyncio.to_thread(out_p.write_bytes, raw_part)
+                    if sys.platform != "win32":
+                        with contextlib.suppress(OSError):
+                            out_p.chmod(0o600)
+                    artifacts.append(
+                        MediaOutputArtifact(
+                            label=label,
+                            filename=fname,
+                            file_url=f"/api/media/files/{fname}",
+                            mime_type="image/png",
+                        )
+                    )
+                return primary_raw, ".png", "image/png", artifacts
+
+            if task != "t2i":
+                if not req.init_image:
+                    raise RuntimeError(f"Jeveration '{task}' requires an input image")
+                resp = await client.post(
+                    f"{base_url}/v1/image-to-image",
+                    json={
+                        "image_b64": req.init_image,
+                        "task": task,
+                        "caption": req.prompt,
+                        "from_photo": req.from_photo,
+                        "seed": seed,
+                    },
+                )
+            else:
+                resp = await client.post(
+                    f"{base_url}/v1/text-to-image",
+                    json={"prompt": req.prompt, "seed": seed},
+                )
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Jeveration error HTTP {resp.status_code}: {resp.text[:300]}")
+            raw = resp.content
+            ext, mime = _guess_ext_and_mime(raw, "image")
+            return raw, ext, mime, []
+
     async def _execute_job(
         self,
         job: MediaJob,
@@ -688,7 +800,12 @@ class MediaService:
                 await self._evict_llm_vram_before_media(node, job)
 
             job.status = "running"
-            if engine == "comfyui":
+            extra_outputs: list[MediaOutputArtifact] = []
+            if engine == "jeveration":
+                raw, ext, mime, extra_outputs = await self._run_jeveration(base_url, req, seed, job)
+                job.width = 512
+                job.height = 512
+            elif engine == "comfyui":
                 raw, ext, mime = await self._run_comfyui(base_url, node, req, seed, job)
             elif req.kind == "video":
                 raw, ext, mime = await self._run_sd_cli_video(node, req, seed, job)
@@ -706,6 +823,7 @@ class MediaService:
             job.filename = filename
             job.file_url = f"/api/media/files/{filename}"
             job.mime_type = mime
+            job.extra_outputs = extra_outputs
             job.status = "completed"
             job.progress = 100
             job.stage = "Done"
@@ -724,12 +842,18 @@ class MediaService:
         return job
 
     async def start_job(self, req: MediaGenerateRequest) -> MediaJob:
-        node, engine, base_url = self.resolve_media_node(req.node_id)
+        node, engine, base_url = self.resolve_media_node(
+            req.node_id, preferred_engine=req.engine, preferred_model=req.model
+        )
         job_id = f"med_{uuid.uuid4().hex[:10]}"
         chosen_model = req.model.strip() or (
-            node.telemetry.media_models[0]
-            if node.telemetry and node.telemetry.media_models
-            else ""
+            "jeveration-512"
+            if engine == "jeveration"
+            else (
+                node.telemetry.media_models[0]
+                if node.telemetry and node.telemetry.media_models
+                else ""
+            )
         )
         job = MediaJob(
             id=job_id,
@@ -742,9 +866,9 @@ class MediaService:
             node_id=node.node_id,
             media_engine=engine,
             model=chosen_model,
-            width=req.width,
-            height=req.height,
-            steps=req.steps,
+            width=512 if engine == "jeveration" else req.width,
+            height=512 if engine == "jeveration" else req.height,
+            steps=1 if engine == "jeveration" else req.steps,
             cfg_scale=req.cfg_scale,
             seed=req.seed,
             frames=req.frames,
@@ -759,12 +883,18 @@ class MediaService:
         return job
 
     async def generate_sync(self, req: MediaGenerateRequest) -> MediaJob:
-        node, engine, base_url = self.resolve_media_node(req.node_id)
+        node, engine, base_url = self.resolve_media_node(
+            req.node_id, preferred_engine=req.engine, preferred_model=req.model
+        )
         job_id = f"med_{uuid.uuid4().hex[:10]}"
         chosen_model = req.model.strip() or (
-            node.telemetry.media_models[0]
-            if node.telemetry and node.telemetry.media_models
-            else ""
+            "jeveration-512"
+            if engine == "jeveration"
+            else (
+                node.telemetry.media_models[0]
+                if node.telemetry and node.telemetry.media_models
+                else ""
+            )
         )
         job = MediaJob(
             id=job_id,
@@ -929,6 +1059,120 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
                         detail = str(r.json().get("detail", detail))
                     raise HTTPException(status_code=r.status_code, detail=detail)
                 return DownloadJob.model_validate(r.json())
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.get("/api/media/jeveration/status", response_model=list[NodeJeverationStatus])
+    async def get_cluster_jeveration_status() -> list[NodeJeverationStatus]:
+        out: list[NodeJeverationStatus] = []
+
+        async def _fetch(node_id: str, agent_url: str) -> None:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=6.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
+                ) as client:
+                    r = await client.get(f"{agent_url}/jeveration/status")
+                    if r.status_code == 200:
+                        out.append(NodeJeverationStatus.model_validate(r.json()))
+                        return
+            except (httpx.HTTPError, ValueError):
+                pass
+            out.append(NodeJeverationStatus(node_id=node_id, error="Agent unreachable"))
+
+        await asyncio.gather(
+            *(_fetch(n.node_id, n.agent_url) for n in cluster.nodes.values() if n.online)
+        )
+        out.sort(key=lambda s: s.node_id)
+        return out
+
+    @router.post("/api/media/nodes/{node_id}/jeveration/install", response_model=NodeJeverationStatus)
+    async def install_node_jeveration(node_id: str) -> NodeJeverationStatus:
+        node = _require_online_node(node_id)
+        try:
+            async with httpx.AsyncClient(
+                timeout=20.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
+            ) as client:
+                r = await client.post(f"{node.agent_url}/jeveration/install", json={})
+                if r.status_code >= 400:
+                    raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+                return NodeJeverationStatus.model_validate(r.json())
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.post(
+        "/api/media/nodes/{node_id}/jeveration/pull-weights",
+        response_model=NodeJeverationStatus,
+    )
+    async def pull_node_jeveration_weights(node_id: str) -> NodeJeverationStatus:
+        node = _require_online_node(node_id)
+        headers: dict[str, str] = {}
+        try:
+            import os
+
+            from backend.shared.secrets import resolve_secret_value
+
+            hf_tok = resolve_secret_value(os.getenv("HF_TOKEN", ""), vault=cluster.vault) or (
+                cluster.vault.get("hf_token") or ""
+            )
+            if hf_tok.strip():
+                headers["x-splitch-hf-token"] = hf_tok.strip()
+        except (OSError, PermissionError, ValueError):
+            pass
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0,
+                headers=headers or None,
+                auth=cluster.agent_auth(),
+                verify=cluster.httpx_verify,
+            ) as client:
+                r = await client.post(f"{node.agent_url}/jeveration/pull-weights", json={})
+                if r.status_code >= 400:
+                    raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+                return NodeJeverationStatus.model_validate(r.json())
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.post("/api/media/nodes/{node_id}/jeveration/start", response_model=NodeJeverationStatus)
+    async def start_node_jeveration(
+        node_id: str, req: StartJeverationRequest | None = None
+    ) -> NodeJeverationStatus:
+        node = _require_online_node(node_id)
+        payload = (req or StartJeverationRequest()).model_dump()
+        try:
+            async with httpx.AsyncClient(
+                timeout=60.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
+            ) as client:
+                r = await client.post(f"{node.agent_url}/jeveration/start", json=payload)
+                if r.status_code >= 400:
+                    detail = r.text[:400]
+                    with contextlib.suppress(ValueError):
+                        detail = str(r.json().get("detail", detail))
+                    raise HTTPException(status_code=r.status_code, detail=detail)
+                await cluster.poll_all_nodes()
+                return NodeJeverationStatus.model_validate(r.json())
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.post("/api/media/nodes/{node_id}/jeveration/stop", response_model=NodeJeverationStatus)
+    async def stop_node_jeveration(node_id: str) -> NodeJeverationStatus:
+        node = _require_online_node(node_id)
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
+            ) as client:
+                r = await client.post(f"{node.agent_url}/jeveration/stop", json={})
+                if r.status_code >= 400:
+                    raise HTTPException(status_code=r.status_code, detail=r.text[:300])
+                await cluster.poll_all_nodes()
+                return NodeJeverationStatus.model_validate(r.json())
         except HTTPException:
             raise
         except httpx.HTTPError as exc:

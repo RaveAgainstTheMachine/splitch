@@ -845,12 +845,16 @@ def build_chat_router(
                             else:
                                 is_vid = t_name == "generate_video"
                                 try:
+                                    eng_arg = parsed_args.get("engine")
+                                    jev_task_arg = parsed_args.get("jeveration_task")
                                     m_job = await media_service.generate_sync(
                                         MediaGenerateRequest(
                                             kind="video" if is_vid else "image",
                                             prompt=str(parsed_args.get("prompt", "")),
                                             negative_prompt=str(parsed_args.get("negative_prompt", "")),
                                             model=str(parsed_args.get("model", "")),
+                                            engine=str(eng_arg) if eng_arg else None,  # type: ignore[arg-type]
+                                            jeveration_task=str(jev_task_arg) if jev_task_arg else None,  # type: ignore[arg-type]
                                             width=int(parsed_args.get("width") or (768 if is_vid else 1024)),
                                             height=int(parsed_args.get("height") or (512 if is_vid else 1024)),
                                             steps=int(parsed_args.get("steps") or 20),

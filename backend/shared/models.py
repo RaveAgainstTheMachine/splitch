@@ -12,8 +12,11 @@ from pydantic import BaseModel, Field
 
 NodeRole = Literal["gpu", "unified", "cpu"]
 EngineKind = Literal["llama-server", "ollama", "mlx-lm", "strata", "openai", "unknown"]
-MediaEngineKind = Literal["sd-server", "comfyui", "openai-images", "none"]
+MediaEngineKind = Literal["sd-server", "comfyui", "openai-images", "jeveration", "none"]
 MediaKind = Literal["image", "video"]
+JeverationTask = Literal[
+    "t2i", "hed", "depth", "colorize", "anime", "ghibli", "watercolor", "dense"
+]
 GpuVendor = Literal["nvidia", "amd", "intel", "apple", "other"]
 
 
@@ -89,6 +92,7 @@ class NodeTelemetry(BaseModel):
     strata_healthy: bool = False
     strata_active_model: str = ""
     strata_models: list[LoadedModel] = Field(default_factory=list)
+    jeveration_healthy: bool = False
 
 
 class NodeStatus(BaseModel):
@@ -646,12 +650,22 @@ class SwarmWorkerMessage(BaseModel):
 # ── Image & Video Generation (Unified Media Plane) ───────────────────────────
 
 
+class MediaOutputArtifact(BaseModel):
+    label: str
+    filename: str
+    file_url: str
+    mime_type: str = "image/png"
+
+
 class MediaGenerateRequest(BaseModel):
     kind: MediaKind = "image"
     prompt: str = Field(..., min_length=1, max_length=8000)
     negative_prompt: str = Field(default="", max_length=4000)
     node_id: str = "auto"
     model: str = ""
+    engine: MediaEngineKind | None = None
+    jeveration_task: JeverationTask | None = None
+    from_photo: bool = False
     width: int = Field(default=1024, ge=128, le=2048)
     height: int = Field(default=1024, ge=128, le=2048)
     steps: int = Field(default=20, ge=1, le=150)
@@ -686,10 +700,33 @@ class MediaJob(BaseModel):
     filename: str | None = None
     file_url: str | None = None
     mime_type: str | None = None
+    extra_outputs: list[MediaOutputArtifact] = Field(default_factory=list)
     duration_ms: float | None = None
     error: str | None = None
     created_at: float
     completed_at: float | None = None
+
+
+class NodeJeverationStatus(BaseModel):
+    node_id: str
+    cuda_available: bool = False
+    installed: bool = False
+    weights_ready: bool = False
+    running: bool = False
+    healthy: bool = False
+    port: int = 8084
+    install_in_progress: bool = False
+    install_step: str = ""
+    weights_downloading: bool = False
+    error: str | None = None
+    vram_used_mb: float = 0.0
+    active_downloads: list[DownloadJob] = Field(default_factory=list)
+
+
+class StartJeverationRequest(BaseModel):
+    port: int = Field(default=8084, ge=1024, le=65535)
+    load_source_decoder: bool = True
+    evict_primary_models: bool = True
 
 
 class MediaBackendNode(BaseModel):

@@ -2,8 +2,17 @@
 
 export type NodeRole = "gpu" | "unified" | "cpu";
 export type EngineKind = "llama-server" | "ollama" | "mlx-lm" | "strata" | "openai" | "unknown";
-export type MediaEngineKind = "sd-server" | "comfyui" | "openai-images" | "none";
+export type MediaEngineKind = "sd-server" | "comfyui" | "openai-images" | "jeveration" | "none";
 export type MediaKind = "image" | "video";
+export type JeverationTask =
+  | "t2i"
+  | "hed"
+  | "depth"
+  | "colorize"
+  | "anime"
+  | "ghibli"
+  | "watercolor"
+  | "dense";
 export type GpuVendor = "nvidia" | "amd" | "intel" | "apple" | "other";
 
 export interface LoadedModel {
@@ -78,6 +87,7 @@ export interface NodeTelemetry {
   strata_healthy?: boolean;
   strata_active_model?: string;
   strata_models?: LoadedModel[];
+  jeveration_healthy?: boolean;
 }
 
 export interface NodeStatus {
@@ -424,6 +434,13 @@ export interface AgentStatusState {
   toolName?: string;
 }
 
+export interface MediaOutputArtifact {
+  label: string;
+  filename: string;
+  file_url: string;
+  mime_type: string;
+}
+
 export interface MediaJob {
   id: string;
   kind: MediaKind;
@@ -445,10 +462,27 @@ export interface MediaJob {
   filename: string | null;
   file_url: string | null;
   mime_type: string | null;
+  extra_outputs?: MediaOutputArtifact[];
   duration_ms: number | null;
   error: string | null;
   created_at: number;
   completed_at: number | null;
+}
+
+export interface NodeJeverationStatus {
+  node_id: string;
+  cuda_available: boolean;
+  installed: boolean;
+  weights_ready: boolean;
+  running: boolean;
+  healthy: boolean;
+  port: number;
+  install_in_progress: boolean;
+  install_step: string;
+  weights_downloading: boolean;
+  error: string | null;
+  vram_used_mb: number;
+  active_downloads: DownloadJob[];
 }
 
 export interface MediaBackendNode {

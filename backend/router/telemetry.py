@@ -407,6 +407,16 @@ class ClusterState:
                     telemetry.strata_healthy = False
                     telemetry.strata_active_model = ""
                     telemetry.strata_models = []
+        if telemetry.jeveration_healthy:
+            with contextlib.suppress(httpx.HTTPError, OSError):
+                resp = await self._poll_client.post(
+                    f"{node.agent_url}/jeveration/stop",
+                    json={},
+                    auth=self.agent_auth(),
+                    timeout=12.0,
+                )
+                if resp.status_code < 400:
+                    telemetry.jeveration_healthy = False
 
     async def persist_aliases(self) -> None:
         base_dir = self.data_dir or (default_data_root() / "data")

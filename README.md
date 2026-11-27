@@ -40,7 +40,7 @@
 | Status | Capabilities |
 | :--- | :--- |
 | **Core / Stable** | OpenAI `/v1/chat/completions` & `/v1/responses`, Anthropic `/v1/messages`, GPU Auto-Yield & failover, `llama-server` & `mlx-lm` management, `hf_xet` + HTTP model pulls, Agent Chat with `bwrap`/Seatbelt sandboxed tools, AES-GCM vault & Ed25519 signing |
-| **Beta / Experimental** | Multi-node Swarm orchestration, Strata Sparse MoE streaming, Media Studio (`sd-server` / ComfyUI), MCP/Skills auto-discovery (`suggest_mcp` / `suggest_skill`), cross-OS tray & live theme icon sync |
+| **Beta / Experimental** | Multi-node Swarm orchestration, Strata Sparse MoE streaming, Media Studio (`sd-server` / ComfyUI / Jeveration 1-pass), MCP/Skills auto-discovery (`suggest_mcp` / `suggest_skill`), cross-OS tray & live theme icon sync |
 
 ---
 
