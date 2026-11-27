@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.25.7] - 2026-11-27
+
+### UI Polish
+- **Minimal Chat Scrollbars & Hairline Panel Borders (`dashboard/src/styles/chat.css`):** Styled `.chat-layout` and all Chat descendants with `scrollbar-width: thin` and subtle translucent `scrollbar-color` (transparent track, low-opacity muted thumb that brightens on hover, plus `5px` WebKit fallback), and replaced the solid `6px` splitter bar with a `1px` hairline divider (`::before`) inside a `6px` hit target that widens to `3px` in `--accent` on hover/drag.
+
 ## [0.25.6] - 2026-11-27
 
 ### UI Polish

@@ -13,6 +13,36 @@
   background: var(--bg);
 }
 
+.chat-layout,
+.chat-layout * {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 26%, transparent) transparent;
+}
+
+.chat-layout *:hover {
+  scrollbar-color: color-mix(in srgb, var(--muted) 48%, transparent) transparent;
+}
+
+@supports not (scrollbar-width: thin) {
+  .chat-layout *::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+
+  .chat-layout *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .chat-layout *::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted) 26%, transparent);
+    border-radius: 4px;
+  }
+
+  .chat-layout *::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--muted) 48%, transparent);
+  }
+}
+
 .chat-layout--sidebar-collapsed {
   grid-template-columns: 0px minmax(0, 1fr);
 }
@@ -51,7 +81,7 @@
 
 .chat-sidebar {
   background: var(--bg);
-  border-inline-end: 1px solid var(--border);
+  border-inline-end: 0;
   border-radius: 0;
   padding: 0.7rem 0.65rem;
   display: flex;
@@ -1219,15 +1249,30 @@
 /* ── Right Contextual Split Artifact / Preview Pane ───────────────────────── */
 
 .chat-splitter {
+  position: relative;
   cursor: col-resize;
-  background: var(--border);
-  transition: background 120ms ease;
+  background: transparent;
   user-select: none;
   touch-action: none;
 }
 
-.chat-splitter:hover,
-.chat-splitter:active {
+.chat-splitter::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 50%;
+  inline-size: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+  transition:
+    inline-size 120ms ease,
+    background 120ms ease;
+}
+
+.chat-splitter:hover::before,
+.chat-splitter:active::before,
+.chat-splitter:focus-visible::before {
+  inline-size: 3px;
   background: var(--accent);
 }
 
