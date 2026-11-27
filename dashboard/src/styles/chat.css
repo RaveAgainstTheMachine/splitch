@@ -6,6 +6,8 @@
   display: grid;
   grid-template-columns: var(--sidebar-width) 6px minmax(0, 1fr);
   gap: 0;
+  max-inline-size: 100%;
+  overflow-x: hidden;
   block-size: calc(100dvh - 49px);
   max-block-size: calc(100dvh - 49px);
   background: var(--bg);
@@ -342,12 +344,14 @@
 
 .chat-thread {
   position: relative;
+  overflow-x: hidden;
   overflow-y: auto;
   container-type: scroll-state;
   padding: 1.35rem 1.5rem 2.25rem;
   display: flex;
   flex-direction: column;
   gap: 1.35rem;
+  min-inline-size: 0;
   min-block-size: 260px;
 }
 
@@ -418,6 +422,7 @@
 .chat-msg-slot {
   max-inline-size: 760px;
   width: 100%;
+  min-inline-size: 0;
   margin-inline: auto;
   display: grid;
   gap: 0.5rem;
@@ -731,6 +736,9 @@
 }
 
 .chat-prose table {
+  display: block;
+  max-inline-size: 100%;
+  overflow-x: auto;
   border-collapse: collapse;
   width: 100%;
   margin: 0.6rem 0;
@@ -784,6 +792,7 @@
 
 /* Grounded Rounded Bottom Composer Box */
 .chat-composer-shell {
+  min-inline-size: 0;
   padding: 0 1.25rem 0.85rem;
   background: var(--bg);
 }
@@ -1065,6 +1074,7 @@
 .chat-composer {
   max-inline-size: 760px;
   width: 100%;
+  min-inline-size: 0;
   margin: 0 auto;
   display: grid;
   gap: 0.35rem;

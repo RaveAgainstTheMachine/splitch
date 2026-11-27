@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.25.6] - 2026-11-27
+
+### UI Polish
+- **Chat Horizontal Overflow Fix (`dashboard/src/styles/chat.css`):** Added explicit `overflow-x: hidden; min-inline-size: 0;` on `.chat-thread`, `overflow-x: hidden; max-inline-size: 100%;` on `.chat-layout`, `min-inline-size: 0;` on `.chat-msg-slot`, `.chat-composer-shell`, and `.chat-composer`, and `display: block; max-inline-size: 100%; overflow-x: auto;` on `.chat-prose table` so chat threads never sprout spurious horizontal scrollbars.
+
 ## [0.25.5] - 2026-11-27
 
 ### Fixes & Resilience (Left Sidebar Resize, `suggest_mcp`, Ed25519 Body Signing & Upstream Failover)
