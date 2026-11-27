@@ -120,7 +120,7 @@ def watched_gpu_metrics(node: NodeStatus) -> tuple[float, float, float, float]:
     return t.non_llm_vram_mb, t.gpu_util_percent, t.vram_total_mb, t.vram_free_mb
 
 
-SPLITCH_POST_WORK_GRACE_S = 6.0
+SPLITCH_POST_WORK_GRACE_S = 10.0
 
 
 def is_splitch_recently_active(

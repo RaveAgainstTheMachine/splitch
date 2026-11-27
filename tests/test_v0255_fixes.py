@@ -27,7 +27,12 @@ from backend.router.chat_context import (
 )
 from backend.router.chat_mcp import call_mcp_tool
 from backend.router.config import SplitchConfig
-from backend.router.policy import RouteDecision
+from backend.router.policy import (
+    RouteDecision,
+    check_node_eligibility,
+    is_splitch_recently_active,
+)
+from backend.router.proxy import forward_inference
 from backend.router.swarm import SwarmManager
 from backend.router.telemetry import AgentEd25519Auth, ClusterState
 from backend.shared.models import (
@@ -861,3 +866,142 @@ def test_resolve_upstream_target_strata_proxy_across_callers(tmp_path: Path) -> 
         srv.shutdown()
         srv.server_close()
         th.join(timeout=2.0)
+
+
+def test_post_work_grace_prevents_pc_gpu_busy_after_splitch_inference(tmp_path: Path) -> None:
+    """
+    Regression test for v0.25.8: finishing a Splitch inference turn must stamp
+    `last_splitch_work_ts` so high GPU utilization from Splitch's own inference
+    does not immediately trigger `pc_gpu_busy` on `check_node_eligibility`.
+    """
+    cluster = ClusterState(SplitchConfig(), data_dir=tmp_path)
+    node = NodeStatus(
+        node_id="pc",
+        display_name="PC",
+        role="gpu",
+        yield_on_gaming=True,
+        agent_url="http://127.0.0.1:9001",
+        engine_url="http://127.0.0.1:9002",
+        online=True,
+        last_splitch_work_ts=0.0,
+        telemetry=NodeTelemetry(
+            node_id="pc",
+            role="gpu",
+            platform="linux",
+            timestamp=1.0,
+            online=True,
+            engine="llama-server",
+            engine_healthy=True,
+            context_length=32768,
+            non_llm_vram_mb=100.0,
+            gpu_util_percent=0.0,
+            models=[LoadedModel(id="m1", status="loaded")],
+        ),
+    )
+    cluster.nodes["pc"] = node
+
+    async def _mock_upstream(request: httpx.Request) -> httpx.Response:
+        assert node.in_flight >= 1
+        # Simulate Splitch's own inference driving GPU utilization to 95%
+        assert node.telemetry is not None
+        node.telemetry.gpu_util_percent = 95.0
+        payload = json.loads(request.content.decode())
+        if payload.get("stream"):
+            sse = (
+                b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+                b'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}\n\n'
+                b"data: [DONE]\n\n"
+            )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=sse,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-grace",
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "ok-sync"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+            },
+        )
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        cluster._proxy_client = httpx.AsyncClient(transport=httpx.MockTransport(_mock_upstream))
+        try:
+            yield
+        finally:
+            await cluster._proxy_client.aclose()
+
+    app = FastAPI(lifespan=_lifespan)
+    app.include_router(build_chat_router(cluster, tmp_path, tmp_path / "skills"))
+
+    @app.post("/v1/chat/completions")
+    async def _openai_chat(request: Request):
+        return await forward_inference(request, cluster, "/v1/chat/completions")
+
+    with TestClient(app) as tc:
+        conv = tc.post(
+            "/api/chat/conversations",
+            json={"title": "GraceWindow", "model": "m1", "tools_enabled": False},
+        ).json()
+
+        # 1. Chat IDE turn via chat_api.py
+        resp_chat = tc.post(
+            f"/api/chat/conversations/{conv['id']}/send",
+            json={"content": "hello"},
+        )
+        assert resp_chat.status_code == 200
+        chat_events = _parse_sse_events(resp_chat.text)
+        assert ("token", {"text": "ok"}) in chat_events
+        assert not any(ev == "error" for ev, _ in chat_events), chat_events
+        assert node.in_flight == 0
+        assert node.telemetry is not None and node.telemetry.gpu_util_percent == 95.0
+        assert check_node_eligibility(node, "m1", cluster.control, cluster.config.guards) is None
+        assert is_splitch_recently_active(node) is True
+        assert node.last_splitch_work_ts > 0.0
+
+        # Consecutive turn while gpu_util_percent is still 95.0 must not hit pc_gpu_busy
+        resp_chat_2 = tc.post(
+            f"/api/chat/conversations/{conv['id']}/send",
+            json={"content": "follow-up while gpu hot"},
+        )
+        assert resp_chat_2.status_code == 200
+        chat_events_2 = _parse_sse_events(resp_chat_2.text)
+        assert ("token", {"text": "ok"}) in chat_events_2
+        assert not any(ev == "error" for ev, _ in chat_events_2), chat_events_2
+
+        # 2. OpenAI proxy non-streaming via proxy.py
+        node.last_splitch_work_ts = 0.0
+        node.telemetry.gpu_util_percent = 0.0
+        resp_proxy_sync = tc.post(
+            "/v1/chat/completions",
+            json={"model": "m1", "stream": False, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp_proxy_sync.status_code == 200
+        assert node.in_flight == 0
+        assert node.telemetry.gpu_util_percent == 95.0
+        assert node.last_splitch_work_ts > 0.0
+        assert is_splitch_recently_active(node) is True
+        assert check_node_eligibility(node, "m1", cluster.control, cluster.config.guards) is None
+
+        # 3. OpenAI proxy streaming via proxy.py
+        node.last_splitch_work_ts = 0.0
+        node.telemetry.gpu_util_percent = 0.0
+        resp_proxy_stream = tc.post(
+            "/v1/chat/completions",
+            json={"model": "m1", "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp_proxy_stream.status_code == 200
+        assert node.in_flight == 0
+        assert node.telemetry.gpu_util_percent == 95.0
+        assert node.last_splitch_work_ts > 0.0
+        assert is_splitch_recently_active(node) is True
+        assert check_node_eligibility(node, "m1", cluster.control, cluster.config.guards) is None
+

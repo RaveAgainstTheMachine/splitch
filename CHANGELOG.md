@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.25.8] - 2026-11-27
+
+### Bug Fix
+- **False Mid-Turn `pc_gpu_busy` Fallback (`backend/router/policy.py`, `chat_api.py`, `proxy.py`, `anthropic_api.py`, `swarm.py`):** Stamped `node.last_splitch_work_ts = time.time()` in `finally:` blocks whenever `in_flight` decrements across Chat, OpenAI Proxy, Anthropic Messages, and Swarm paths, and raised `SPLITCH_POST_WORK_GRACE_S` from `6.0s` to `10.0s` so fast LLM rounds finishing between 3s telemetry polls do not falsely trigger `gpu_busy` / `gpu_cooldown`.
+
 ## [0.25.7] - 2026-11-27
 
 ### UI Polish

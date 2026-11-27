@@ -543,6 +543,7 @@ def build_chat_router(
                                 yield _sse("error", {"message": f"Stream error: {exc}"})
                                 return
                         finally:
+                            decision.node.last_splitch_work_ts = time.time()
                             decision.node.in_flight = max(0, decision.node.in_flight - 1)
 
                         if upstream_ok or not retry_next_node:

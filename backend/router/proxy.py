@@ -264,6 +264,7 @@ async def forward_inference(
                 err_msg = str(exc)
             finally:
                 await final_upstream.aclose()
+                final_decision.node.last_splitch_work_ts = time.time()
                 final_decision.node.in_flight = max(0, final_decision.node.in_flight - 1)
                 elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
                 gen_s = max(0.001, (elapsed_ms - (ttft_ms or 0.0)) / 1000.0)
@@ -340,6 +341,7 @@ async def forward_inference(
             last_ns_exc = exc
             continue
         finally:
+            active_decision.node.last_splitch_work_ts = time.time()
             active_decision.node.in_flight = max(0, active_decision.node.in_flight - 1)
 
     if upstream_ns is None:

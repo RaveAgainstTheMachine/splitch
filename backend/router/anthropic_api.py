@@ -457,6 +457,7 @@ async def handle_anthropic_messages(request: Request, state: ClusterState) -> Re
             )
             raise HTTPException(status_code=502, detail=f"Upstream node error: {exc}") from exc
         finally:
+            decision.node.last_splitch_work_ts = time.time()
             decision.node.in_flight = max(0, decision.node.in_flight - 1)
 
     # Streaming: translate OpenAI SSE chunks into Anthropic Messages SSE protocol
@@ -465,6 +466,7 @@ async def handle_anthropic_messages(request: Request, state: ClusterState) -> Re
     try:
         upstream = await state.proxy_client.send(req_obj, stream=True, auth=upstream_auth)
     except httpx.HTTPError as exc:
+        decision.node.last_splitch_work_ts = time.time()
         decision.node.in_flight = max(0, decision.node.in_flight - 1)
         raise HTTPException(status_code=502, detail=f"Upstream node error: {exc}") from exc
 
@@ -666,6 +668,7 @@ async def handle_anthropic_messages(request: Request, state: ClusterState) -> Re
             err_msg = str(exc)
         finally:
             await upstream.aclose()
+            decision.node.last_splitch_work_ts = time.time()
             decision.node.in_flight = max(0, decision.node.in_flight - 1)
             elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
             gen_s = max(0.001, (elapsed_ms - (ttft_ms or 0.0)) / 1000.0)

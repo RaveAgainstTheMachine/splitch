@@ -431,6 +431,7 @@ class SwarmManager:
                                             slot["function"]["arguments"] += fn["arguments"]
                                 break
                     finally:
+                        decision.node.last_splitch_work_ts = time.time()
                         decision.node.in_flight = max(0, decision.node.in_flight - 1)
 
                 elapsed_s = max(0.01, time.perf_counter() - started)
