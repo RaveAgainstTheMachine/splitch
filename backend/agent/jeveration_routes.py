@@ -229,6 +229,9 @@ def build_jeveration_agent_router(main_getter: Callable[[], Any]) -> APIRouter:
         wdir.mkdir(parents=True, exist_ok=True)
         hf_token = request.headers.get("x-splitch-hf-token", "").strip()
 
+        async def _noop_refresh(_stem: str) -> None:
+            return None
+
         for fname in JEVERATION_WEIGHT_FILES:
             if (wdir / fname).is_file():
                 continue
@@ -252,9 +255,10 @@ def build_jeveration_agent_router(main_getter: Callable[[], Any]) -> APIRouter:
             asyncio.create_task(
                 run_hf_download(
                     job,
-                    hf_token,
-                    storage_root=wdir,
-                    hf_endpoint=m.HF_ENDPOINT,
+                    storage_path=str(wdir),
+                    refresh_engine_cb=_noop_refresh,
+                    poll_once_cb=st.poll_once,
+                    hf_token_override=hf_token,
                 )
             )
         return await asyncio.to_thread(build_jeveration_status_snapshot, m)

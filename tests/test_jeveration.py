@@ -610,3 +610,26 @@ def test_chat_generate_image_schema_exposes_jeveration() -> None:
         "watercolor",
         "dense",
     }
+
+
+def test_agent_jeveration_pull_weights_creates_download_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_main, "STORAGE_PATH", str(tmp_path))
+    monkeypatch.setattr(agent_main, "AGENT_TOKEN", "tok-pull")
+    monkeypatch.setattr(agent_main, "ROUTER_PUBLIC_KEY", None)
+    monkeypatch.setenv("SPLITCH_HF_PROTOCOL", "http")
+    agent_main.state.downloads.clear()
+
+    with TestClient(agent_main.app) as client:
+        r = client.post(
+            "/jeveration/pull-weights",
+            headers={"Authorization": "Bearer tok-pull"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["weights_downloading"] is True
+        assert len(body["active_downloads"]) == 3
+        names = {d["filename"] for d in body["active_downloads"]}
+        assert names == {"jeveration.pt", "decoder512.pt", "source_decoder512.pt"}
+    agent_main.state.downloads.clear()

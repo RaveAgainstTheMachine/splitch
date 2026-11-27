@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.26.3] - 2026-11-27
+
+### Bug Fix
+- **Jeveration `pull-weights` Argument Fix (`backend/agent/jeveration_routes.py`, `tests/test_jeveration.py`):** Fixed `run_hf_download(...)` call arguments in `pull_jeveration_weights()` (`storage_path`, `refresh_engine_cb`, `poll_once_cb`, `hf_token_override`) after `m.HF_ENDPOINT` `AttributeError`, and added `test_agent_jeveration_pull_weights_creates_download_jobs`.
+
 ## [0.26.2] - 2026-11-27
 
 ### Bug Fix
