@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.26.4] - 2026-11-27
+
+### Bug Fix & UX
+- **Jeveration Non-Blocking Startup & Log Capture (`backend/agent/jeveration_routes.py`, `tests/test_jeveration.py`):** Redirected `jeveration_worker.py` stdout/stderr to `<weights_dir>/jeveration-worker.log` instead of undrained OS pipes, capped startup wait at 5s so cold model/HF loads return `running=True, healthy=False` without stalling, and captured the log tail on early exit.
+- **Focused Media Studio UI (`dashboard/src/components/MediaTab.tsx`):** Auto-collapsed `Engines & Models` when an engine is ready or loading, updated header/card status pills (`JEVERATION :8084` / `Loading pipeline…`), enabled 1.5s polling while Jeveration is loading, and hid irrelevant diffusion/ComfyUI controls (`Model`, `Negative Prompt`, `Aspect Ratio`, `Width`, `Height`, `Steps`, `CFG Scale`, `ComfyUI Workflow JSON`) when `Instant 1-Pass (Jeveration)` is active.
+
 ## [0.26.3] - 2026-11-27
 
 ### Bug Fix

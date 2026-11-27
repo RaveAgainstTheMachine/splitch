@@ -155,6 +155,7 @@ export function MediaTab({ onError, onConfirm }: Props) {
   const [engineStatus, setEngineStatus] = useState<NodeMediaEngineStatus | null>(null);
   const [selectedStartModel, setSelectedStartModel] = useState("");
   const [engineBusy, setEngineBusy] = useState<string | null>(null);
+  const [jevStatuses, setJevStatuses] = useState<NodeJeverationStatus[]>([]);
   const [jevStatus, setJevStatus] = useState<NodeJeverationStatus | null>(null);
   const [jevBusy, setJevBusy] = useState<string | null>(null);
   const [useJeveration, setUseJeveration] = useState(false);
@@ -216,6 +217,7 @@ export function MediaTab({ onError, onConfirm }: Props) {
       }
       if (jRes.ok) {
         const list = (await jRes.json()) as NodeJeverationStatus[];
+        setJevStatuses(list);
         const match = list.find((item) => item.node_id === targetNode) ?? null;
         setJevStatus(match);
       }
@@ -226,12 +228,15 @@ export function MediaTab({ onError, onConfirm }: Props) {
 
   const refresh = useCallback(async () => {
     try {
-      const [bRes, jRes] = await Promise.all([
+      const [bRes, jRes, jevRes] = await Promise.all([
         fetch("/api/media/backends"),
-        fetch("/api/media/jobs")
+        fetch("/api/media/jobs"),
+        fetch("/api/media/jeveration/status")
       ]);
+      let nextBackends: MediaBackendNode[] = [];
       if (bRes.ok) {
         const list = (await bRes.json()) as MediaBackendNode[];
+        nextBackends = list;
         setBackends(list);
         setSetupNodeId((prev) => {
           if (prev && list.some((b) => b.node_id === prev && b.online)) return prev;
@@ -242,6 +247,13 @@ export function MediaTab({ onError, onConfirm }: Props) {
       }
       if (jRes.ok) {
         setJobs((await jRes.json()) as MediaJob[]);
+      }
+      if (jevRes.ok) {
+        const jList = (await jevRes.json()) as NodeJeverationStatus[];
+        setJevStatuses(jList);
+        if (nextBackends.every((b) => !b.media_healthy) && jList.some((j) => j.healthy)) {
+          setUseJeveration(true);
+        }
       }
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to load media state");
@@ -272,7 +284,9 @@ export function MediaTab({ onError, onConfirm }: Props) {
       engineStatus?.active_downloads.some((d) => d.status === "downloading") ||
       jevStatus?.install_in_progress ||
       jevStatus?.weights_downloading ||
-      jevStatus?.active_downloads.some((d) => d.status === "downloading")
+      jevStatus?.active_downloads.some((d) => d.status === "downloading") ||
+      (jevStatus?.running && !jevStatus?.healthy) ||
+      jevStatuses.some((j) => j.running && !j.healthy)
   );
 
   useEffect(() => {
@@ -288,6 +302,19 @@ export function MediaTab({ onError, onConfirm }: Props) {
     () => backends.filter((b) => b.online && b.media_healthy),
     [backends]
   );
+
+  const healthyJevNodes = useMemo(
+    () => jevStatuses.filter((j) => j.healthy),
+    [jevStatuses]
+  );
+
+  const startingJevNodes = useMemo(
+    () => jevStatuses.filter((j) => j.running && !j.healthy),
+    [jevStatuses]
+  );
+
+  const hasAnyReadyEngine = healthyBackends.length > 0 || healthyJevNodes.length > 0;
+  const isJeverationMode = kind === "image" && useJeveration;
 
   const availableModels = useMemo(() => {
     const selected =
@@ -637,13 +664,22 @@ export function MediaTab({ onError, onConfirm }: Props) {
             <Sparkles size={14} aria-hidden="true" /> Media Studio
           </h2>
           <div className="row-actions">
-            {healthyBackends.length > 0 ? (
-              healthyBackends.map((b) => (
-                <span key={b.node_id} className="pill pill--ok" title={b.media_url}>
-                  {b.display_name}: {b.media_engine}
-                </span>
-              ))
-            ) : (
+            {healthyBackends.map((b) => (
+              <span key={b.node_id} className="pill pill--ok" title={b.media_url}>
+                {b.display_name}: {b.media_engine}
+              </span>
+            ))}
+            {healthyJevNodes.map((j) => (
+              <span key={`jev-${j.node_id}`} className="pill pill--ok" title={`Jeveration :${j.port}`}>
+                {j.node_id.toUpperCase()}: jeveration :{j.port}
+              </span>
+            ))}
+            {startingJevNodes.map((j) => (
+              <span key={`jev-start-${j.node_id}`} className="pill pill--warn">
+                {j.node_id.toUpperCase()}: jeveration loading…
+              </span>
+            ))}
+            {!hasAnyReadyEngine && startingJevNodes.length === 0 && (
               <span className="pill pill--warn">NO ENGINE</span>
             )}
             <button
@@ -662,12 +698,18 @@ export function MediaTab({ onError, onConfirm }: Props) {
 
         <details
           className="chat-disclosure media-engine-manager"
-          open={healthyBackends.length === 0}
+          open={!hasAnyReadyEngine && startingJevNodes.length === 0}
         >
           <summary>
             <Settings size={13} aria-hidden="true" />
-            <span>Media Engine</span>
-            {engineStatus?.media_healthy ? (
+            <span>Engines &amp; Models</span>
+            {healthyJevNodes.length > 0 ? (
+              <span className="pill pill--ok">
+                JEVERATION :{healthyJevNodes[0].port}
+              </span>
+            ) : startingJevNodes.length > 0 ? (
+              <span className="pill pill--warn">LOADING PIPELINE…</span>
+            ) : engineStatus?.media_healthy ? (
               <span className="pill pill--ok">
                 {engineStatus.media_engine.toUpperCase()}
               </span>
@@ -794,9 +836,11 @@ export function MediaTab({ onError, onConfirm }: Props) {
                     <span className={`pill ${jevStatus.weights_ready ? "pill--ok" : ""}`}>
                       {jevStatus.weights_ready ? "Weights Ready" : "6.5 GB Weights"}
                     </span>
-                    {jevStatus.healthy && (
+                    {jevStatus.healthy ? (
                       <span className="pill pill--ok">Running :{jevStatus.port}</span>
-                    )}
+                    ) : jevStatus.running ? (
+                      <span className="pill pill--warn">Loading pipeline…</span>
+                    ) : null}
                   </div>
                   <div className="muted" style={{ fontSize: "0.73rem", marginTop: "0.2rem" }}>
                     Single-pass T2I, I2I (hed, depth, colorize, anime, ghibli, watercolor), &amp;
@@ -804,11 +848,20 @@ export function MediaTab({ onError, onConfirm }: Props) {
                     {jevStatus.install_in_progress && jevStatus.install_step
                       ? ` · ${jevStatus.install_step}`
                       : ""}
+                    {jevStatus.running && !jevStatus.healthy
+                      ? " · Loading model weights into VRAM…"
+                      : ""}
                     {jevStatus.error ? ` · ${jevStatus.error}` : ""}
                   </div>
-                  {jevStatus.install_in_progress && (
+                  {(jevStatus.install_in_progress || (jevStatus.running && !jevStatus.healthy)) && (
                     <div className="download-row" style={{ marginTop: "0.35rem" }}>
-                      <progress aria-label="Installing Jeveration" />
+                      <progress
+                        aria-label={
+                          jevStatus.install_in_progress
+                            ? "Installing Jeveration"
+                            : "Loading Jeveration pipeline"
+                        }
+                      />
                     </div>
                   )}
                   {jevStatus.active_downloads.length > 0 && (
@@ -1205,26 +1258,28 @@ export function MediaTab({ onError, onConfirm }: Props) {
                 </select>
               </label>
 
-              <label className="inline-field">
-                <span className="muted">Model</span>
-                {availableModels.length > 0 ? (
-                  <select value={model} onChange={(e) => setModel(e.target.value)}>
-                    <option value="">Default ({availableModels[0]})</option>
-                    {availableModels.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    type="text"
-                    value={model}
-                    onChange={(e) => setModel(e.target.value)}
-                    placeholder="Model"
-                  />
-                )}
-              </label>
+              {!isJeverationMode && (
+                <label className="inline-field">
+                  <span className="muted">Model</span>
+                  {availableModels.length > 0 ? (
+                    <select value={model} onChange={(e) => setModel(e.target.value)}>
+                      <option value="">Default ({availableModels[0]})</option>
+                      {availableModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      placeholder="Model"
+                    />
+                  )}
+                </label>
+              )}
 
               <label
                 className="chat-check"
@@ -1290,96 +1345,113 @@ export function MediaTab({ onError, onConfirm }: Props) {
 
           <div className="media-form__prompts">
             <label className="media-field">
-              <span>Prompt</span>
+              <span>{isJeverationMode ? "Prompt / Caption" : "Prompt"}</span>
               <textarea
                 required
                 rows={3}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder="Prompt…"
+                placeholder={
+                  isJeverationMode
+                    ? "Describe the image or target transformation…"
+                    : "Prompt…"
+                }
               />
             </label>
-            <label className="media-field">
-              <span>Negative Prompt</span>
-              <textarea
-                rows={2}
-                value={negativePrompt}
-                onChange={(e) => setNegativePrompt(e.target.value)}
-                placeholder="Negative prompt…"
-              />
-            </label>
+            {!isJeverationMode && (
+              <label className="media-field">
+                <span>Negative Prompt</span>
+                <textarea
+                  rows={2}
+                  value={negativePrompt}
+                  onChange={(e) => setNegativePrompt(e.target.value)}
+                  placeholder="Negative prompt…"
+                />
+              </label>
+            )}
           </div>
 
           <div className="media-params-grid">
-            <div className="media-field">
-              <span>Aspect Ratio</span>
-              <div className="dialog-modes" role="group" aria-label="Resolution presets">
-                {presets.map((p) => {
-                  const active = width === p.width && height === p.height;
-                  return (
-                    <button
-                      key={p.label}
-                      type="button"
-                      className={`btn btn--sm ${active ? "btn--accent" : ""}`}
-                      aria-pressed={active}
-                      onClick={() => {
-                        setWidth(p.width);
-                        setHeight(p.height);
-                      }}
-                    >
-                      {p.label}
-                    </button>
-                  );
-                })}
+            {isJeverationMode ? (
+              <div className="media-field">
+                <span>Output</span>
+                <div className="row-actions" style={{ minHeight: "2rem" }}>
+                  <span className="pill pill--accent">512×512 · Single Forward Pass</span>
+                </div>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="media-field">
+                  <span>Aspect Ratio</span>
+                  <div className="dialog-modes" role="group" aria-label="Resolution presets">
+                    {presets.map((p) => {
+                      const active = width === p.width && height === p.height;
+                      return (
+                        <button
+                          key={p.label}
+                          type="button"
+                          className={`btn btn--sm ${active ? "btn--accent" : ""}`}
+                          aria-pressed={active}
+                          onClick={() => {
+                            setWidth(p.width);
+                            setHeight(p.height);
+                          }}
+                        >
+                          {p.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
 
-            <label className="media-field">
-              <span>Width</span>
-              <input
-                type="number"
-                min={128}
-                max={2048}
-                step={64}
-                value={width}
-                onChange={(e) => setWidth(Number(e.target.value) || 1024)}
-              />
-            </label>
+                <label className="media-field">
+                  <span>Width</span>
+                  <input
+                    type="number"
+                    min={128}
+                    max={2048}
+                    step={64}
+                    value={width}
+                    onChange={(e) => setWidth(Number(e.target.value) || 1024)}
+                  />
+                </label>
 
-            <label className="media-field">
-              <span>Height</span>
-              <input
-                type="number"
-                min={128}
-                max={2048}
-                step={64}
-                value={height}
-                onChange={(e) => setHeight(Number(e.target.value) || 1024)}
-              />
-            </label>
+                <label className="media-field">
+                  <span>Height</span>
+                  <input
+                    type="number"
+                    min={128}
+                    max={2048}
+                    step={64}
+                    value={height}
+                    onChange={(e) => setHeight(Number(e.target.value) || 1024)}
+                  />
+                </label>
 
-            <label className="media-field">
-              <span>Steps</span>
-              <input
-                type="number"
-                min={1}
-                max={150}
-                value={steps}
-                onChange={(e) => setSteps(Number(e.target.value) || 20)}
-              />
-            </label>
+                <label className="media-field">
+                  <span>Steps</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={150}
+                    value={steps}
+                    onChange={(e) => setSteps(Number(e.target.value) || 20)}
+                  />
+                </label>
 
-            <label className="media-field">
-              <span>CFG Scale</span>
-              <input
-                type="number"
-                min={0}
-                max={30}
-                step={0.5}
-                value={cfgScale}
-                onChange={(e) => setCfgScale(Number(e.target.value))}
-              />
-            </label>
+                <label className="media-field">
+                  <span>CFG Scale</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={30}
+                    step={0.5}
+                    value={cfgScale}
+                    onChange={(e) => setCfgScale(Number(e.target.value))}
+                  />
+                </label>
+              </>
+            )}
 
             <div className="media-field">
               <span>Seed</span>
@@ -1439,27 +1511,35 @@ export function MediaTab({ onError, onConfirm }: Props) {
               />
               <button
                 type="button"
-                className="btn btn--sm"
+                className={`btn btn--sm ${isJeverationMode && jevTask !== "t2i" && !initImage ? "btn--accent" : ""}`}
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Upload size={12} aria-hidden="true" />{" "}
-                {initImage ? "Replace Ref Image" : kind === "video" ? "Img2Video Ref" : "Img2Img Ref"}
+                {initImage
+                  ? "Replace Ref Image"
+                  : isJeverationMode && jevTask !== "t2i"
+                    ? "Upload Source Photo"
+                    : kind === "video"
+                      ? "Img2Video Ref"
+                      : "Img2Img Ref"}
               </button>
               {initImage && (
                 <>
                   <img src={initImage} alt="Reference preview" className="media-ref-thumb" />
-                  <label className="inline-field">
-                    <span className="muted">Strength</span>
-                    <input
-                      type="number"
-                      min={0.05}
-                      max={1}
-                      step={0.05}
-                      value={strength}
-                      onChange={(e) => setStrength(Number(e.target.value) || 0.7)}
-                      style={{ width: "4.5rem" }}
-                    />
-                  </label>
+                  {!isJeverationMode && (
+                    <label className="inline-field">
+                      <span className="muted">Strength</span>
+                      <input
+                        type="number"
+                        min={0.05}
+                        max={1}
+                        step={0.05}
+                        value={strength}
+                        onChange={(e) => setStrength(Number(e.target.value) || 0.7)}
+                        style={{ width: "4.5rem" }}
+                      />
+                    </label>
+                  )}
                   <button
                     type="button"
                     className="btn btn--sm btn--ghost"
@@ -1475,36 +1555,44 @@ export function MediaTab({ onError, onConfirm }: Props) {
             <button
               type="submit"
               className="btn btn--accent"
-              disabled={submitting || !prompt.trim()}
+              disabled={
+                submitting ||
+                !prompt.trim() ||
+                (isJeverationMode && healthyJevNodes.length === 0 && startingJevNodes.length > 0)
+              }
             >
               <Sparkles size={13} aria-hidden="true" />
               {submitting
                 ? "Queuing…"
-                : kind === "video"
-                  ? "Generate Video"
-                  : "Generate Image"}
+                : isJeverationMode && healthyJevNodes.length === 0 && startingJevNodes.length > 0
+                  ? "Loading Jeveration…"
+                  : kind === "video"
+                    ? "Generate Video"
+                    : "Generate Image"}
             </button>
           </div>
 
-          <details className="chat-disclosure">
-            <summary>
-              <span>ComfyUI Workflow JSON</span>
-            </summary>
-            <div className="chat-disclosure__body">
-              <span className="muted" style={{ fontSize: "0.75rem" }}>
-                <code>{"{{PROMPT}}"}</code> <code>{"{{NEGATIVE_PROMPT}}"}</code>{" "}
-                <code>{"{{MODEL}}"}</code> <code>{"{{WIDTH}}"}</code> <code>{"{{HEIGHT}}"}</code>{" "}
-                <code>{"{{STEPS}}"}</code> <code>{"{{CFG}}"}</code> <code>{"{{SEED}}"}</code>{" "}
-                <code>{"{{FRAMES}}"}</code> <code>{"{{FPS}}"}</code> <code>{"{{IMAGE}}"}</code>
-              </span>
-              <textarea
-                rows={4}
-                value={workflowJson}
-                onChange={(e) => setWorkflowJson(e.target.value)}
-                placeholder='{"1": {"class_type": "CheckpointLoaderSimple", ...}}'
-              />
-            </div>
-          </details>
+          {!isJeverationMode && (
+            <details className="chat-disclosure">
+              <summary>
+                <span>ComfyUI Workflow JSON</span>
+              </summary>
+              <div className="chat-disclosure__body">
+                <span className="muted" style={{ fontSize: "0.75rem" }}>
+                  <code>{"{{PROMPT}}"}</code> <code>{"{{NEGATIVE_PROMPT}}"}</code>{" "}
+                  <code>{"{{MODEL}}"}</code> <code>{"{{WIDTH}}"}</code> <code>{"{{HEIGHT}}"}</code>{" "}
+                  <code>{"{{STEPS}}"}</code> <code>{"{{CFG}}"}</code> <code>{"{{SEED}}"}</code>{" "}
+                  <code>{"{{FRAMES}}"}</code> <code>{"{{FPS}}"}</code> <code>{"{{IMAGE}}"}</code>
+                </span>
+                <textarea
+                  rows={4}
+                  value={workflowJson}
+                  onChange={(e) => setWorkflowJson(e.target.value)}
+                  placeholder='{"1": {"class_type": "CheckpointLoaderSimple", ...}}'
+                />
+              </div>
+            </details>
+          )}
         </form>
 
         {activeJobs.length > 0 && (

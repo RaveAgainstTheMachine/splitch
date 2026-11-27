@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -633,3 +635,145 @@ def test_agent_jeveration_pull_weights_creates_download_jobs(
         names = {d["filename"] for d in body["active_downloads"]}
         assert names == {"jeveration.pt", "decoder512.pt", "source_decoder512.pt"}
     agent_main.state.downloads.clear()
+
+
+def _setup_fake_jeveration_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_code: str, token: str
+) -> Path:
+    eng = tmp_path / ".local" / "share" / "splitch" / "engines" / "jeveration"
+    (eng / "repo" / "jeveration").mkdir(parents=True, exist_ok=True)
+    bin_dir = eng / ".venv" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    py_bin = bin_dir / "python"
+    py_bin.write_text(worker_code, encoding="utf-8")
+    py_bin.chmod(0o755)
+
+    wdir = tmp_path / "media" / "jeveration"
+    wdir.mkdir(parents=True, exist_ok=True)
+    (wdir / "jeveration.pt").write_bytes(b"pt")
+    (wdir / "decoder512.pt").write_bytes(b"dec")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(agent_main, "STORAGE_PATH", str(tmp_path))
+    monkeypatch.setattr(agent_main, "AGENT_TOKEN", token)
+    monkeypatch.setattr(agent_main, "ROUTER_PUBLIC_KEY", None)
+    return wdir
+
+
+def _find_unused_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def test_agent_jeveration_start_nonblocking_and_log_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker_code = (
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "sys.stdout.write('WORKER_STDOUT_START\\n' + ('A' * 140000) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('WORKER_STDERR_LOADING\\n')\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(30)\n"
+    )
+    wdir = _setup_fake_jeveration_env(tmp_path, monkeypatch, worker_code, "tok-nonblock")
+    port = _find_unused_port()
+
+    orig_proc = agent_main.state.jev_proc
+    orig_port = agent_main.state.jev_port
+    orig_healthy = agent_main.state.jev_healthy
+    orig_vram = agent_main.state.jev_vram_mb
+    orig_err = agent_main.state.jev_last_error
+    try:
+        with TestClient(agent_main.app) as client:
+            t0 = time.monotonic()
+            r = client.post(
+                "/jeveration/start",
+                json={"port": port, "load_source_decoder": False, "evict_primary_models": False},
+                headers={"Authorization": "Bearer tok-nonblock"},
+            )
+            elapsed = time.monotonic() - t0
+            assert r.status_code == 200, r.text
+            assert elapsed < 10.0, f"start_jeveration blocked for {elapsed:.2f}s"
+            body = r.json()
+            assert body["running"] is True
+            assert body["healthy"] is False
+            assert body["port"] == port
+            assert body["error"] is None
+
+            log_path = wdir / "jeveration-worker.log"
+            assert log_path.is_file()
+            log_text = log_path.read_text(encoding="utf-8")
+            assert "WORKER_STDOUT_START" in log_text
+            assert "WORKER_STDERR_LOADING" in log_text
+
+            stop_r = client.post(
+                "/jeveration/stop",
+                headers={"Authorization": "Bearer tok-nonblock"},
+            )
+            assert stop_r.status_code == 200, stop_r.text
+            assert stop_r.json()["running"] is False
+            assert stop_r.json()["healthy"] is False
+    finally:
+        agent_main.state.jev_proc = orig_proc
+        agent_main.state.jev_port = orig_port
+        agent_main.state.jev_healthy = orig_healthy
+        agent_main.state.jev_vram_mb = orig_vram
+        agent_main.state.jev_last_error = orig_err
+
+
+def test_agent_jeveration_start_crash_captures_log_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker_code = (
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stdout.write('PREFIX_NOISE_' + ('X' * 700) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('RuntimeError: cuda_oom_marker_xyz_987\\n')\n"
+        "sys.stderr.flush()\n"
+        "sys.exit(2)\n"
+    )
+    wdir = _setup_fake_jeveration_env(tmp_path, monkeypatch, worker_code, "tok-crash")
+    port = _find_unused_port()
+
+    orig_proc = agent_main.state.jev_proc
+    orig_port = agent_main.state.jev_port
+    orig_healthy = agent_main.state.jev_healthy
+    orig_vram = agent_main.state.jev_vram_mb
+    orig_err = agent_main.state.jev_last_error
+    try:
+        with TestClient(agent_main.app) as client:
+            r = client.post(
+                "/jeveration/start",
+                json={"port": port, "load_source_decoder": False, "evict_primary_models": False},
+                headers={"Authorization": "Bearer tok-crash"},
+            )
+            assert r.status_code == 500
+            detail = r.json()["detail"]
+            assert "cuda_oom_marker_xyz_987" in detail
+            assert len(detail) <= 500
+            assert "PREFIX_NOISE_" not in detail
+
+            st_r = client.get(
+                "/jeveration/status",
+                headers={"Authorization": "Bearer tok-crash"},
+            )
+            assert st_r.status_code == 200
+            st_body = st_r.json()
+            assert st_body["running"] is False
+            assert st_body["healthy"] is False
+            assert st_body["error"] is not None
+            assert "cuda_oom_marker_xyz_987" in st_body["error"]
+
+            log_path = wdir / "jeveration-worker.log"
+            assert log_path.is_file()
+            assert "PREFIX_NOISE_" in log_path.read_text(encoding="utf-8")
+    finally:
+        agent_main.state.jev_proc = orig_proc
+        agent_main.state.jev_port = orig_port
+        agent_main.state.jev_healthy = orig_healthy
+        agent_main.state.jev_vram_mb = orig_vram
+        agent_main.state.jev_last_error = orig_err

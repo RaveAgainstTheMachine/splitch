@@ -319,27 +319,29 @@ def build_jeveration_agent_router(main_getter: Callable[[], Any]) -> APIRouter:
         env["HF_HOME"] = str(hf_home)
         st.jev_port = req.port
         st.jev_last_error = None
+        log_path = wdir / "jeveration-worker.log"
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            with log_path.open("wb") as log_fh:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    env=env,
+                    stdout=log_fh,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
             st.jev_proc = proc
         except OSError as exc:
             st.jev_last_error = f"Failed to launch jeveration-worker: {exc}"
             raise HTTPException(status_code=500, detail=st.jev_last_error) from exc
 
         assert st.client is not None
-        for _ in range(90):
+        # Wait briefly (up to 5s) for fast warm starts or immediate crash;
+        # cold HF downloads/loads continue asynchronously while status reports running=True, healthy=False.
+        for _ in range(10):
             await asyncio.sleep(0.5)
             if proc.returncode is not None:
                 err_tail = ""
-                if proc.stderr:
-                    with contextlib.suppress(OSError):
-                        err_bytes = await proc.stderr.read()
-                        err_tail = err_bytes.decode("utf-8", errors="replace")[-500:]
+                with contextlib.suppress(OSError):
+                    err_tail = log_path.read_text("utf-8", errors="replace")[-500:]
                 st.jev_last_error = err_tail or f"jeveration-worker exited with code {proc.returncode}"
                 raise HTTPException(status_code=500, detail=st.jev_last_error)
             ok, vram_mb = await probe_jeveration_health(st.client, req.port)
