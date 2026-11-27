@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.26.1] - 2026-11-27
+
+### Bug Fix
+- **Jeveration Install & Weight-Pull Live Progress (`dashboard/src/components/MediaTab.tsx`):** Included `jevStatus.install_in_progress`, `jevStatus.weights_downloading`, and `jevStatus.active_downloads` in `hasActiveEngineWork` so the 1.5s status poller runs during Jeveration venv installation and weight downloads, and added inline `<progress>` bars and MB/s download meters to the Jeveration engine card.
+
 ## [0.26.0] - 2026-11-27
 
 ### Added — Jeveration Single-Pass Engine (`arXiv:2611.24738`)

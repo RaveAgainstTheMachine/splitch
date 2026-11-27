@@ -269,7 +269,10 @@ export function MediaTab({ onError, onConfirm }: Props) {
 
   const hasActiveEngineWork = Boolean(
     engineStatus?.install_in_progress ||
-      engineStatus?.active_downloads.some((d) => d.status === "downloading")
+      engineStatus?.active_downloads.some((d) => d.status === "downloading") ||
+      jevStatus?.install_in_progress ||
+      jevStatus?.weights_downloading ||
+      jevStatus?.active_downloads.some((d) => d.status === "downloading")
   );
 
   useEffect(() => {
@@ -803,6 +806,28 @@ export function MediaTab({ onError, onConfirm }: Props) {
                       : ""}
                     {jevStatus.error ? ` · ${jevStatus.error}` : ""}
                   </div>
+                  {jevStatus.install_in_progress && (
+                    <div className="download-row" style={{ marginTop: "0.35rem" }}>
+                      <progress aria-label="Installing Jeveration" />
+                    </div>
+                  )}
+                  {jevStatus.active_downloads.length > 0 && (
+                    <div className="downloads-box" style={{ marginTop: "0.35rem" }}>
+                      {jevStatus.active_downloads.map((d) => (
+                        <div key={d.id} className="download-row">
+                          <div className="meter__row">
+                            <code>{d.filename}</code>
+                            <strong>
+                              {d.percent}% ({(d.downloaded_bytes / 1024 ** 3).toFixed(2)} GB)
+                              {(d.speed_bytes_per_sec ?? 0) > 0 &&
+                                ` · ${((d.speed_bytes_per_sec ?? 0) / (1024 * 1024)).toFixed(1)} MB/s`}
+                            </strong>
+                          </div>
+                          <progress max={100} value={d.percent} aria-label={`Downloading ${d.filename}`} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="row-actions" style={{ gap: "0.35rem", flexShrink: 0 }}>
                   {!jevStatus.installed && (
