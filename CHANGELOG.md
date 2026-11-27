@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.26.6] - 2026-11-27
+
+### Bug Fix & CI
+- **Respect `HF_ENDPOINT` in Downloads & Fix Cross-Platform CI (`backend/agent/downloads.py`, `tests/test_jeveration.py`, `tests/test_refactor_parity.py`):** Honored `HF_ENDPOINT` in `run_hf_download()` and `run_hf_mlx_download()`, routed `test_agent_jeveration_pull_weights_creates_download_jobs` to a local loopback HTTP server and polled `_pull_all()` to completion (preventing 6.5 GB background Hugging Face downloads that caused `macos-latest` CI timeouts), created a native `strata.cmd` shim on `win32` in `test_agent_mounted_media_and_strata_routes`, and skipped the 2 POSIX-shebang fake-venv tests on `win32`.
+
 ## [0.26.5] - 2026-11-27
 
 ### Bug Fix & Verification

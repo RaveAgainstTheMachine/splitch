@@ -620,24 +620,57 @@ def test_chat_generate_image_schema_exposes_jeveration() -> None:
 def test_agent_jeveration_pull_weights_creates_download_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(agent_main, "STORAGE_PATH", str(tmp_path))
-    monkeypatch.setattr(agent_main, "AGENT_TOKEN", "tok-pull")
-    monkeypatch.setattr(agent_main, "ROUTER_PUBLIC_KEY", None)
-    monkeypatch.setenv("SPLITCH_HF_PROTOCOL", "http")
-    agent_main.state.downloads.clear()
+    class _FakeHfHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            payload = b"JEVERATION_WEIGHT_BYTES"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
-    with TestClient(agent_main.app) as client:
-        r = client.post(
-            "/jeveration/pull-weights",
-            headers={"Authorization": "Bearer tok-pull"},
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["weights_downloading"] is True
-        assert len(body["active_downloads"]) == 3
-        names = {d["filename"] for d in body["active_downloads"]}
-        assert names == {"jeveration.pt", "decoder512.pt", "source_decoder512.pt"}
-    agent_main.state.downloads.clear()
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    hf_srv, hf_url = _start_loopback_server(_FakeHfHandler)
+    try:
+        monkeypatch.setattr(agent_main, "STORAGE_PATH", str(tmp_path))
+        monkeypatch.setattr(agent_main, "AGENT_TOKEN", "tok-pull")
+        monkeypatch.setattr(agent_main, "ROUTER_PUBLIC_KEY", None)
+        monkeypatch.setenv("SPLITCH_HF_PROTOCOL", "http")
+        monkeypatch.setenv("HF_ENDPOINT", hf_url)
+        agent_main.state.downloads.clear()
+
+        with TestClient(agent_main.app) as client:
+            r = client.post(
+                "/jeveration/pull-weights",
+                headers={"Authorization": "Bearer tok-pull"},
+            )
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert len(body["active_downloads"]) == 3
+            names = {d["filename"] for d in body["active_downloads"]}
+            assert names == {"jeveration.pt", "decoder512.pt", "source_decoder512.pt"}
+
+            # Poll until background _pull_all() task reaches terminal state (zero leaked tasks)
+            deadline = time.monotonic() + 10.0
+            final_status = body
+            while time.monotonic() < deadline:
+                st_r = client.get(
+                    "/jeveration/status",
+                    headers={"Authorization": "Bearer tok-pull"},
+                )
+                assert st_r.status_code == 200
+                final_status = st_r.json()
+                if final_status["weights_ready"] and not final_status["weights_downloading"]:
+                    break
+                time.sleep(0.05)
+            assert final_status["weights_ready"] is True, final_status
+            assert final_status["weights_downloading"] is False, final_status
+        agent_main.state.downloads.clear()
+    finally:
+        hf_srv.shutdown()
+        hf_srv.server_close()
 
 
 def _setup_fake_jeveration_env(
@@ -669,6 +702,10 @@ def _find_unused_port() -> int:
         return int(s.getsockname()[1])
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Uses POSIX shebang executable shim for fake venv python",
+)
 def test_agent_jeveration_start_nonblocking_and_log_redirect(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -727,6 +764,10 @@ def test_agent_jeveration_start_nonblocking_and_log_redirect(
         agent_main.state.jev_last_error = orig_err
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Uses POSIX shebang executable shim for fake venv python",
+)
 def test_agent_jeveration_start_crash_captures_log_tail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -129,11 +130,19 @@ def test_agent_mounted_media_and_strata_routes(
     assert "not installed" in r_missing_strata.json()["detail"].lower()
 
     # Installed executable Strata stub: outside-storage-root fails 400, failing exit fails 500
-    fake_strata_dir = tmp_path / "data" / "engines" / "strata" / "bin"
-    fake_strata_dir.mkdir(parents=True)
-    fake_strata_bin = fake_strata_dir / "strata"
-    fake_strata_bin.write_text("#!/usr/bin/env sh\necho 'missing gguf' >&2\nexit 2\n", encoding="utf-8")
-    fake_strata_bin.chmod(0o755)
+    if sys.platform == "win32":
+        fake_strata_dir = tmp_path / "data" / "engines" / "strata" / "terminal" / "0.1.0"
+        fake_strata_dir.mkdir(parents=True)
+        fake_strata_bin = fake_strata_dir / "strata.cmd"
+        fake_strata_bin.write_text("@echo missing gguf 1>&2\r\n@exit /b 2\r\n", encoding="utf-8")
+    else:
+        fake_strata_dir = tmp_path / "data" / "engines" / "strata" / "bin"
+        fake_strata_dir.mkdir(parents=True)
+        fake_strata_bin = fake_strata_dir / "strata"
+        fake_strata_bin.write_text(
+            "#!/usr/bin/env sh\necho 'missing gguf' >&2\nexit 2\n", encoding="utf-8"
+        )
+        fake_strata_bin.chmod(0o755)
 
     r_outside_root = tc.post("/strata/import-plan", json={"model_path": "/etc/passwd"})
     assert r_outside_root.status_code == 400

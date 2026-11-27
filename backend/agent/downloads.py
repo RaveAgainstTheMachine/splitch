@@ -183,7 +183,8 @@ async def run_hf_download(
     dest = root / safe_name
     part = root / f"{safe_name}.part"
     staging_dir = root / f".{safe_name}.xet"
-    url = f"https://huggingface.co/{job.repo_id}/resolve/main/{job.filename}"
+    hf_base = os.getenv("HF_ENDPOINT", "").strip().rstrip("/") or "https://huggingface.co"
+    url = f"{hf_base}/{job.repo_id}/resolve/main/{job.filename}"
     headers: dict[str, str] = {}
     hf_token = hf_token_override.strip() or os.getenv("HF_TOKEN", "").strip()
     if hf_token:
@@ -297,13 +298,14 @@ async def run_hf_mlx_download(
     client_factory = async_client_cls or httpx.AsyncClient
     job.protocol = "http"
     tracker = DownloadSpeedTracker()
+    hf_base = os.getenv("HF_ENDPOINT", "").strip().rstrip("/") or "https://huggingface.co"
     try:
         async with client_factory(
             follow_redirects=True,
             timeout=httpx.Timeout(connect=15.0, read=120.0, write=30.0, pool=15.0),
         ) as dl_client:
             tree_resp = await dl_client.get(
-                f"https://huggingface.co/api/models/{job.repo_id}/tree/main",
+                f"{hf_base}/api/models/{job.repo_id}/tree/main",
                 params={"recursive": "true"},
                 headers=headers,
             )
@@ -339,7 +341,7 @@ async def run_hf_mlx_download(
                 if not out_file.is_relative_to(tmp_dir.resolve()):
                     continue
                 out_file.parent.mkdir(parents=True, exist_ok=True)
-                url = f"https://huggingface.co/{job.repo_id}/resolve/main/{rel_path}"
+                url = f"{hf_base}/{job.repo_id}/resolve/main/{rel_path}"
                 async with dl_client.stream("GET", url, headers=headers) as resp:
                     resp.raise_for_status()
                     with out_file.open("wb") as f:
