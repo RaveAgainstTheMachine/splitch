@@ -41,7 +41,7 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def _build_test_spa_app(tmp_path: Path) -> FastAPI:
+def _build_test_spa_app(tmp_path: Path) -> tuple[FastAPI, dict]:
     data_dir = tmp_path / "data"
     skills_dir = tmp_path / "skills"
     mcp_dir = tmp_path / "mcp"
@@ -118,6 +118,71 @@ def _build_test_spa_app(tmp_path: Path) -> FastAPI:
     async def status():
         return cluster.build_snapshot()
 
+    media_state: dict = {
+        "jev_running": True,
+        "jev_healthy": False,
+    }
+
+    @app.get("/api/media/backends")
+    async def media_backends():
+        return [
+            {
+                "node_id": "dual-rig",
+                "display_name": "Dual GPU Rig",
+                "role": "gpu",
+                "online": True,
+                "media_engine": "none",
+                "media_healthy": False,
+                "media_url": "",
+                "media_models": [],
+                "sd_installed": False,
+            }
+        ]
+
+    @app.get("/api/media/jobs")
+    async def media_jobs():
+        return []
+
+    @app.get("/api/media/nodes/{node_id}/engine")
+    async def media_node_engine(node_id: str):
+        return {
+            "node_id": node_id,
+            "media_engine": "none",
+            "media_healthy": False,
+            "media_url": "",
+            "sd_installed": False,
+            "sd_binary_path": "",
+            "sd_version": "",
+            "sd_backend": "",
+            "sd_managed_running": False,
+            "sd_running_model": "",
+            "sd_error": None,
+            "install_in_progress": False,
+            "install_step": "",
+            "local_media_models": [],
+            "active_downloads": [],
+        }
+
+    @app.get("/api/media/jeveration/status")
+    async def media_jeveration_status():
+        return [
+            {
+                "node_id": "dual-rig",
+                "installed": True,
+                "weights_ready": True,
+                "cuda_available": True,
+                "running": media_state["jev_running"],
+                "healthy": media_state["jev_healthy"],
+                "port": 8084,
+                "vram_mb": 12000.0 if media_state["jev_healthy"] else 0.0,
+                "install_in_progress": False,
+                "install_step": "",
+                "weights_downloading": False,
+                "active_downloads": [],
+                "error": None,
+            }
+        ]
+
     assets = DIST_DIR / "assets"
     if assets.exists():
         app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
@@ -126,7 +191,7 @@ def _build_test_spa_app(tmp_path: Path) -> FastAPI:
     async def index():
         return FileResponse(str(DIST_DIR / "index.html"))
 
-    return app
+    return app, media_state
 
 
 @pytest.mark.skipif(
@@ -136,7 +201,7 @@ def _build_test_spa_app(tmp_path: Path) -> FastAPI:
 async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
     port = _free_port()
     cdp_port = _free_port()
-    app = _build_test_spa_app(tmp_path)
+    app, media_state = _build_test_spa_app(tmp_path)
 
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error"))
     srv_task = asyncio.create_task(server.serve())
@@ -548,6 +613,46 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
                 await wait_until(
                     "(document.querySelector('link[rel=\"icon\"]')?.getAttribute('href') || '').toLowerCase().includes('%23f59e0b')"
                 )
+
+                # Close Settings modal, switch to Media Studio, verify Jeveration loading -> ready transition & focused UI
+                await eval_js(
+                    "document.querySelector('dialog.settings-dialog .settings-modal__header button')?.click()"
+                )
+                await wait_until("!document.querySelector('dialog.settings-dialog[open]')")
+                await eval_js(
+                    "Array.from(document.querySelectorAll('[role=\"tab\"]'))"
+                    ".find(t => t.textContent.includes('Media Studio')).click()"
+                )
+                await wait_until(
+                    "Boolean(document.querySelector('.media-engine-manager'))"
+                )
+                # Starting state: running=True, healthy=False -> header shows loading, NOT 'NO ENGINE', Engines & Models collapsed
+                try:
+                    await wait_until(
+                        "(document.querySelector('.tab-stack .panel-head')?.textContent || '').toLowerCase().includes('jeveration loading')"
+                    )
+                except AssertionError as exc:
+                    actual = await eval_js("document.querySelector('.tab-stack .panel-head')?.textContent || ''")
+                    raise AssertionError(f"{exc} (actual panel-head={actual!r})") from exc
+                media_head = await eval_js("document.querySelector('.tab-stack .panel-head').textContent")
+                assert "NO ENGINE" not in media_head
+                assert not await eval_js(
+                    "document.querySelector('.media-engine-manager').hasAttribute('open')"
+                )
+
+                # Flip Jeveration to healthy -> 1.5s poll must automatically update header, auto-enable 1-Pass, and hide diffusion clutter
+                media_state["jev_healthy"] = True
+                await wait_until(
+                    "(document.querySelector('.tab-stack .panel-head')?.textContent || '').toLowerCase().includes('jeveration :8084')",
+                    timeout_s=5.0,
+                )
+                await wait_until(
+                    "(document.querySelector('.media-params-grid')?.textContent || '').includes('512×512 · Single Forward Pass')"
+                )
+                form_text = await eval_js("document.querySelector('.tab-stack .panel').textContent")
+                assert "Negative Prompt" not in form_text
+                assert "ComfyUI Workflow JSON" not in form_text
+                assert "CFG Scale" not in form_text
         finally:
             chrome.terminate()
             try:

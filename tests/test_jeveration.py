@@ -6,6 +6,8 @@ import asyncio
 import base64
 import json
 import socket
+import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +24,7 @@ from backend.router.chat_store import MEDIA_TOOLS_SCHEMA
 from backend.router.config import SplitchConfig
 from backend.router.media_api import build_media_router
 from backend.router.telemetry import AgentEd25519Auth, ClusterState
+from backend.shared.gpu_probe import parse_nvidia_csv, parse_nvidia_pmon
 from backend.shared.models import (
     LoadedModel,
     MediaGenerateRequest,
@@ -777,3 +780,64 @@ def test_agent_jeveration_start_crash_captures_log_tail(
         agent_main.state.jev_healthy = orig_healthy
         agent_main.state.jev_vram_mb = orig_vram
         agent_main.state.jev_last_error = orig_err
+
+
+def test_nvidia_gpu_probe_managed_pids_and_jeveration_worker_cmdline(tmp_path: Path) -> None:
+    """Managed sidecars and jeveration_worker Python processes never trigger non-LLM VRAM eviction."""
+    worker_script = tmp_path / "jeveration_worker.py"
+    worker_script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+
+    sidecar_script = tmp_path / "custom_sidecar.py"
+    sidecar_script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+
+    unrelated_script = tmp_path / "unrelated_app.py"
+    unrelated_script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+
+    jev_proc = subprocess.Popen([sys.executable, str(worker_script)])
+    managed_proc = subprocess.Popen([sys.executable, str(sidecar_script)])
+    unrelated_proc = subprocess.Popen([sys.executable, str(unrelated_script)])
+    try:
+        csv_out = "0, NVIDIA GeForce RTX 4090, 00000000:01:00.0, 24564, 18500, 6064, 45, 58\n"
+        game_pid = 9999991
+        pmon_out = (
+            "# gpu        pid  type    fb   ccpm  command\n"
+            f"    0  {jev_proc.pid:>7}     C  6000      -  python\n"
+            f"    0  {managed_proc.pid:>7}     C  3500      -  python\n"
+            f"    0  {unrelated_proc.pid:>7}     C  1200      -  python\n"
+            f"    0  {game_pid:>7}     G  4000      -  Cyberpunk2077\n"
+        )
+
+        # Direct parse_nvidia_pmon verification
+        pmon_procs = parse_nvidia_pmon(pmon_out, managed_pids={managed_proc.pid})
+        by_pid = {p.pid: p for p in pmon_procs}
+        assert by_pid[jev_proc.pid].is_llm is True
+        assert by_pid[managed_proc.pid].is_llm is True
+        assert by_pid[unrelated_proc.pid].is_llm is False
+        assert by_pid[game_pid].is_llm is False
+
+        # parse_nvidia_csv verification: only unrelated python + game count toward non_llm_vram_mb
+        gpus, csv_procs = parse_nvidia_csv(
+            csv_out, pmon_out, managed_pids={managed_proc.pid}
+        )
+        assert len(gpus) == 1
+        assert gpus[0].non_llm_vram_mb == 5200.0
+        csv_by_pid = {p.pid: p for p in csv_procs}
+        assert csv_by_pid[jev_proc.pid].is_llm is True
+        assert csv_by_pid[managed_proc.pid].is_llm is True
+        assert csv_by_pid[unrelated_proc.pid].is_llm is False
+        assert csv_by_pid[game_pid].is_llm is False
+
+        # Without managed_pids, managed_proc (custom_sidecar.py) falls back to non-LLM
+        gpus_unmanaged, unmanaged_procs = parse_nvidia_csv(csv_out, pmon_out)
+        unmanaged_by_pid = {p.pid: p for p in unmanaged_procs}
+        assert unmanaged_by_pid[jev_proc.pid].is_llm is True
+        assert unmanaged_by_pid[managed_proc.pid].is_llm is False
+        assert gpus_unmanaged[0].non_llm_vram_mb == 8700.0
+    finally:
+        for proc in (jev_proc, managed_proc, unrelated_proc):
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)

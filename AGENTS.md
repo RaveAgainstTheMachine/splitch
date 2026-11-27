@@ -1,6 +1,6 @@
 # AGENTS.md — Splitch Engineering & Agent Harness Guide
 
-This repository contains **Splitch** (`v0.26.4`), a multi-node local AI orchestrator, OpenAI/Anthropic-compatible gateway, 3-column Agent Chat IDE, and Media Studio.
+This repository contains **Splitch** (`v0.26.5`), a multi-node local AI orchestrator, OpenAI/Anthropic-compatible gateway, 3-column Agent Chat IDE, and Media Studio.
 
 ## 1. Mandatory Pre-Flight Harness
 
@@ -41,6 +41,12 @@ Before committing, opening a PR, or deploying, run the workspace pre-flight veri
 ## 4. Independent Verification & Anti-Mock Policy
 
 - **Role-Split Verification:** The agent implementing a feature or fix must **not** be the sole author of its acceptance tests. Invoke an independent verifier subagent (`invoke_subagent`) given only the specification/requirements and the code diff to write adversarial & edge-case tests and verify at least one failure-injection check (deliberately break an invariant and confirm the test fails).
+- **Mandatory Coverage Contract (No Blind Spots):**
+  - **Every New/Modified Route:** Every added or changed HTTP/WebSocket endpoint must have a direct test (never skip lifecycle routes like `/install`, `/pull-weights`, `/start`, or `/stop`).
+  - **Background Task Execution:** Any endpoint that spawns `asyncio.create_task(...)` must be awaited/polled in tests until terminal state, asserting zero unhandled task exceptions.
+  - **Real Process Lifecycle:** Routes that spawn child processes (`/start`, `/install`) must be tested with real temporary child processes (pipe/log handling, startup timeout, non-zero exit capture) — never bypassed solely by an in-process stub server.
+  - **Headless Chromium E2E for UI Changes:** Any new or modified interactive UI workflow in `dashboard/src/components/` must include a headless Chromium state-transition assertion in `tests/test_ui_e2e.py` (not just `tsc && vite build`).
+  - **Active Live Smoke Test:** Before reporting a deployed engine/runtime feature complete, execute the real API lifecycle (`start` → `generate`/infer → `stop`) on the target cluster node in addition to 30s multi-cycle health polling.
 - **Zero Internal Mocks (`preflight.sh` enforced):**
   - `unittest.mock` (`Mock`, `MagicMock`, `AsyncMock`, `patch`) is forbidden in `tests/`.
   - `monkeypatch.setattr` on internal `backend.*` functions/methods is forbidden in new/modified tests; test against real `TestClient`, loopback HTTP/WebSocket servers, SQLite WAL databases, and headless Chromium E2E (`tests/test_ui_e2e.py`).

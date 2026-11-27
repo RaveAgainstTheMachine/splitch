@@ -45,6 +45,9 @@ LLM_PROCESS_TOKENS = (
     "sd-cli",
     "strata-server",
     "strata_server",
+    "jeveration",
+    "jeveration_worker",
+    "comfyui",
 )
 
 PCI_VENDOR_MAP: dict[str, GpuVendor] = {
@@ -121,7 +124,9 @@ def _run_sync(args: list[str], timeout: float = 3.0) -> tuple[int, str]:
         return -1, ""
 
 
-def parse_nvidia_pmon(output: str) -> list[GpuProcess]:
+def parse_nvidia_pmon(
+    output: str, *, managed_pids: set[int] | None = None
+) -> list[GpuProcess]:
     """Parse `nvidia-smi pmon -c 1 -s m` with per-GPU index attribution."""
     processes: list[GpuProcess] = []
     for line in output.splitlines():
@@ -141,7 +146,13 @@ def parse_nvidia_pmon(output: str) -> list[GpuProcess]:
         except ValueError:
             continue
         cmd_lower = cmd.lower()
-        is_llm = any(tok in cmd_lower for tok in LLM_PROCESS_TOKENS)
+        is_llm = bool(managed_pids and pid in managed_pids) or any(
+            tok in cmd_lower for tok in LLM_PROCESS_TOKENS
+        )
+        if not is_llm and "python" in cmd_lower and pid > 0:
+            with contextlib.suppress(psutil.Error, OSError):
+                full_cmd = " ".join(psutil.Process(pid).cmdline()).lower()
+                is_llm = any(tok in full_cmd for tok in LLM_PROCESS_TOKENS)
         processes.append(
             GpuProcess(
                 pid=pid,
@@ -155,10 +166,10 @@ def parse_nvidia_pmon(output: str) -> list[GpuProcess]:
 
 
 def parse_nvidia_csv(
-    csv_out: str, pmon_out: str = ""
+    csv_out: str, pmon_out: str = "", *, managed_pids: set[int] | None = None
 ) -> tuple[list[GpuDevice], list[GpuProcess]]:
     """Parse multi-line `nvidia-smi --query-gpu=...` CSV and attribute `pmon` processes per card."""
-    procs = parse_nvidia_pmon(pmon_out) if pmon_out else []
+    procs = parse_nvidia_pmon(pmon_out, managed_pids=managed_pids) if pmon_out else []
     gpus: list[GpuDevice] = []
 
     for row_num, raw_line in enumerate(csv_out.splitlines()):
@@ -642,7 +653,9 @@ async def _collect_mac_gpu_async() -> list[GpuDevice]:
     ]
 
 
-async def _collect_nvidia_async() -> tuple[list[GpuDevice], list[GpuProcess]]:
+async def _collect_nvidia_async(
+    *, managed_pids: set[int] | None = None
+) -> tuple[list[GpuDevice], list[GpuProcess]]:
     if not shutil.which("nvidia-smi"):
         return [], []
     rc, csv_out = await _run_async(
@@ -655,7 +668,9 @@ async def _collect_nvidia_async() -> tuple[list[GpuDevice], list[GpuProcess]]:
     if rc != 0 or not csv_out:
         return [], []
     rc_pmon, pmon_out = await _run_async(["nvidia-smi", "pmon", "-c", "1", "-s", "m"])
-    return parse_nvidia_csv(csv_out, pmon_out if rc_pmon == 0 else "")
+    return parse_nvidia_csv(
+        csv_out, pmon_out if rc_pmon == 0 else "", managed_pids=managed_pids
+    )
 
 
 async def _collect_rocm_async() -> list[GpuDevice]:
@@ -760,7 +775,9 @@ def _needs_vulkan_name_enrichment(primary_gpus: list[GpuDevice]) -> bool:
     )
 
 
-async def collect_all_gpus() -> tuple[list[GpuDevice], list[GpuProcess], str]:
+async def collect_all_gpus(
+    *, managed_pids: set[int] | None = None
+) -> tuple[list[GpuDevice], list[GpuProcess], str]:
     """
     Probe all GPU vendors in parallel on this host, deduplicate by PCI bus ID,
     and return `(gpus, gpu_processes, recommended_backend)`.
@@ -776,7 +793,11 @@ async def collect_all_gpus() -> tuple[list[GpuDevice], list[GpuProcess], str]:
         mac_gpus = await _collect_mac_gpu_async()
         return mac_gpus, [], recommend_backend_from_gpus(mac_gpus)
 
-    nv_task = _collect_nvidia_async()
+    nv_task = (
+        _collect_nvidia_async(managed_pids=managed_pids)
+        if managed_pids
+        else _collect_nvidia_async()
+    )
     rocm_task = _collect_rocm_async()
     drm_task = (
         asyncio.to_thread(probe_linux_drm_sysfs)

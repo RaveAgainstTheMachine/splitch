@@ -3,6 +3,12 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.26.5] - 2026-11-27
+
+### Bug Fix & Verification
+- **Prevent `yield_on_gaming` Auto-Eviction of Jeveration (`backend/shared/gpu_probe.py`, `backend/agent/main.py`):** Added `jeveration`, `jeveration_worker`, and `comfyui` to `LLM_PROCESS_TOKENS`, added `psutil` cmdline inspection for `python` GPU processes in `parse_nvidia_pmon()`, and threaded live `managed_pids` (`sd_proc`, `strata_proc`, `jev_proc`) from `AgentState.poll_once()` into `collect_all_gpus()` so Jeveration's VRAM is never misclassified as external gaming VRAM and auto-killed upon load.
+- **Strict Verifier Contract & Headless Chromium Media Studio E2E (`AGENTS.md`, `tests/test_ui_e2e.py`, `tests/test_jeveration.py`):** Codified mandatory route coverage, background-task completion checks, real subprocess lifecycle tests, Chromium E2E assertions, and active live smoke testing in `AGENTS.md` §4, and added real Chromium E2E coverage for Media Studio's Jeveration loading → ready transition and decluttered form.
+
 ## [0.26.4] - 2026-11-27
 
 ### Bug Fix & UX

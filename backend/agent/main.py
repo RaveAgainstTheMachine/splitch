@@ -593,7 +593,12 @@ class AgentState:
         )
 
         effective_role: NodeRole = NODE_ROLE
-        gpus, procs, rec_backend = await collect_all_gpus()
+        managed_pids = {
+            p.pid
+            for p in (self.sd_proc, self.strata_proc, self.jev_proc)
+            if p is not None and p.returncode is None and p.pid
+        }
+        gpus, procs, rec_backend = await collect_all_gpus(managed_pids=managed_pids)
         gpu_summary = summarize_gpus(gpus)
         if sys.platform == "darwin":
             effective_role = "unified"
