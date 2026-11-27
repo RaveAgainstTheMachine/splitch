@@ -159,22 +159,15 @@ async def forward_inference(
             attempted_nodes.add(active_decision.node.node_id)
             active_decision.node.in_flight += 1
             outbound_body = {**body, "model": active_decision.target_model}
-            if active_decision.use_strata_proxy:
-                proxy_path = f"/strata/proxy{endpoint}"
-                target_url = f"{active_decision.node.agent_url}{proxy_path}"
-                req_headers = {
-                    **upstream_headers,
-                    **state.agent_headers("POST", proxy_path),
-                }
-            else:
-                target_url = f"{active_decision.node.engine_url}{endpoint}"
-                req_headers = upstream_headers
+            target_url, upstream_auth = state.resolve_upstream_target(
+                active_decision, endpoint
+            )
             req_obj = client.build_request(
-                "POST", target_url, json=outbound_body, headers=req_headers or None
+                "POST", target_url, json=outbound_body, headers=upstream_headers or None
             )
             cand_upstream: httpx.Response | None = None
             try:
-                cand_upstream = await client.send(req_obj, stream=True)
+                cand_upstream = await client.send(req_obj, stream=True, auth=upstream_auth)
                 if cand_upstream.status_code in (502, 503, 504):
                     if attempt + 1 < max_attempts and _next_decision(attempted_nodes) is not None:
                         await cand_upstream.aclose()
@@ -326,18 +319,14 @@ async def forward_inference(
         active_decision.node.in_flight += 1
         try:
             outbound_body = {**body, "model": active_decision.target_model}
-            if active_decision.use_strata_proxy:
-                proxy_path = f"/strata/proxy{endpoint}"
-                target_url = f"{active_decision.node.agent_url}{proxy_path}"
-                req_headers = {
-                    **upstream_headers,
-                    **state.agent_headers("POST", proxy_path),
-                }
-            else:
-                target_url = f"{active_decision.node.engine_url}{endpoint}"
-                req_headers = upstream_headers
+            target_url, upstream_auth = state.resolve_upstream_target(
+                active_decision, endpoint
+            )
             resp_cand = await state.proxy_client.post(
-                target_url, json=outbound_body, headers=req_headers or None
+                target_url,
+                json=outbound_body,
+                headers=upstream_headers or None,
+                auth=upstream_auth,
             )
             if (
                 resp_cand.status_code in (502, 503, 504)

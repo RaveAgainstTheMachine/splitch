@@ -3,6 +3,14 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.25.5] - 2026-11-27
+
+### Fixes & Resilience (Left Sidebar Resize, `suggest_mcp`, Ed25519 Body Signing & Upstream Failover)
+- **Chat Left Sidebar Drag-to-Resize (`dashboard/src/components/ChatTab.tsx`, `dashboard/src/styles/chat.css`):** Added a vertical `.chat-splitter--left` handle between the conversation/workspace sidebar and chat main pane with pointer drag, double-click reset (`236px`), `ArrowLeft`/`ArrowRight` keyboard resizing, and `localStorage` persistence.
+- **`suggest_mcp` Discovery Fix (`backend/router/chat_context.py`, `backend/router/chat_api.py`, `dashboard/src/components/chat/ChatMessageList.tsx`):** Fixed `AttributeError: 'McpRegistryResult' object has no attribute 'name'` by reading `r.registry_name` and added a defensive error guard around discovery tool execution so tool failures never crash SSE streams.
+- **Per-Request Ed25519 Body Signing (`backend/router/telemetry.py` and router callers):** Added `AgentEd25519Auth(httpx.Auth)` (`requires_request_body = True`) and switched all router-to-agent `httpx` calls to `auth=cluster.agent_auth()` so `POST`/`PUT`/`DELETE` JSON bodies are hashed and signed accurately without `401 Unauthorized` mismatches.
+- **Chat Upstream Resilience & Strata Proxy Routing (`backend/router/chat_api.py`, `backend/router/chat_context.py`, `backend/router/swarm.py`, `backend/router/anthropic_api.py`):** Added `ClusterState.resolve_upstream_target()` across Chat, Swarm, Compaction, and Anthropic Messages API; sanitized orphaned `tool_calls` and `tool -> user` transitions in `_records_to_openai_messages()`; and added `502`/`503`/`504` node failover plus `exceed_context_size_error` auto-compact retry in `/api/chat/conversations/{id}/send`.
+
 ## [0.25.4] - 2026-11-25
 
 ### Structural Refactor (Agent, Chat Context & Dashboard Styles)

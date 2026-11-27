@@ -401,8 +401,7 @@ class MediaService:
         is_agent_proxy = base_url.rstrip("/").endswith("/media/proxy")
         if not is_agent_proxy:
             return {}
-        ca = self.cluster.config.tls.ca_bundle.strip()
-        return {"headers": self.cluster.agent_headers(), "verify": ca if ca else True}
+        return {"auth": self.cluster.agent_auth(), "verify": self.cluster.httpx_verify}
 
     async def _run_sd_server(
         self,
@@ -659,7 +658,7 @@ class MediaService:
         ).model_dump()
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(660.0, connect=10.0),
-            headers=self.cluster.agent_headers("POST", "/media/video/generate"),
+            auth=self.cluster.agent_auth(),
             verify=ca if ca else True,
         ) as client:
             resp = await client.post(f"{node.agent_url}/media/video/generate", json=payload)
@@ -833,7 +832,7 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         try:
             async with httpx.AsyncClient(
                 timeout=8.0,
-                headers=cluster.agent_headers("GET", "/media/engine/status"),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.get(f"{node.agent_url}/media/engine/status")
@@ -853,7 +852,7 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         try:
             async with httpx.AsyncClient(
                 timeout=20.0,
-                headers=cluster.agent_headers("POST", "/media/engine/install"),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(
@@ -875,7 +874,7 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         try:
             async with httpx.AsyncClient(
                 timeout=30.0,
-                headers=cluster.agent_headers("POST", "/media/engine/start"),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(
@@ -899,7 +898,7 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         try:
             async with httpx.AsyncClient(
                 timeout=15.0,
-                headers=cluster.agent_headers("POST", "/media/engine/stop"),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(f"{node.agent_url}/media/engine/stop")
@@ -920,7 +919,7 @@ def build_media_router(cluster: ClusterState, data_dir: Path) -> tuple[APIRouter
         try:
             async with httpx.AsyncClient(
                 timeout=15.0,
-                headers=cluster.agent_headers("POST", "/files/models/pull"),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(f"{node.agent_url}/files/models/pull", json=payload)

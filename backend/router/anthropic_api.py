@@ -363,7 +363,9 @@ async def handle_anthropic_messages(request: Request, state: ClusterState) -> Re
         )
 
     oai_payload = anthropic_to_openai_request(body, decision.target_model)
-    target_url = f"{decision.node.engine_url}/v1/chat/completions"
+    target_url, upstream_auth = state.resolve_upstream_target(
+        decision, "/v1/chat/completions"
+    )
     extra_headers = {
         "X-Splitch-Node": decision.node.node_id,
         "X-Splitch-Model": decision.target_model,
@@ -377,7 +379,9 @@ async def handle_anthropic_messages(request: Request, state: ClusterState) -> Re
     if not is_stream:
         decision.node.in_flight += 1
         try:
-            upstream = await state.proxy_client.post(target_url, json=oai_payload)
+            upstream = await state.proxy_client.post(
+                target_url, json=oai_payload, auth=upstream_auth
+            )
             elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
             if upstream.status_code >= 400:
                 asyncio.create_task(
@@ -459,7 +463,7 @@ async def handle_anthropic_messages(request: Request, state: ClusterState) -> Re
     decision.node.in_flight += 1
     req_obj = state.proxy_client.build_request("POST", target_url, json=oai_payload)
     try:
-        upstream = await state.proxy_client.send(req_obj, stream=True)
+        upstream = await state.proxy_client.send(req_obj, stream=True, auth=upstream_auth)
     except httpx.HTTPError as exc:
         decision.node.in_flight = max(0, decision.node.in_flight - 1)
         raise HTTPException(status_code=502, detail=f"Upstream node error: {exc}") from exc

@@ -149,9 +149,29 @@ export function ChatTab({
   const [gitLoading, setGitLoading] = useState(false);
   const [paneWidth, setPaneWidth] = useState<number>(470);
   const [isResizingPane, setIsResizingPane] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem("splitch_chat_sidebar_width"));
+      if (Number.isFinite(saved) && saved >= 180 && saved <= 520) {
+        return Math.round(saved);
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return 236;
+  });
+  const [isResizingSidebar, setIsResizingSidebar] = useState(false);
 
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("splitch_chat_sidebar_width", String(sidebarWidth));
+    } catch {
+      // ignore storage errors
+    }
+  }, [sidebarWidth]);
 
   const openArtifactInPane = (art: InspectedArtifact) => {
     setWorkspaceInspect(null);
@@ -162,10 +182,20 @@ export function ChatTab({
     }
   };
 
+  const clampSidebarWidth = (rawW: number) => {
+    const rect = layoutRef.current?.getBoundingClientRect();
+    const totalWidth = rect ? rect.width : window.innerWidth;
+    const rightOpen = Boolean(inspectedArtifact || workspaceInspect || inspectedSwarm);
+    const rightW = rightOpen ? paneWidth + 6 : 0;
+    const minChatW = 340;
+    const maxW = Math.max(200, Math.min(520, totalWidth - rightW - minChatW));
+    return Math.max(180, Math.min(maxW, Math.round(rawW)));
+  };
+
   const clampPaneWidth = (rawW: number) => {
     const rect = layoutRef.current?.getBoundingClientRect();
     const totalWidth = rect ? rect.width : window.innerWidth;
-    const sidebarW = sidebarCollapsed ? 0 : 236;
+    const sidebarW = sidebarCollapsed ? 0 : sidebarWidth + 6;
     const minChatW = 340;
     const maxW = Math.max(
       300,
@@ -236,6 +266,41 @@ export function ChatTab({
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to cancel swarm worker");
     }
+  };
+
+  const startSidebarResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const splitter = e.currentTarget;
+    const pointerId = e.pointerId;
+    try {
+      splitter.setPointerCapture(pointerId);
+    } catch {
+      // Synthetic pointer events in tests may not have an active pointerId
+    }
+    setIsResizingSidebar(true);
+
+    const onMove = (ev: PointerEvent) => {
+      const rect = layoutRef.current?.getBoundingClientRect();
+      const leftEdge = rect ? rect.left : 0;
+      setSidebarWidth(clampSidebarWidth(ev.clientX - leftEdge));
+    };
+    const onEnd = () => {
+      setIsResizingSidebar(false);
+      try {
+        if (splitter.hasPointerCapture(pointerId)) {
+          splitter.releasePointerCapture(pointerId);
+        }
+      } catch {
+        // ignore
+      }
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
   };
 
   const startPaneResize = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1650,11 +1715,12 @@ export function ChatTab({
       ref={layoutRef}
       className={`chat-layout ${sidebarCollapsed ? "chat-layout--sidebar-collapsed" : ""} ${
         rightPaneOpen ? "chat-layout--with-artifact" : ""
-      } ${isResizingPane ? "chat-layout--resizing" : ""}`}
+      } ${isResizingPane || isResizingSidebar ? "chat-layout--resizing" : ""}`}
       style={
-        rightPaneOpen
-          ? ({ "--artifact-pane-width": `${paneWidth}px` } as React.CSSProperties)
-          : undefined
+        {
+          "--sidebar-width": `${sidebarWidth}px`,
+          ...(rightPaneOpen ? { "--artifact-pane-width": `${paneWidth}px` } : {})
+        } as React.CSSProperties
       }
     >
       <ChatSidebar
@@ -1713,6 +1779,31 @@ export function ChatTab({
         requestBulkPermanentDelete={requestBulkPermanentDelete}
         requestEmptyTrash={requestEmptyTrash}
       />
+
+      {!sidebarCollapsed && (
+        <div
+          className="chat-splitter chat-splitter--left"
+          role="separator"
+          tabIndex={0}
+          aria-orientation="vertical"
+          aria-label="Resize sidebar pane"
+          aria-valuemin={180}
+          aria-valuemax={520}
+          aria-valuenow={sidebarWidth}
+          title="Drag to resize • Double-click to reset width"
+          onPointerDown={startSidebarResize}
+          onDoubleClick={() => setSidebarWidth(236)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") {
+              e.preventDefault();
+              setSidebarWidth((w) => clampSidebarWidth(w + 24));
+            } else if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              setSidebarWidth((w) => clampSidebarWidth(w - 24));
+            }
+          }}
+        />
+      )}
 
       <section className="chat-main" aria-label="Agent Chat Workspace">
         <header className="chat-toolbar">

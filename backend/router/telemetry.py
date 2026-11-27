@@ -24,6 +24,7 @@ from backend.router.config import (
     save_control_state,
 )
 from backend.router.policy import (
+    RouteDecision,
     check_node_eligibility,
     is_splitch_recently_active,
     watched_gpu_metrics,
@@ -51,6 +52,30 @@ from backend.shared.secrets import (
 )
 from backend.shared.updater import check_update
 from backend.version import __version__ as VERSION
+
+
+class AgentEd25519Auth(httpx.Auth):
+    """Per-request httpx Auth that signs the actual method, path, nonce, and body bytes."""
+
+    requires_request_body = True
+
+    def __init__(self, cluster: ClusterState) -> None:
+        self.cluster = cluster
+
+    def auth_flow(self, request: httpx.Request):
+        if self.cluster.agent_token:
+            request.headers["Authorization"] = f"Bearer {self.cluster.agent_token}"
+        if self.cluster.router_private_key is not None:
+            sig_headers = sign_agent_request_ed25519(
+                self.cluster.router_private_key,
+                request.method,
+                request.url.path,
+                nonce=secrets.token_hex(8),
+                body=request.content,
+            )
+            for k, v in sig_headers.items():
+                request.headers[k] = v
+        yield request
 
 
 class ClusterState:
@@ -104,6 +129,17 @@ class ClusterState:
         self._poll_task: asyncio.Task | None = None
         self.update_summary: UpdateSummary | None = None
         self._update_check_task: asyncio.Task | None = None
+
+    def agent_auth(self) -> httpx.Auth:
+        return AgentEd25519Auth(self)
+
+    def resolve_upstream_target(
+        self, decision: RouteDecision, endpoint: str
+    ) -> tuple[str, httpx.Auth | None]:
+        """Return `(target_url, auth)` honoring Strata proxy routing when active."""
+        if decision.use_strata_proxy:
+            return f"{decision.node.agent_url}/strata/proxy{endpoint}", self.agent_auth()
+        return f"{decision.node.engine_url}{endpoint}", None
 
     def agent_headers(
         self, method: str = "ANY", path: str = "*", *, body: bytes = b""
@@ -354,7 +390,7 @@ class ClusterState:
                 resp = await self._poll_client.post(
                     f"{node.agent_url}/models/unload",
                     json={"model": m.id},
-                    headers=self.agent_headers("POST", "/models/unload"),
+                    auth=self.agent_auth(),
                     timeout=10.0,
                 )
                 if resp.status_code < 400:
@@ -364,7 +400,7 @@ class ClusterState:
                 resp = await self._poll_client.post(
                     f"{node.agent_url}/strata/stop",
                     json={},
-                    headers=self.agent_headers("POST", "/strata/stop"),
+                    auth=self.agent_auth(),
                     timeout=12.0,
                 )
                 if resp.status_code < 400:
@@ -427,7 +463,7 @@ class ClusterState:
         try:
             resp = await self._poll_client.get(
                 f"{node.agent_url}/metrics",
-                headers=self.agent_headers("GET", "/metrics"),
+                auth=self.agent_auth(),
             )
             resp.raise_for_status()
             telemetry = NodeTelemetry.model_validate(resp.json())
@@ -506,7 +542,7 @@ class ClusterState:
             resp = await client.post(
                 f"{node.agent_url}/desktop/sync-theme",
                 json=theme_payload,
-                headers=self.agent_headers("POST", "/desktop/sync-theme"),
+                auth=self.agent_auth(),
                 timeout=8.0,
             )
             return resp.status_code == 200
@@ -602,7 +638,7 @@ class ClusterState:
             resp = await self._poll_client.post(
                 f"{node.agent_url}/models/{action}",
                 json={"model": model},
-                headers=self.agent_headers("POST", f"/models/{action}"),
+                auth=self.agent_auth(),
                 timeout=60.0 if action == "load" else 15.0,
             )
             await self._poll_single(node)

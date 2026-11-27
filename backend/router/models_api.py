@@ -621,12 +621,11 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
     @router.get("/models/inventory", response_model=list[NodeModelInventory])
     async def get_inventory() -> list[NodeModelInventory]:
         inventories: list[NodeModelInventory] = []
-        headers = cluster.agent_headers("GET", "/files/models")
 
         async def _fetch(agent_url: str) -> None:
             try:
                 async with httpx.AsyncClient(
-                    timeout=4.0, headers=headers, verify=cluster.httpx_verify
+                    timeout=4.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
                 ) as client:
                     r = await client.get(f"{agent_url}/files/models")
                     if r.status_code == 200:
@@ -643,7 +642,7 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         node = cluster.nodes.get(req.node_id)
         if not node or not node.online:
             raise HTTPException(status_code=503, detail=f"Node '{req.node_id}' is offline")
-        headers = cluster.agent_headers("POST", "/files/models/pull")
+        headers: dict[str, str] = {}
         try:
             hf_tok = resolve_secret_value(os.getenv("HF_TOKEN", ""), vault=cluster.vault) or (
                 cluster.vault.get("hf_token") or ""
@@ -654,7 +653,10 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
             headers["x-splitch-hf-token"] = hf_tok.strip()
         try:
             async with httpx.AsyncClient(
-                timeout=15.0, headers=headers, verify=cluster.httpx_verify
+                timeout=15.0,
+                headers=headers or None,
+                auth=cluster.agent_auth(),
+                verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(
                     f"{node.agent_url}/files/models/pull",
@@ -676,7 +678,7 @@ def build_models_router(cluster: ClusterState, data_dir: Path) -> APIRouter:
         try:
             async with httpx.AsyncClient(
                 timeout=10.0,
-                headers=cluster.agent_headers("DELETE", f"/files/models/{filename}"),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.delete(f"{node.agent_url}/files/models/{filename}")

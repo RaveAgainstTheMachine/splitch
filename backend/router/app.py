@@ -630,7 +630,7 @@ async def _call_worker_agent_system(
     resp = await client.post(
         f"{node.agent_url}{endpoint}",
         json=payload,
-        headers=cluster.agent_headers("POST", endpoint),
+        auth=cluster.agent_auth(),
         timeout=httpx.Timeout(300.0, connect=5.0),
     )
     resp.raise_for_status()
@@ -992,7 +992,7 @@ async def get_node_engine_config(node_id: str) -> EngineRuntimeConfig:
     try:
         async with httpx.AsyncClient(
             timeout=10.0,
-            headers=cluster.agent_headers("GET", "/engine/runtime-config"),
+            auth=cluster.agent_auth(),
             verify=cluster.httpx_verify,
         ) as client:
             r = await client.get(f"{node.agent_url}/engine/runtime-config")
@@ -1015,7 +1015,7 @@ async def set_node_engine_config(
     try:
         async with httpx.AsyncClient(
             timeout=25.0,
-            headers=cluster.agent_headers("POST", "/engine/runtime-config"),
+            auth=cluster.agent_auth(),
             verify=cluster.httpx_verify,
         ) as client:
             r = await client.post(
@@ -1039,7 +1039,7 @@ async def get_node_storage_usage(node_id: str) -> StorageUsageResponse:
     try:
         async with httpx.AsyncClient(
             timeout=10.0,
-            headers=cluster.agent_headers("GET", "/files/storage/usage"),
+            auth=cluster.agent_auth(),
             verify=cluster.httpx_verify,
         ) as client:
             r = await client.get(f"{node.agent_url}/files/storage/usage")
@@ -1060,7 +1060,7 @@ async def clean_node_storage_cache(node_id: str) -> StorageCleanResponse:
     try:
         async with httpx.AsyncClient(
             timeout=25.0,
-            headers=cluster.agent_headers("POST", "/files/storage/clean-cache"),
+            auth=cluster.agent_auth(),
             verify=cluster.httpx_verify,
         ) as client:
             r = await client.post(f"{node.agent_url}/files/storage/clean-cache", json={})
@@ -1101,7 +1101,7 @@ async def browse_node_workspace(node_id: str, subpath: str = "") -> WorkspaceDir
     try:
         async with httpx.AsyncClient(
             timeout=8.0,
-            headers=cluster.agent_headers("GET", "/workspace/dirs"),
+            auth=cluster.agent_auth(),
             verify=cluster.httpx_verify,
         ) as client:
             r = await client.get(f"{node.agent_url}/workspace/dirs", params={"subpath": subpath})

@@ -956,7 +956,7 @@ def build_mcp_router(
         if target_node and target_node.online:
             try:
                 async with httpx.AsyncClient(
-                    timeout=8.0, headers=cluster.agent_headers("POST", "/sync/mcp-script")
+                    timeout=8.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
                 ) as http:
                     r = await http.post(
                         f"{target_node.agent_url}/sync/mcp-script",
@@ -1010,7 +1010,7 @@ def build_mcp_router(
         cfg = generate_client_config(client, router_url, cluster, list(items.values()))
         try:
             async with httpx.AsyncClient(
-                timeout=10.0, headers=cluster.agent_headers("POST", "/sync/client-config")
+                timeout=10.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
             ) as http:
                 r = await http.post(
                     f"{node.agent_url}/sync/client-config",

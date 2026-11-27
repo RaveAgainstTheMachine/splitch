@@ -631,7 +631,7 @@ def build_settings_router(
         try:
             async with httpx.AsyncClient(
                 timeout=10.0,
-                headers=cluster.agent_headers("POST", "/sync/client-config"),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(

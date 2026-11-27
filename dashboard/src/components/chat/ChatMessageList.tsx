@@ -467,28 +467,31 @@ export function ChatMessageList({
                                             </div>
                                           );
                                         })}
-                                        {regs.slice(0, 4).map((r) => (
-                                          <div key={`reg-${r.source}-${r.id}-${r.name}`} className="mcp-rec-item">
-                                            <div className="mcp-rec-item__info">
-                                              <strong>{r.name}</strong>{" "}
-                                              <span className="pill">{r.source || "registry"}</span>
-                                              {r.description && (
-                                                <div className="muted mcp-rec-item__desc">
-                                                  {r.description}
-                                                </div>
+                                        {regs.slice(0, 4).map((r) => {
+                                          const displayName = r.name || r.registry_name || r.id;
+                                          return (
+                                            <div key={`reg-${r.source}-${r.id}-${displayName}`} className="mcp-rec-item">
+                                              <div className="mcp-rec-item__info">
+                                                <strong>{displayName}</strong>{" "}
+                                                <span className="pill">{r.source || "registry"}</span>
+                                                {r.description && (
+                                                  <div className="muted mcp-rec-item__desc">
+                                                    {r.description}
+                                                  </div>
+                                                )}
+                                              </div>
+                                              {onOpenTab && (
+                                                <button
+                                                  type="button"
+                                                  className="btn btn--sm btn--accent"
+                                                  onClick={() => onOpenTab(displayName || rec.query)}
+                                                >
+                                                  Install in {tabLabel}
+                                                </button>
                                               )}
                                             </div>
-                                            {onOpenTab && (
-                                              <button
-                                                type="button"
-                                                className="btn btn--sm btn--accent"
-                                                onClick={() => onOpenTab(r.name || rec.query)}
-                                              >
-                                                Install in {tabLabel}
-                                              </button>
-                                            )}
-                                          </div>
-                                        ))}
+                                          );
+                                        })}
                                       </div>
                                     </div>
                                   );

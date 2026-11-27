@@ -375,7 +375,7 @@ def build_skills_router(cluster: ClusterState, skills_dir: Path) -> APIRouter:
         async def _push(node_id: str, agent_url: str) -> None:
             try:
                 async with httpx.AsyncClient(
-                    timeout=10.0, headers=cluster.agent_headers("POST", "/sync/skills")
+                    timeout=10.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
                 ) as client:
                     r = await client.post(
                         f"{agent_url}/sync/skills",

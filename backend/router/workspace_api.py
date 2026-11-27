@@ -50,7 +50,7 @@ def build_workspace_router(
         try:
             async with httpx.AsyncClient(
                 timeout=12.0,
-                headers=cluster.agent_headers(method, agent_path),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.request(

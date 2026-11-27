@@ -346,137 +346,211 @@ def build_chat_router(
                     if tools_payload:
                         req_body["tools"] = tools_payload
 
-                    decision, skip_reasons = resolve_route(
-                        endpoint="/v1/chat/completions",
-                        requested_model=conv.model,
-                        body=req_body,
-                        nodes=cluster.nodes,
-                        aliases=cluster.aliases,
-                        control=cluster.control,
-                        guards=cluster.config.guards,
-                        heavy_char_threshold=cluster.config.router.auto_heavy_char_threshold,
-                    )
-                    if decision is None:
-                        yield _sse(
-                            "error",
-                            {"message": f"No eligible Splitch node available: {skip_reasons}"},
+                    exclude_nodes: set[str] = set()
+                    max_failovers = max(2, len(cluster.nodes) + 1)
+                    upstream_ok = False
+                    compacted_on_overflow = False
+                    last_err_msg = ""
+
+                    for _failover_idx in range(max_failovers):
+                        decision, skip_reasons = resolve_route(
+                            endpoint="/v1/chat/completions",
+                            requested_model=conv.model,
+                            body=req_body,
+                            nodes=cluster.nodes,
+                            aliases=cluster.aliases,
+                            control=cluster.control,
+                            guards=cluster.config.guards,
+                            heavy_char_threshold=cluster.config.router.auto_heavy_char_threshold,
+                            exclude_nodes=exclude_nodes or None,
                         )
-                        return
+                        if decision is None:
+                            if last_err_msg:
+                                yield _sse("error", {"message": last_err_msg})
+                            else:
+                                yield _sse(
+                                    "error",
+                                    {"message": f"No eligible Splitch node available: {skip_reasons}"},
+                                )
+                            return
 
-                    req_body["model"] = decision.target_model
-                    yield _sse(
-                        "meta",
-                        {
-                            "node": decision.node.node_id,
-                            "model": decision.target_model,
-                            "fallback_reason": decision.fallback_reason,
-                            "round": _round + 1,
-                            "max_rounds": max_rounds,
-                        },
-                    )
+                        req_body["model"] = decision.target_model
+                        yield _sse(
+                            "meta",
+                            {
+                                "node": decision.node.node_id,
+                                "model": decision.target_model,
+                                "fallback_reason": decision.fallback_reason,
+                                "round": _round + 1,
+                                "max_rounds": max_rounds,
+                            },
+                        )
 
-                    started = time.perf_counter()
-                    ttft_ms: float | None = None
-                    content_buf: list[str] = []
-                    reasoning_buf: list[str] = []
-                    tool_calls_acc: dict[int, dict[str, Any]] = {}
-                    approx_tokens = 0
-                    prompt_tokens_real: int | None = None
-                    completion_tokens_real: int | None = None
-                    total_tokens_real: int | None = None
-                    status_code = 200
+                        started = time.perf_counter()
+                        ttft_ms: float | None = None
+                        content_buf: list[str] = []
+                        reasoning_buf: list[str] = []
+                        tool_calls_acc: dict[int, dict[str, Any]] = {}
+                        approx_tokens = 0
+                        prompt_tokens_real: int | None = None
+                        completion_tokens_real: int | None = None
+                        total_tokens_real: int | None = None
+                        status_code = 200
+                        retry_next_node = False
 
-                    decision.node.in_flight += 1
-                    try:
-                        for attempt in range(2):
-                            async with cluster.proxy_client.stream(
-                                "POST",
-                                f"{decision.node.engine_url}/v1/chat/completions",
-                                json=req_body,
-                            ) as upstream:
-                                status_code = upstream.status_code
-                                if status_code >= 400:
-                                    err_body = (await upstream.aread()).decode(
-                                        "utf-8", errors="replace"
-                                    )[:400]
-                                    if attempt == 0:
-                                        retry_body = _adjust_reasoning_effort_on_error(
-                                            req_body, err_body
-                                        )
-                                        if retry_body is not None:
-                                            req_body = retry_body
+                        decision.node.in_flight += 1
+                        try:
+                            for attempt in range(2):
+                                target_url, upstream_auth = cluster.resolve_upstream_target(
+                                    decision, "/v1/chat/completions"
+                                )
+                                async with cluster.proxy_client.stream(
+                                    "POST",
+                                    target_url,
+                                    json=req_body,
+                                    auth=upstream_auth,
+                                ) as upstream:
+                                    status_code = upstream.status_code
+                                    if status_code >= 400:
+                                        err_body = (await upstream.aread()).decode(
+                                            "utf-8", errors="replace"
+                                        )[:400]
+                                        if attempt == 0:
+                                            retry_body = _adjust_reasoning_effort_on_error(
+                                                req_body, err_body
+                                            )
+                                            if retry_body is not None:
+                                                req_body = retry_body
+                                                continue
+                                        err_low = err_body.lower()
+                                        if (
+                                            status_code == 400
+                                            and active_conv.auto_compact
+                                            and not compacted_on_overflow
+                                            and (
+                                                "exceed_context_size_error" in err_low
+                                                or "exceeds the available context size" in err_low
+                                            )
+                                        ):
+                                            compacted_on_overflow = True
+                                            try:
+                                                c_res = await run_compaction(
+                                                    cluster, store, active_conv, keep_recent=6
+                                                )
+                                                if c_res.compacted:
+                                                    refreshed = await asyncio.to_thread(
+                                                        store.get_conversation, conv.id
+                                                    )
+                                                    if refreshed:
+                                                        active_conv = refreshed
+                                                    yield _sse("compacted", c_res.model_dump())
+                                                    _, rebuilt_turn = await prepare_chat_turn(
+                                                        conv=active_conv,
+                                                        cluster=cluster,
+                                                        store=store,
+                                                        data_dir=data_dir,
+                                                        skills_dir=skills_dir,
+                                                        scopes_file=scopes_file,
+                                                        media_service=media_service,
+                                                    )
+                                                    openai_msgs = rebuilt_turn.openai_msgs
+                                                    req_body["messages"] = openai_msgs
+                                                    retry_next_node = True
+                                                    break
+                                            except HTTPException:
+                                                pass
+                                        last_err_msg = f"Upstream HTTP {status_code}: {err_body}"
+                                        if status_code in (502, 503, 504):
+                                            exclude_nodes.add(decision.node.node_id)
+                                            retry_next_node = True
+                                            break
+                                        yield _sse("error", {"message": last_err_msg})
+                                        return
+
+                                    upstream_ok = True
+                                    async for line in upstream.aiter_lines():
+                                        if not line.startswith("data: "):
                                             continue
-                                    yield _sse(
-                                        "error", {"message": f"Upstream HTTP {status_code}: {err_body}"}
-                                    )
-                                    return
-
-                                async for line in upstream.aiter_lines():
-                                    if not line.startswith("data: "):
-                                        continue
-                                    raw_data = line[6:].strip()
-                                    if not raw_data or raw_data == "[DONE]":
-                                        continue
-                                    try:
-                                        chunk = json.loads(raw_data)
-                                    except ValueError:
-                                        continue
-
-                                    usage = chunk.get("usage")
-                                    if isinstance(usage, dict):
-                                        if isinstance(usage.get("prompt_tokens"), int):
-                                            prompt_tokens_real = usage["prompt_tokens"]
-                                        if isinstance(usage.get("completion_tokens"), int):
-                                            completion_tokens_real = usage["completion_tokens"]
-                                        if isinstance(usage.get("total_tokens"), int):
-                                            total_tokens_real = usage["total_tokens"]
-
-                                    choices = chunk.get("choices") or []
-                                    if not choices:
-                                        continue
-                                    delta = choices[0].get("delta") or {}
-
-                                    rc = delta.get("reasoning_content")
-                                    if rc:
-                                        if ttft_ms is None:
-                                            ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
-                                        approx_tokens += 1
-                                        reasoning_buf.append(rc)
-                                        yield _sse("reasoning", {"text": rc})
-
-                                    txt = delta.get("content")
-                                    if txt:
-                                        if ttft_ms is None:
-                                            ttft_ms = round((time.perf_counter() - started) * 1000.0, 1)
-                                        approx_tokens += 1
-                                        content_buf.append(txt)
-                                        yield _sse("token", {"text": txt})
-
-                                    for tc in delta.get("tool_calls") or []:
-                                        if not isinstance(tc, dict):
+                                        raw_data = line[6:].strip()
+                                        if not raw_data or raw_data == "[DONE]":
                                             continue
-                                        idx = int(tc.get("index", 0))
-                                        slot = tool_calls_acc.setdefault(
-                                            idx,
-                                            {
-                                                "id": tc.get("id") or f"call_{uuid.uuid4().hex[:8]}",
-                                                "type": "function",
-                                                "function": {"name": "", "arguments": ""},
-                                            },
-                                        )
-                                        if tc.get("id"):
-                                            slot["id"] = tc["id"]
-                                        fn = tc.get("function") or {}
-                                        if fn.get("name"):
-                                            slot["function"]["name"] += fn["name"]
-                                        if fn.get("arguments"):
-                                            slot["function"]["arguments"] += fn["arguments"]
-                                break
-                    except httpx.HTTPError as exc:
-                        yield _sse("error", {"message": f"Stream error: {exc}"})
+                                        try:
+                                            chunk = json.loads(raw_data)
+                                        except ValueError:
+                                            continue
+
+                                        usage = chunk.get("usage")
+                                        if isinstance(usage, dict):
+                                            if isinstance(usage.get("prompt_tokens"), int):
+                                                prompt_tokens_real = usage["prompt_tokens"]
+                                            if isinstance(usage.get("completion_tokens"), int):
+                                                completion_tokens_real = usage["completion_tokens"]
+                                            if isinstance(usage.get("total_tokens"), int):
+                                                total_tokens_real = usage["total_tokens"]
+
+                                        choices = chunk.get("choices") or []
+                                        if not choices:
+                                            continue
+                                        delta = choices[0].get("delta") or {}
+
+                                        rc = delta.get("reasoning_content")
+                                        if rc:
+                                            if ttft_ms is None:
+                                                ttft_ms = round(
+                                                    (time.perf_counter() - started) * 1000.0, 1
+                                                )
+                                            approx_tokens += 1
+                                            reasoning_buf.append(rc)
+                                            yield _sse("reasoning", {"text": rc})
+
+                                        txt = delta.get("content")
+                                        if txt:
+                                            if ttft_ms is None:
+                                                ttft_ms = round(
+                                                    (time.perf_counter() - started) * 1000.0, 1
+                                                )
+                                            approx_tokens += 1
+                                            content_buf.append(txt)
+                                            yield _sse("token", {"text": txt})
+
+                                        for tc in delta.get("tool_calls") or []:
+                                            if not isinstance(tc, dict):
+                                                continue
+                                            idx = int(tc.get("index", 0))
+                                            slot = tool_calls_acc.setdefault(
+                                                idx,
+                                                {
+                                                    "id": tc.get("id")
+                                                    or f"call_{uuid.uuid4().hex[:8]}",
+                                                    "type": "function",
+                                                    "function": {"name": "", "arguments": ""},
+                                                },
+                                            )
+                                            if tc.get("id"):
+                                                slot["id"] = tc["id"]
+                                            fn = tc.get("function") or {}
+                                            if fn.get("name"):
+                                                slot["function"]["name"] += fn["name"]
+                                            if fn.get("arguments"):
+                                                slot["function"]["arguments"] += fn["arguments"]
+                                    break
+                        except httpx.HTTPError as exc:
+                            if not upstream_ok:
+                                last_err_msg = f"Stream error: {exc}"
+                                exclude_nodes.add(decision.node.node_id)
+                                retry_next_node = True
+                            else:
+                                yield _sse("error", {"message": f"Stream error: {exc}"})
+                                return
+                        finally:
+                            decision.node.in_flight = max(0, decision.node.in_flight - 1)
+
+                        if upstream_ok or not retry_next_node:
+                            break
+
+                    if not upstream_ok:
+                        yield _sse("error", {"message": last_err_msg or "Upstream request failed"})
                         return
-                    finally:
-                        decision.node.in_flight = max(0, decision.node.in_flight - 1)
 
                     elapsed_ms = round((time.perf_counter() - started) * 1000.0, 1)
                     final_comp_tokens = (
@@ -659,14 +733,18 @@ def build_chat_router(
                                 str(parsed_args.get("url", ""))
                             )
                         elif t_name in ("suggest_mcp", "suggest_skill"):
-                            tool_ok, tool_output = await execute_discovery_tool(
-                                t_name,
-                                parsed_args,
-                                data_dir=data_dir,
-                                skills_dir=skills_dir,
-                                mcp_map=mcp_map,
-                                eff_skills=eff_skills,
-                            )
+                            try:
+                                tool_ok, tool_output = await execute_discovery_tool(
+                                    t_name,
+                                    parsed_args,
+                                    data_dir=data_dir,
+                                    skills_dir=skills_dir,
+                                    mcp_map=mcp_map,
+                                    eff_skills=eff_skills,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                tool_ok = False
+                                tool_output = f"Discovery tool error ({t_name}): {exc}"
                         elif t_name == "spawn_agent":
                             if not active_conv.swarm_enabled:
                                 tool_ok = False
@@ -840,7 +918,6 @@ def build_chat_router(
                                 try:
                                     approval_nonce = secrets.token_hex(8)
                                     tool_headers: dict[str, str] = {
-                                        **cluster.agent_headers("POST", "/tools/execute"),
                                         "X-Splitch-Router-Approved": "1",
                                         "X-Splitch-Approval-Nonce": approval_nonce,
                                     }
@@ -867,6 +944,7 @@ def build_chat_router(
                                     async with httpx.AsyncClient(
                                         timeout=25.0,
                                         headers=tool_headers,
+                                        auth=cluster.agent_auth(),
                                         verify=cluster.httpx_verify,
                                     ) as http:
                                         r = await http.post(

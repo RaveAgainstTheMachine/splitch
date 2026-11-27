@@ -324,11 +324,15 @@ async def run_compaction(
         )
 
     compact_req["model"] = decision.target_model
+    target_url, upstream_auth = cluster.resolve_upstream_target(
+        decision, "/v1/chat/completions"
+    )
     summary_text = ""
     try:
         resp = await cluster.proxy_client.post(
-            f"{decision.node.engine_url}/v1/chat/completions",
+            target_url,
             json=compact_req,
+            auth=upstream_auth,
         )
         if resp.status_code >= 400:
             raise HTTPException(
@@ -378,8 +382,32 @@ def _records_to_openai_messages(
     system_prompt: str, history_records: list[ChatMessageRecord]
 ) -> list[dict[str, Any]]:
     openai_msgs: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    pending_tool_calls: list[tuple[str, str]] = []
+    last_role: str = "system"
+
+    def _flush_orphaned_tool_calls() -> None:
+        nonlocal last_role
+        if not pending_tool_calls:
+            return
+        for tid, tname in pending_tool_calls:
+            openai_msgs.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tid,
+                    "name": tname,
+                    "content": "[Interrupted before tool result was recorded]",
+                }
+            )
+            last_role = "tool"
+        pending_tool_calls.clear()
+
     for m in history_records:
         if m.role == "user":
+            _flush_orphaned_tool_calls()
+            if last_role == "tool":
+                openai_msgs.append(
+                    {"role": "assistant", "content": "[Previous turn interrupted]"}
+                )
             if m.images:
                 parts: list[dict[str, Any]] = [{"type": "text", "text": m.content}]
                 for img in m.images:
@@ -387,20 +415,39 @@ def _records_to_openai_messages(
                 openai_msgs.append({"role": "user", "content": parts})
             else:
                 openai_msgs.append({"role": "user", "content": m.content})
+            last_role = "user"
         elif m.role == "assistant":
+            _flush_orphaned_tool_calls()
             entry: dict[str, Any] = {"role": "assistant", "content": m.content or None}
             if m.tool_calls:
                 entry["tool_calls"] = m.tool_calls
+                for tc in m.tool_calls:
+                    if isinstance(tc, dict):
+                        tid = str(tc.get("id") or "call_0")
+                        fn = tc.get("function") or {}
+                        tname = str(fn.get("name") or "tool") if isinstance(fn, dict) else "tool"
+                        pending_tool_calls.append((tid, tname))
             openai_msgs.append(entry)
+            last_role = "assistant"
         elif m.role == "tool":
+            tid = m.tool_call_id or "call_0"
+            tname = m.tool_name or "tool"
+            if pending_tool_calls:
+                pending_tool_calls = [p for p in pending_tool_calls if p[0] != tid]
+            elif last_role not in ("assistant", "tool"):
+                # Drop leading orphan tool message when no assistant tool_calls preceded it
+                continue
             openai_msgs.append(
                 {
                     "role": "tool",
-                    "tool_call_id": m.tool_call_id or "call_0",
-                    "name": m.tool_name or "tool",
+                    "tool_call_id": tid,
+                    "name": tname,
                     "content": m.content,
                 }
             )
+            last_role = "tool"
+
+    _flush_orphaned_tool_calls()
     return openai_msgs
 
 
@@ -603,7 +650,7 @@ async def execute_discovery_tool(
             reg_matches = [
                 {
                     "id": r.id,
-                    "name": r.name,
+                    "name": r.registry_name,
                     "registry_name": r.registry_name,
                     "description": r.description,
                     "source": r.source,

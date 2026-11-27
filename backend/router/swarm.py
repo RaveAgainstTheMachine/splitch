@@ -231,7 +231,6 @@ class SwarmManager:
         try:
             approval_nonce = secrets.token_hex(8)
             tool_headers: dict[str, str] = {
-                **self.cluster.agent_headers("POST", "/tools/execute"),
                 "X-Splitch-Router-Approved": "1",
                 "X-Splitch-Approval-Nonce": approval_nonce,
             }
@@ -253,6 +252,7 @@ class SwarmManager:
                     "workspace_subpath": conv.workspace_subpath,
                 },
                 headers=tool_headers,
+                auth=self.cluster.agent_auth(),
                 timeout=90.0,
             )
             if r.status_code >= 400:
@@ -365,10 +365,14 @@ class SwarmManager:
                     decision.node.in_flight += 1
                     try:
                         for attempt in range(2):
+                            target_url, upstream_auth = self.cluster.resolve_upstream_target(
+                                decision, "/v1/chat/completions"
+                            )
                             async with self.cluster.proxy_client.stream(
                                 "POST",
-                                f"{decision.node.engine_url}/v1/chat/completions",
+                                target_url,
                                 json=req_body,
+                                auth=upstream_auth,
                             ) as upstream:
                                 if upstream.status_code >= 400:
                                     err_body = (await upstream.aread()).decode("utf-8", errors="replace")[:400]

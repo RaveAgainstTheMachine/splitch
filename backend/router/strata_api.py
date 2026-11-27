@@ -35,12 +35,11 @@ def build_strata_router(cluster: ClusterState) -> APIRouter:
     @router.get("/status", response_model=list[NodeStrataStatus])
     async def get_cluster_strata_status() -> list[NodeStrataStatus]:
         out: list[NodeStrataStatus] = []
-        headers = cluster.agent_headers("GET", "/strata/status")
 
         async def _fetch(node_id: str, agent_url: str) -> None:
             try:
                 async with httpx.AsyncClient(
-                    timeout=6.0, headers=headers, verify=cluster.httpx_verify
+                    timeout=6.0, auth=cluster.agent_auth(), verify=cluster.httpx_verify
                 ) as client:
                     r = await client.get(f"{agent_url}/strata/status")
                     if r.status_code == 200:
@@ -65,7 +64,7 @@ def build_strata_router(cluster: ClusterState) -> APIRouter:
         try:
             async with httpx.AsyncClient(
                 timeout=timeout,
-                headers=cluster.agent_headers("POST", agent_path),
+                auth=cluster.agent_auth(),
                 verify=cluster.httpx_verify,
             ) as client:
                 r = await client.post(f"{node.agent_url}{agent_path}", json=payload or {})

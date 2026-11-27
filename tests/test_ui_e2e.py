@@ -358,7 +358,7 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
                     "document.querySelector('.chat-pin-btn').getAttribute('aria-pressed') === 'true'"
                 )
 
-                # 5b. Verify unified single topbar (< 12% viewport height) & collapsible sidebar
+                # 5b. Verify unified single topbar (< 12% viewport height) & collapsible/resizable sidebar
                 topbar_ok = await eval_js(
                     "(() => {"
                     "  const tb = document.querySelector('.topbar');"
@@ -367,13 +367,120 @@ async def test_ui_confirm_delete_trash_bulk_and_pin_e2e(tmp_path: Path) -> None:
                     "})()"
                 )
                 assert topbar_ok is True
+
+                # Verify left sidebar splitter visibility, drag resize, localStorage persistence, keyboard, & reset
+                splitter_rect = await eval_js(
+                    "(() => {"
+                    "  const sp = document.querySelector('.chat-splitter--left');"
+                    "  if (!sp) return null;"
+                    "  const r = sp.getBoundingClientRect();"
+                    "  return {"
+                    "    x: r.left + r.width / 2,"
+                    "    y: r.top + r.height / 2,"
+                    "    w: r.width,"
+                    "    h: r.height,"
+                    "    valuenow: sp.getAttribute('aria-valuenow'),"
+                    "    varWidth: document.querySelector('.chat-layout').style.getPropertyValue('--sidebar-width')"
+                    "  };"
+                    "})()"
+                )
+                assert splitter_rect is not None
+                assert splitter_rect["w"] > 0 and splitter_rect["h"] > 0
+                assert splitter_rect["valuenow"] == "236"
+                assert splitter_rect["varWidth"] == "236px"
+
+                # Drag splitter right by +84px using real browser mouse events
+                sx, sy = splitter_rect["x"], splitter_rect["y"]
+                await cdp(
+                    "Input.dispatchMouseEvent",
+                    {"type": "mouseMoved", "x": sx, "y": sy},
+                )
+                await cdp(
+                    "Input.dispatchMouseEvent",
+                    {"type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1},
+                )
+                await cdp(
+                    "Input.dispatchMouseEvent",
+                    {"type": "mouseMoved", "x": sx + 84, "y": sy, "button": "left"},
+                )
+                await cdp(
+                    "Input.dispatchMouseEvent",
+                    {
+                        "type": "mouseReleased",
+                        "x": sx + 84,
+                        "y": sy,
+                        "button": "left",
+                        "clickCount": 1,
+                    },
+                )
+                await wait_until(
+                    "Number(document.querySelector('.chat-splitter--left')?.getAttribute('aria-valuenow')) > 290"
+                )
+                dragged_state = await eval_js(
+                    "(() => ({"
+                    "  valuenow: document.querySelector('.chat-splitter--left').getAttribute('aria-valuenow'),"
+                    "  varWidth: document.querySelector('.chat-layout').style.getPropertyValue('--sidebar-width'),"
+                    "  storage: localStorage.getItem('splitch_chat_sidebar_width'),"
+                    "  sidebarW: Math.round(document.querySelector('.chat-sidebar').getBoundingClientRect().width)"
+                    "}))()"
+                )
+                assert dragged_state["varWidth"] == f"{dragged_state['valuenow']}px"
+                assert dragged_state["storage"] == dragged_state["valuenow"]
+                assert dragged_state["sidebarW"] >= 290
+
+                # Keyboard ArrowRight / ArrowLeft on focused splitter
+                await eval_js("document.querySelector('.chat-splitter--left').focus()")
+                await cdp(
+                    "Input.dispatchKeyEvent",
+                    {"type": "keyDown", "key": "ArrowRight", "code": "ArrowRight", "windowsVirtualKeyCode": 39},
+                )
+                expected_after_key = int(dragged_state["valuenow"]) + 24
+                await wait_until(
+                    f"Number(document.querySelector('.chat-splitter--left')?.getAttribute('aria-valuenow')) === {expected_after_key}"
+                )
+                assert (
+                    await eval_js("localStorage.getItem('splitch_chat_sidebar_width')")
+                    == str(expected_after_key)
+                )
+
+                # Double-click splitter to reset width back to 236
+                new_rect = await eval_js(
+                    "(() => {"
+                    "  const r = document.querySelector('.chat-splitter--left').getBoundingClientRect();"
+                    "  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };"
+                    "})()"
+                )
+                nx, ny = new_rect["x"], new_rect["y"]
+                for count in (1, 2):
+                    await cdp(
+                        "Input.dispatchMouseEvent",
+                        {"type": "mousePressed", "x": nx, "y": ny, "button": "left", "clickCount": count},
+                    )
+                    await cdp(
+                        "Input.dispatchMouseEvent",
+                        {"type": "mouseReleased", "x": nx, "y": ny, "button": "left", "clickCount": count},
+                    )
+                await wait_until(
+                    "document.querySelector('.chat-splitter--left')?.getAttribute('aria-valuenow') === '236'"
+                )
+                assert (
+                    await eval_js(
+                        "document.querySelector('.chat-layout').style.getPropertyValue('--sidebar-width')"
+                    )
+                    == "236px"
+                )
+                assert await eval_js("localStorage.getItem('splitch_chat_sidebar_width')") == "236"
+
+                # Collapse sidebar -> splitter hides; expand -> splitter returns
                 await eval_js("document.querySelector('.chat-sidebar-toggle').click()")
                 await wait_until(
-                    "Math.round(document.querySelector('.chat-sidebar').getBoundingClientRect().width) === 0"
+                    "Math.round(document.querySelector('.chat-sidebar').getBoundingClientRect().width) === 0 && "
+                    "document.querySelector('.chat-splitter--left') === null"
                 )
                 await eval_js("document.querySelector('.chat-sidebar-toggle').click()")
                 await wait_until(
-                    "Math.round(document.querySelector('.chat-sidebar').getBoundingClientRect().width) > 200"
+                    "Math.round(document.querySelector('.chat-sidebar').getBoundingClientRect().width) > 200 && "
+                    "document.querySelector('.chat-splitter--left') !== null"
                 )
 
                 # 6. Overview tab -> verify Multi-GPU subgrid renders both NVIDIA + AMD devices
