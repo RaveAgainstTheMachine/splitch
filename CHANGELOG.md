@@ -3,6 +3,11 @@
 All notable changes to **Splitch** are documented in this file.
 This project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html), enforced automatically across `backend/version.py`, `pyproject.toml`, and `dashboard/package.json` by `./scripts/preflight.sh` and GitHub Actions CI.
 
+## [0.26.2] - 2026-11-27
+
+### Bug Fix
+- **Jeveration `pull-weights` 500 Fix (`backend/agent/jeveration_routes.py`):** Changed `DownloadJob(..., status="queued")` to `status="downloading"` (matching `DownloadJob`'s `Literal["downloading", "completed", "failed"]` schema) to eliminate the Pydantic `ValidationError` on `POST /jeveration/pull-weights`.
+
 ## [0.26.1] - 2026-11-27
 
 ### Bug Fix

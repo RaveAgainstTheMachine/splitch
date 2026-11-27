@@ -81,7 +81,7 @@ def build_jeveration_status_snapshot(m: Any) -> NodeJeverationStatus:
     active_dl = [
         j
         for j in st.downloads.values()
-        if j.repo_id == JEVERATION_HF_REPO and j.status in ("queued", "downloading")
+        if j.repo_id == JEVERATION_HF_REPO and j.status == "downloading"
     ]
     return NodeJeverationStatus(
         node_id=m.NODE_ID,
@@ -235,7 +235,7 @@ def build_jeveration_agent_router(main_getter: Callable[[], Any]) -> APIRouter:
             already = any(
                 j.repo_id == JEVERATION_HF_REPO
                 and j.filename == fname
-                and j.status in ("queued", "downloading")
+                and j.status == "downloading"
                 for j in st.downloads.values()
             )
             if already:
@@ -246,7 +246,7 @@ def build_jeveration_agent_router(main_getter: Callable[[], Any]) -> APIRouter:
                 node_id=m.NODE_ID,
                 repo_id=JEVERATION_HF_REPO,
                 filename=fname,
-                status="queued",
+                status="downloading",
             )
             st.downloads[job_id] = job
             asyncio.create_task(
