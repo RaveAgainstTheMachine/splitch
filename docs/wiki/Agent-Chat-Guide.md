@@ -22,6 +22,8 @@ Every control in the chat toolbar is immediately clickable **before** sending yo
   - **Global (All Chats)** — automatically active across all conversations in Splitch.
   - Displays `local` vs `ext` privacy badges on every MCP server, shows an **Ext MCP** warning pill in the bottom bar whenever an external/remote MCP is active, and pauses external MCP tool calls for **Allow / Deny** confirmation.
 - **Export (`.md`):** Download the entire conversation (including reasoning and tool calls) as a clean Markdown file.
+- **Resizable 3-Column Layout:** Drag either the left sidebar splitter (`180px`–`520px`, persisted in `localStorage`) or the right inspector splitter (`double-click` to reset, `ArrowLeft`/`ArrowRight` keyboard support).
+- **Local Media Generation Tool (`generate_image` / `generate_video`):** When a media engine (`sd-server`, `ComfyUI`, or `Jeveration`) is healthy, Agent Chat can generate images inline — including single-pass `512×512` `engine="jeveration"` with `jeveration_task` (`t2i`, `hed`, `depth`, `colorize`, `anime`, `ghibli`, `watercolor`, `dense`).
 
 ---
 

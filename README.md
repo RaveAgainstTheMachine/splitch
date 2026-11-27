@@ -33,7 +33,7 @@
 
 1. **Multiple Computers, One Local AI Cluster:** Pool an NVIDIA gaming PC, an AMD/Intel compute box, an Apple Silicon Mac, and an always-on Linux server behind a single hardware-aware router. Start on one machine (`splitch up`) and add nodes without changing client URLs.
 2. **Automatic GPU Yielding When Gaming:** Live GPU telemetry (`nvidia-smi pmon`, ROCm, Vulkan, Apple Silicon) detects 3D games or creative workloads, yields the busy GPU, and transparently fails over active requests to your standby node.
-3. **One Unified Endpoint for Every Tool:** Exposes OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), Embeddings (`/v1/embeddings`), FIM (`/infill`), and Images/Videos (`/v1/images/generations`) over **`llama-server`**, **Apple Silicon `mlx-lm`**, **Strata (Sparse MoE)**, **Ollama**, **LM Studio**, **vLLM**, **`sd-server`**, and **ComfyUI** — plus a built-in **Agent Chat IDE** (with **Workspace File Tree**, **Git Review & AI Commit**, and **Artifact Preview**), **Media Studio**, **MCP/Skills control plane**, **UI Cluster Update & Rollback**, **Vault-Backed Cross-OS Tray/Desktop Icon Sync**, and **Benchmark harness**.
+3. **One Unified Endpoint for Every Tool:** Exposes OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`), Embeddings (`/v1/embeddings`), FIM (`/infill`), and Images/Videos (`/v1/images/generations`) over **`llama-server`**, **Apple Silicon `mlx-lm`**, **Strata (Sparse MoE)**, **Ollama**, **LM Studio**, **vLLM**, **`sd-server`**, **ComfyUI**, and **Jeveration (1-pass)** — plus a built-in **Agent Chat IDE** (with **Workspace File Tree**, **Git Review & AI Commit**, and **Artifact Preview**), **Media Studio**, **MCP/Skills control plane**, **UI Cluster Update & Rollback**, **Vault-Backed Cross-OS Tray/Desktop Icon Sync**, and **Benchmark harness**.
 
 ### Feature Maturity (What Works Today)
 
@@ -161,12 +161,12 @@ One command installs or updates Splitch — verifying SHA-256 checksums for pinn
 curl -fsSL https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/main/install.sh | sh
 
 # Inspect-first & pinned release tag (recommended for production/shared hosts)
-curl -fsSLO https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/v0.25.3/install.sh
+curl -fsSLO https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/v0.26.0/install.sh
 less install.sh
-SPLITCH_REF=v0.25.3 sh install.sh
+SPLITCH_REF=v0.26.0 sh install.sh
 
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/v0.25.3/install.ps1 | iex
+irm https://raw.githubusercontent.com/RaveAgainstTheMachine/splitch/v0.26.0/install.ps1 | iex
 ```
 
 > **Supply-chain note:** Set `SPLITCH_REQUIRE_SIGNED_UPDATES=1` to require `git verify-commit` signature verification before `splitch update` fast-forwards any node.

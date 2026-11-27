@@ -176,6 +176,7 @@ When **Media Studio** or Agent Chat runs an image/video generation job on a GPU 
 | `SPLITCH_NODE_ROLE` | Agent | auto | `gpu`, `unified`, or `cpu` |
 | `SPLITCH_ENGINE_URL` | Agent | `http://127.0.0.1:8081` | Local inference server URL |
 | `SPLITCH_MEDIA_URL` | Agent | auto (`:8082` / `:8188`) | Optional local `sd-server` or `ComfyUI` URL |
+| `SPLITCH_JEVERATION_PORT` | Agent | `8084` | Loopback port for managed Jeveration 1-pass CUDA worker |
 | `SPLITCH_STORAGE_PATH` | Agent | `<data_root>/models` | Directory scanned & targeted for GGUF & `.safetensors` pulls |
 | `SPLITCH_ENABLE_TOOLS` | Agent | `0` | Opt-in flag (`1` enables sandboxed workspace tools) |
 | `SPLITCH_WORKSPACE_ROOT` | Agent | `$HOME` | Hard sandbox boundary for workspace tools & folder browser |

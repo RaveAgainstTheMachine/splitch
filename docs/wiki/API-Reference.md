@@ -204,6 +204,12 @@ Authenticated with `SPLITCH_AGENT_TOKEN` when configured:
 | `POST` | `/strata/calibrate` | Run exclusive-GPU Quick/Thorough Tune (`--tune quick\|thorough`). |
 | `POST` | `/strata/stop` | Terminate active Strata job/server and release VRAM + RAM. |
 | `ANY` | `/strata/proxy/{path}` | Signed zero-copy SSE streaming proxy to loopback `strata-server`. |
+| `GET` | `/jeveration/status` | Inspect node's Jeveration Python 3.12 CUDA venv, 6.5 GB weights, and `:8084` worker health. |
+| `POST` | `/jeveration/install` | Background provisioning of isolated Python 3.12 CUDA venv + `Carol-lyh/Jeveration`. |
+| `POST` | `/jeveration/pull-weights` | Background pull of `linlinlinlinsdada/Jeveration` weights into `SPLITCH_STORAGE_PATH/media/jeveration`. |
+| `POST` | `/jeveration/start` | Launch Jeveration single-pass worker on loopback `:8084` (with optional primary VRAM eviction). |
+| `POST` | `/jeveration/stop` | Stop Jeveration worker and release GPU VRAM. |
+| `ANY` | `/jeveration/proxy/{path}` | Allowlisted signed proxy to loopback Jeveration worker (`health`, `v1/text-to-image`, `v1/image-to-image`, `v1/dense-predict`). |
 | `POST` | `/tools/execute` | Execute a sandboxed Agent Chat workspace tool (requires `SPLITCH_ENABLE_TOOLS=1`). |
 
 ---
@@ -230,12 +236,14 @@ Authenticated with `SPLITCH_AGENT_TOKEN` when configured:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/media/backends` | List nodes with detected `sd-server` (`:8082`), `ComfyUI` (`:8188`), or OpenAI image engines & models. |
+| `GET` | `/api/media/backends` | List nodes with detected `sd-server` (`:8082`), `ComfyUI` (`:8188`), `Jeveration` (`:8084`), or OpenAI image engines & models. |
 | `GET` | `/api/media/nodes/{node_id}/engine` | Inspect node's managed `sd-server` install status, running state, local `.safetensors`/`.gguf` files, and active pulls. |
 | `POST` | `/api/media/nodes/{node_id}/install` | 1-click background install of hardware-matched `stable-diffusion.cpp` (`sd-server`) on target node. |
 | `POST` | `/api/media/nodes/{node_id}/start` | Launch supervised `sd-server` on target node (`:8082`) with selected local checkpoint. |
 | `POST` | `/api/media/nodes/{node_id}/stop` | Stop managed `sd-server` on target node. |
 | `POST` | `/api/media/nodes/{node_id}/pull` | Stream a Hugging Face `.safetensors` or `.gguf` diffusion checkpoint directly onto target node. |
+| `GET` | `/api/media/jeveration/status` | Poll cluster-wide Jeveration CUDA venv, weights, and `:8084` worker status across online nodes. |
+| `POST` | `/api/media/nodes/{node_id}/jeveration/{install\|pull-weights\|start\|stop}` | Manage Jeveration Python 3.12 CUDA sidecar lifecycle and 6.5 GB weight downloads on target node. |
 | `POST` | `/api/media/generate` | Start an async image or video generation job (with automatic GPU LLM VRAM eviction). |
 | `GET` | `/api/media/jobs` | List active and historical media generation jobs / gallery items. |
 | `GET` | `/api/media/jobs/{job_id}` | Poll single job status and progress percentage. |
